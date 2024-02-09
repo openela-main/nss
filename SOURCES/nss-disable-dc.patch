@@ -1,0 +1,32 @@
+diff -up ./gtests/ssl_gtest/manifest.mn.orig ./gtests/ssl_gtest/manifest.mn
+--- ./gtests/ssl_gtest/manifest.mn.orig	2021-06-02 15:40:48.677355426 -0700
++++ ./gtests/ssl_gtest/manifest.mn	2021-06-02 15:42:31.248977261 -0700
+@@ -57,7 +57,6 @@ CPPSRCS = \
+       tls_filter.cc \
+       tls_protect.cc \
+       tls_psk_unittest.cc \
+-      tls_subcerts_unittest.cc \
+       tls_ech_unittest.cc \
+       $(SSLKEYLOGFILE_FILES) \
+       $(NULL)
+diff -up ./lib/ssl/sslsock.c.orig ./lib/ssl/sslsock.c
+--- ./lib/ssl/sslsock.c.orig	2021-05-28 02:50:43.000000000 -0700
++++ ./lib/ssl/sslsock.c	2021-06-02 15:40:48.676355420 -0700
+@@ -819,7 +819,7 @@ SSL_OptionSet(PRFileDesc *fd, PRInt32 wh
+             break;
+ 
+         case SSL_ENABLE_DELEGATED_CREDENTIALS:
+-            ss->opt.enableDelegatedCredentials = val;
++            /* disable it for now */
+             break;
+ 
+         case SSL_ENABLE_NPN:
+@@ -1337,7 +1337,7 @@ SSL_OptionSetDefault(PRInt32 which, PRIn
+             break;
+ 
+         case SSL_ENABLE_DELEGATED_CREDENTIALS:
+-            ssl_defaults.enableDelegatedCredentials = val;
++            /* disable it for now */
+             break;
+ 
+         case SSL_ENABLE_NPN:

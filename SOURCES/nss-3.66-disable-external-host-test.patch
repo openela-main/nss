@@ -1,0 +1,14 @@
+diff -up ./tests/ssl/ssl.sh.brew ./tests/ssl/ssl.sh
+--- ./tests/ssl/ssl.sh.brew	2021-06-12 11:37:46.153265942 -0700
++++ ./tests/ssl/ssl.sh	2021-06-12 11:39:43.069925034 -0700
+@@ -1641,7 +1641,9 @@ ssl_run_tests()
+             if [ "${TEST_MODE}" = "SHARED_DB" ] ; then
+                 ssl_policy_listsuites
+                 ssl_policy_selfserv
+-                ssl_policy_pkix_ocsp
++                # requires access to external servers, which fails
++                # when running in brew
++                #ssl_policy_pkix_ocsp
+                 ssl_policy
+             fi
+             ;;

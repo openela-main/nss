@@ -1,0 +1,18 @@
+diff -up ./tests/ec/ectest.sh.no_dbm_25519 ./tests/ec/ectest.sh
+--- ./tests/ec/ectest.sh.no_dbm_25519	2023-07-26 10:12:29.531147406 -0700
++++ ./tests/ec/ectest.sh	2023-07-26 10:12:39.547245445 -0700
+@@ -46,11 +46,13 @@ ectest_genkeydb_test()
+     return $?
+   fi
+   curves=( \
+-    "curve25519" \
+     "secp256r1" \
+     "secp384r1" \
+     "secp521r1" \
+   )
++  if [ "${NSS_DEFAULT_DB_TYPE}" = "sql" ] ; then
++      curves=( "curve25519"  "${curves[@]}" )
++  fi
+   for curve in "${curves[@]}"; do
+     echo "Test $curve key generation using certutil ..."
+     certutil -G -d "${HOSTDIR}" -k ec -q $curve -f "${R_PWFILE}" -z ${NOISE_FILE}

@@ -1,0 +1,44 @@
+diff -up ./cmd/pk12util/pk12util.c.orig ./cmd/pk12util/pk12util.c
+--- ./cmd/pk12util/pk12util.c.orig	2021-05-28 02:50:43.000000000 -0700
++++ ./cmd/pk12util/pk12util.c	2021-06-15 17:05:37.200262345 -0700
+@@ -1031,9 +1031,11 @@ main(int argc, char **argv)
+     char *export_file = NULL;
+     char *dbprefix = "";
+     SECStatus rv;
+-    SECOidTag cipher = SEC_OID_AES_256_CBC;
+-    SECOidTag hash = SEC_OID_SHA256;
+-    SECOidTag certCipher = SEC_OID_AES_128_CBC;
++    SECOidTag cipher = 
++        SEC_OID_PKCS12_V2_PBE_WITH_SHA1_AND_3KEY_TRIPLE_DES_CBC;
++    SECOidTag hash = SEC_OID_SHA1;
++    SECOidTag certCipher = 
++        SEC_OID_PKCS12_V2_PBE_WITH_SHA1_AND_40_BIT_RC2_CBC;
+     int keyLen = 0;
+     int certKeyLen = 0;
+     secuCommand pk12util;
+@@ -1147,6 +1149,9 @@ main(int argc, char **argv)
+         }
+     }
+ 
++    if (PK11_IsFIPS()) {
++        certCipher =  SEC_OID_UNKNOWN;
++    }
+     if (pk12util.options[opt_CertCipher].activated) {
+         char *cipherString = pk12util.options[opt_CertCipher].arg;
+ 
+diff -up ./tests/tools/tools.sh.orig ./tests/tools/tools.sh
+--- ./tests/tools/tools.sh.orig	2021-06-15 17:06:27.650564449 -0700
++++ ./tests/tools/tools.sh	2021-06-15 17:07:59.934117192 -0700
+@@ -47,9 +47,9 @@
+ "PKCS #5 Password Based Encryption with SHA-1 and DES-CBC"
+ 
+   # if we change the defaults in pk12util, update these variables
+-  export CERT_ENCRYPTION_DEFAULT="AES-128-CBC"
+-  export KEY_ENCRYPTION_DEFAULT="AES-256-CBC"
+-  export HASH_DEFAULT="SHA-256"
++  export CERT_ENCRYPTION_DEFAULT=${pkcs12v2pbeWithSha1And40BitRc2Cbc}
++  export KEY_ENCRYPTION_DEFAULT=${pkcs12v2pbeWithSha1AndTripleDESCBC}
++  export HASH_DEFAULT="SHA-1"
+ 
+   export PKCS5v1_PBE_CIPHERS="${pkcs5pbeWithMD2AndDEScbc},\
+ ${pkcs5pbeWithMD5AndDEScbc},\

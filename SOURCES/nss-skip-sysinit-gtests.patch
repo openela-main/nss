@@ -1,0 +1,12 @@
+Index: nss/gtests/manifest.mn
+===================================================================
+--- nss.orig/gtests/manifest.mn
++++ nss/gtests/manifest.mn
+@@ -31,7 +31,6 @@ NSS_SRCDIRS = \
+ 	smime_gtest \
+ 	softoken_gtest \
+ 	ssl_gtest \
+-	$(SYSINIT_GTEST) \
+ 	nss_bogo_shim \
+ 	pkcs11testmodule \
+ 	$(NULL)
