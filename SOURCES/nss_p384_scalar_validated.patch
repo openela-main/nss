@@ -1,0 +1,644 @@
+diff -up ./automation/taskcluster/scripts/run_hacl.sh.p384 ./automation/taskcluster/scripts/run_hacl.sh
+--- ./automation/taskcluster/scripts/run_hacl.sh.p384	2023-06-04 01:42:53.000000000 -0700
++++ ./automation/taskcluster/scripts/run_hacl.sh	2024-01-09 11:49:58.650418434 -0800
+@@ -40,5 +40,14 @@ files=($(find ~/nss/lib/freebl/verified/
+ for f in "${files[@]}"; do
+     file_name=$(basename "$f")
+     hacl_file=($(find ~/hacl-star/dist/mozilla/ ~/hacl-star/dist/karamel/ -type f -name $file_name -not -path "*/hacl-star/dist/mozilla/internal/*"))
++    # TODO(Bug 1854438): Remove P384 exception.
++    # TODO(Bug 1854439): Remove P521 exception.
++    if [ $file_name == "Hacl_P384.c"  \
++        -o $file_name == "Hacl_P384.h" \
++        -o $file_name == "Hacl_P521.c" \
++        -o $file_name == "Hacl_P521.h" ]
++    then
++        continue;
++    fi
+     diff $hacl_file $f
+ done
+diff -up ./lib/freebl/ec.c.p384 ./lib/freebl/ec.c
+--- ./lib/freebl/ec.c.p384	2024-01-09 11:49:14.118980084 -0800
++++ ./lib/freebl/ec.c	2024-01-09 11:49:58.651418444 -0800
+@@ -15,15 +15,62 @@
+ #include "mplogic.h"
+ #include "ec.h"
+ #include "ecl.h"
++#include "verified/Hacl_P384.h"
++#include "verified/Hacl_P521.h"
+ 
+ #define EC_DOUBLECHECK PR_FALSE
+ 
++SECStatus
++ec_secp384r1_scalar_validate(const SECItem *scalar)
++{
++    if (!scalar || !scalar->data) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        return SECFailure;
++    }
++
++    if (scalar->len != 48) {
++        PORT_SetError(SEC_ERROR_BAD_KEY);
++        return SECFailure;
++    }
++
++    bool b = Hacl_P384_validate_private_key(scalar->data);
++
++    if (!b) {
++        PORT_SetError(SEC_ERROR_BAD_KEY);
++        return SECFailure;
++    }
++    return SECSuccess;
++}
++
++SECStatus
++ec_secp521r1_scalar_validate(const SECItem *scalar)
++{
++    if (!scalar || !scalar->data) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        return SECFailure;
++    }
++
++    if (scalar->len != 66) {
++        PORT_SetError(SEC_ERROR_BAD_KEY);
++        return SECFailure;
++    }
++
++    bool b = Hacl_P521_validate_private_key(scalar->data);
++
++    if (!b) {
++        PORT_SetError(SEC_ERROR_BAD_KEY);
++        return SECFailure;
++    }
++    return SECSuccess;
++}
++
+ static const ECMethod kMethods[] = {
+     { ECCurve25519,
+       ec_Curve25519_pt_mul,
+       ec_Curve25519_pt_validate,
+       ec_Curve25519_scalar_validate,
+-      NULL, NULL },
++      NULL,
++      NULL },
+     {
+         ECCurve_NIST_P256,
+         ec_secp256r1_pt_mul,
+@@ -352,8 +415,7 @@ EC_NewKeyFromSeed(ECParams *ecParams, EC
+ SECStatus
+ ec_GenerateRandomPrivateKey(ECParams *ecParams, SECItem *privKey)
+ {
+-    SECStatus rv = SECSuccess;
+-    mp_err err;
++    SECStatus rv = SECFailure;
+ 
+     unsigned int len = EC_GetScalarSize(ecParams);
+ 
+@@ -362,82 +424,43 @@ ec_GenerateRandomPrivateKey(ECParams *ec
+         return SECFailure;
+     }
+ 
+-    /* For known curves, use rejection sampling A.4.2 */
+-    if (ecParams->fieldID.type == ec_field_plain) {
+-        const ECMethod *method = ec_get_method_from_name(ecParams->name);
+-        rv = SECFailure;
+-        if (method == NULL || method->scalar_validate == NULL) {
+-            /* unknown curve */
+-            PORT_SetError(SEC_ERROR_INVALID_ARGS);
+-            goto done;
+-        }
+-        int count = 100;
+-        while (rv != SECSuccess && count >= 0) {
+-            rv = RNG_GenerateGlobalRandomBytes(privKey->data, len);
+-            if (rv != SECSuccess) {
+-                PORT_SetError(SEC_ERROR_NEED_RANDOM);
+-                goto done;
+-            }
+-            rv = method->scalar_validate(privKey);
+-            count--;
+-        }
+-        if (rv != SECSuccess) {
+-            PORT_SetError(SEC_ERROR_BAD_KEY);
+-        }
+-        goto done;
++    const ECMethod *method = ec_get_method_from_name(ecParams->name);
++    if (method == NULL || method->scalar_validate == NULL) {
++        PORT_SetError(SEC_ERROR_UNSUPPORTED_ELLIPTIC_CURVE);
++        return SECFailure;
+     }
+ 
+-    /* For unknown curves, use algotithm A.4.1 */
+-
+-    unsigned char *order = ecParams->order.data;
+-    mp_int privKeyVal, order_1, one;
+-    unsigned char *privKeyBytes = NULL;
+-
+-    MP_DIGITS(&privKeyVal) = 0;
+-    MP_DIGITS(&order_1) = 0;
+-    MP_DIGITS(&one) = 0;
+-    CHECK_MPI_OK(mp_init(&privKeyVal));
+-    CHECK_MPI_OK(mp_init(&order_1));
+-    CHECK_MPI_OK(mp_init(&one));
+-
+-    /* Generates 2*len random bytes using the global random bit generator
+-     * (which implements Algorithm 1 of FIPS 186-2 Change Notice 1) then
+-     * reduces modulo the group order.
+-     */
+-
+-    if ((privKeyBytes = PORT_Alloc(2 * len)) == NULL) {
+-        PORT_SetError(SEC_ERROR_NO_MEMORY);
+-        rv = SECFailure;
+-        goto cleanup;
++    uint8_t leading_coeff_mask;
++    switch (ecParams->name) {
++        case ECCurve25519:
++        case ECCurve_NIST_P256:
++        case ECCurve_NIST_P384:
++            leading_coeff_mask = 0xff;
++            break;
++        case ECCurve_NIST_P521:
++            leading_coeff_mask = 0x01;
++            break;
++        default:
++            PORT_SetError(SEC_ERROR_UNSUPPORTED_ELLIPTIC_CURVE);
++            return SECFailure;
+     }
+ 
+-    CHECK_SEC_OK(RNG_GenerateGlobalRandomBytes(privKeyBytes, 2 * len));
+-    CHECK_MPI_OK(mp_read_unsigned_octets(&privKeyVal, privKeyBytes, 2 * len));
+-    CHECK_MPI_OK(mp_read_unsigned_octets(&order_1, order, len));
+-    CHECK_MPI_OK(mp_set_int(&one, 1));
+-    CHECK_MPI_OK(mp_sub(&order_1, &one, &order_1));
+-    CHECK_MPI_OK(mp_mod(&privKeyVal, &order_1, &privKeyVal));
+-    CHECK_MPI_OK(mp_add(&privKeyVal, &one, &privKeyVal));
+-    CHECK_MPI_OK(mp_to_fixlen_octets(&privKeyVal, privKeyBytes, len));
+-    memcpy(privKey->data, privKeyBytes, len);
++    /* The rejection sampling method from FIPS 186-5 A.4.2 */
++    int count = 100;
++    do {
++        rv = RNG_GenerateGlobalRandomBytes(privKey->data, len);
++        if (rv != SECSuccess) {
++            PORT_SetError(SEC_ERROR_NEED_RANDOM);
++            return SECFailure;
++        }
++        privKey->data[0] &= leading_coeff_mask;
++        rv = method->scalar_validate(privKey);
++    } while (rv != SECSuccess && --count > 0);
+ 
+-cleanup:
+-    mp_clear(&privKeyVal);
+-    mp_clear(&order_1);
+-    mp_clear(&one);
+-    if (privKeyBytes) {
+-        PORT_ZFree(privKeyBytes, 2 * len);
+-    }
+-    if (err < MP_OKAY) {
+-        MP_TO_SEC_ERROR(err);
+-        rv = SECFailure;
++    if (rv != SECSuccess) { // implies count == 0
++        PORT_SetError(SEC_ERROR_BAD_KEY);
+     }
+ 
+-done:
+-    if (rv != SECSuccess && privKey->data) {
+-        SECITEM_ZfreeItem(privKey, PR_FALSE);
+-        return rv;
+-    }
+     return rv;
+ }
+ 
+diff -up ./lib/freebl/ecl/ecl.h.p384 ./lib/freebl/ecl/ecl.h
+--- ./lib/freebl/ecl/ecl.h.p384	2024-01-09 11:49:14.118980084 -0800
++++ ./lib/freebl/ecl/ecl.h	2024-01-09 11:49:58.651418444 -0800
+@@ -57,4 +57,8 @@ SECStatus ec_secp256r1_sign_digest(ECPri
+ SECStatus ec_secp256r1_verify_digest(ECPublicKey *key, const SECItem *signature,
+                                      const SECItem *digest);
+ 
++SECStatus ec_secp384r1_scalar_validate(const SECItem *scalar);
++
++SECStatus ec_secp521r1_scalar_validate(const SECItem *scalar);
++
+ #endif /* __ecl_h_ */
+diff -up ./lib/freebl/freebl_base.gypi.p384 ./lib/freebl/freebl_base.gypi
+--- ./lib/freebl/freebl_base.gypi.p384	2024-01-09 11:49:14.118980084 -0800
++++ ./lib/freebl/freebl_base.gypi	2024-01-09 11:49:58.651418444 -0800
+@@ -38,6 +38,8 @@
+     'ecl/ecp_secp384r1.c',
+     'ecl/ecp_secp521r1.c',
+     'verified/Hacl_P256.c',
++    'verified/Hacl_P384.c',
++    'verified/Hacl_P521.c',
+     'fipsfreebl.c',
+     'blinit.c',
+     'freeblver.c',
+diff -up ./lib/freebl/Makefile.p384 ./lib/freebl/Makefile
+--- ./lib/freebl/Makefile.p384	2024-01-09 11:49:58.650418434 -0800
++++ ./lib/freebl/Makefile	2024-01-09 11:51:20.500224176 -0800
+@@ -612,7 +612,7 @@ ifndef NSS_DISABLE_CHACHAPOLY
+     VERIFIED_SRCS += Hacl_Poly1305_32.c Hacl_Chacha20.c Hacl_Chacha20Poly1305_32.c
+ endif # NSS_DISABLE_CHACHAPOLY
+ 
+-VERIFIED_SRCS += Hacl_P256.c
++VERIFIED_SRCS += Hacl_P256.c Hacl_P384.c Hacl_P521.c
+ 
+ ifeq (,$(filter-out x86_64 aarch64,$(CPU_ARCH)))
+     # All 64-bit architectures get the 64 bit version.
+diff -up ./lib/freebl/verified/Hacl_P384.c.p384 ./lib/freebl/verified/Hacl_P384.c
+--- ./lib/freebl/verified/Hacl_P384.c.p384	2024-01-09 11:49:58.651418444 -0800
++++ ./lib/freebl/verified/Hacl_P384.c	2024-01-09 11:49:58.651418444 -0800
+@@ -0,0 +1,126 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include "Hacl_P384.h"
++
++#include "internal/Hacl_Krmllib.h"
++#include "internal/Hacl_Bignum_Base.h"
++
++static inline uint64_t
++bn_is_eq_mask(uint64_t *x, uint64_t *y)
++{
++    uint64_t mask = (uint64_t)0xFFFFFFFFFFFFFFFFU;
++    KRML_MAYBE_FOR6(i,
++                    (uint32_t)0U,
++                    (uint32_t)6U,
++                    (uint32_t)1U,
++                    uint64_t uu____0 = FStar_UInt64_eq_mask(x[i], y[i]);
++                    mask = uu____0 & mask;);
++    uint64_t mask1 = mask;
++    return mask1;
++}
++
++static inline uint64_t
++bn_sub(uint64_t *a, uint64_t *b, uint64_t *c)
++{
++    uint64_t c1 = (uint64_t)0U;
++    {
++        uint64_t t1 = b[(uint32_t)4U * (uint32_t)0U];
++        uint64_t t20 = c[(uint32_t)4U * (uint32_t)0U];
++        uint64_t *res_i0 = a + (uint32_t)4U * (uint32_t)0U;
++        c1 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c1, t1, t20, res_i0);
++        uint64_t t10 = b[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t t21 = c[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t *res_i1 = a + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++        c1 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c1, t10, t21, res_i1);
++        uint64_t t11 = b[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t t22 = c[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t *res_i2 = a + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++        c1 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c1, t11, t22, res_i2);
++        uint64_t t12 = b[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t t2 = c[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t *res_i = a + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++        c1 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c1, t12, t2, res_i);
++    }
++    KRML_MAYBE_FOR2(i,
++                    (uint32_t)4U,
++                    (uint32_t)6U,
++                    (uint32_t)1U,
++                    uint64_t t1 = b[i];
++                    uint64_t t2 = c[i];
++                    uint64_t *res_i = a + i;
++                    c1 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c1, t1, t2, res_i););
++    uint64_t c10 = c1;
++    return c10;
++}
++
++static inline void
++bn_from_bytes_be(uint64_t *a, uint8_t *b)
++{
++    KRML_MAYBE_FOR6(i,
++                    (uint32_t)0U,
++                    (uint32_t)6U,
++                    (uint32_t)1U,
++                    uint64_t *os = a;
++                    uint64_t u = load64_be(b + ((uint32_t)6U - i - (uint32_t)1U) * (uint32_t)8U);
++                    uint64_t x = u;
++                    os[i] = x;);
++}
++
++static inline void
++p384_make_order(uint64_t *n)
++{
++    n[0U] = (uint64_t)0xecec196accc52973U;
++    n[1U] = (uint64_t)0x581a0db248b0a77aU;
++    n[2U] = (uint64_t)0xc7634d81f4372ddfU;
++    n[3U] = (uint64_t)0xffffffffffffffffU;
++    n[4U] = (uint64_t)0xffffffffffffffffU;
++    n[5U] = (uint64_t)0xffffffffffffffffU;
++}
++
++/**
++Private key validation.
++
++  The function returns `true` if a private key is valid and `false` otherwise.
++
++  The argument `private_key` points to 48 bytes of valid memory, i.e., uint8_t[48].
++
++  The private key is valid:
++    • 0 < `private_key` < the order of the curve
++*/
++bool
++Hacl_P384_validate_private_key(uint8_t *private_key)
++{
++    uint64_t bn_sk[6U] = { 0U };
++    bn_from_bytes_be(bn_sk, private_key);
++    uint64_t tmp[6U] = { 0U };
++    p384_make_order(tmp);
++    uint64_t c = bn_sub(tmp, bn_sk, tmp);
++    uint64_t is_lt_order = (uint64_t)0U - c;
++    uint64_t bn_zero[6U] = { 0U };
++    uint64_t res = bn_is_eq_mask(bn_sk, bn_zero);
++    uint64_t is_eq_zero = res;
++    uint64_t res0 = is_lt_order & ~is_eq_zero;
++    return res0 == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++}
+diff -up ./lib/freebl/verified/Hacl_P384.h.p384 ./lib/freebl/verified/Hacl_P384.h
+--- ./lib/freebl/verified/Hacl_P384.h.p384	2024-01-09 11:49:58.651418444 -0800
++++ ./lib/freebl/verified/Hacl_P384.h	2024-01-09 11:49:58.651418444 -0800
+@@ -0,0 +1,68 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef __Hacl_P384_H
++#define __Hacl_P384_H
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#include <string.h>
++#include "krml/internal/types.h"
++#include "krml/lowstar_endianness.h"
++
++#include "lib_intrinsics.h"
++
++/*******************************************************************************
++
++ Verified C library for ECDSA and ECDH functions over the P-384 NIST curve.
++
++ This module implements signing and verification, key validation, conversions
++ between various point representations, and ECDH key agreement.
++
++*******************************************************************************/
++
++/******************/
++/* Key validation */
++/******************/
++
++/**
++Private key validation.
++
++  The function returns `true` if a private key is valid and `false` otherwise.
++
++  The argument `private_key` points to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The private key is valid:
++    • 0 < `private_key` < the order of the curve
++*/
++bool Hacl_P384_validate_private_key(uint8_t *private_key);
++
++#if defined(__cplusplus)
++}
++#endif
++
++#define __Hacl_P384_H_DEFINED
++#endif
+diff -up ./lib/freebl/verified/Hacl_P521.c.p384 ./lib/freebl/verified/Hacl_P521.c
+--- ./lib/freebl/verified/Hacl_P521.c.p384	2024-01-09 11:49:58.651418444 -0800
++++ ./lib/freebl/verified/Hacl_P521.c	2024-01-09 11:49:58.651418444 -0800
+@@ -0,0 +1,131 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include "Hacl_P521.h"
++
++#include "internal/Hacl_Krmllib.h"
++#include "internal/Hacl_Bignum_Base.h"
++
++static inline uint64_t
++bn_is_eq_mask(uint64_t *x, uint64_t *y)
++{
++    uint64_t mask = (uint64_t)0xFFFFFFFFFFFFFFFFU;
++    KRML_MAYBE_FOR9(i,
++                    (uint32_t)0U,
++                    (uint32_t)9U,
++                    (uint32_t)1U,
++                    uint64_t uu____0 = FStar_UInt64_eq_mask(x[i], y[i]);
++                    mask = uu____0 & mask;);
++    uint64_t mask1 = mask;
++    return mask1;
++}
++
++static inline uint64_t
++bn_sub(uint64_t *a, uint64_t *b, uint64_t *c)
++{
++    uint64_t c1 = (uint64_t)0U;
++    KRML_MAYBE_FOR2(i,
++                    (uint32_t)0U,
++                    (uint32_t)2U,
++                    (uint32_t)1U,
++                    uint64_t t1 = b[(uint32_t)4U * i];
++                    uint64_t t20 = c[(uint32_t)4U * i];
++                    uint64_t *res_i0 = a + (uint32_t)4U * i;
++                    c1 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c1, t1, t20, res_i0);
++                    uint64_t t10 = b[(uint32_t)4U * i + (uint32_t)1U];
++                    uint64_t t21 = c[(uint32_t)4U * i + (uint32_t)1U];
++                    uint64_t *res_i1 = a + (uint32_t)4U * i + (uint32_t)1U;
++                    c1 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c1, t10, t21, res_i1);
++                    uint64_t t11 = b[(uint32_t)4U * i + (uint32_t)2U];
++                    uint64_t t22 = c[(uint32_t)4U * i + (uint32_t)2U];
++                    uint64_t *res_i2 = a + (uint32_t)4U * i + (uint32_t)2U;
++                    c1 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c1, t11, t22, res_i2);
++                    uint64_t t12 = b[(uint32_t)4U * i + (uint32_t)3U];
++                    uint64_t t2 = c[(uint32_t)4U * i + (uint32_t)3U];
++                    uint64_t *res_i = a + (uint32_t)4U * i + (uint32_t)3U;
++                    c1 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c1, t12, t2, res_i););
++    {
++        uint64_t t1 = b[8U];
++        uint64_t t2 = c[8U];
++        uint64_t *res_i = a + (uint32_t)8U;
++        c1 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c1, t1, t2, res_i);
++    }
++    uint64_t c10 = c1;
++    return c10;
++}
++
++static inline void
++bn_from_bytes_be(uint64_t *a, uint8_t *b)
++{
++    uint8_t tmp[72U] = { 0U };
++    memcpy(tmp + (uint32_t)6U, b, (uint32_t)66U * sizeof(uint8_t));
++    KRML_MAYBE_FOR9(i,
++                    (uint32_t)0U,
++                    (uint32_t)9U,
++                    (uint32_t)1U,
++                    uint64_t *os = a;
++                    uint64_t u = load64_be(tmp + ((uint32_t)9U - i - (uint32_t)1U) * (uint32_t)8U);
++                    uint64_t x = u;
++                    os[i] = x;);
++}
++
++static inline void
++p521_make_order(uint64_t *n)
++{
++    n[0U] = (uint64_t)0xbb6fb71e91386409U;
++    n[1U] = (uint64_t)0x3bb5c9b8899c47aeU;
++    n[2U] = (uint64_t)0x7fcc0148f709a5d0U;
++    n[3U] = (uint64_t)0x51868783bf2f966bU;
++    n[4U] = (uint64_t)0xfffffffffffffffaU;
++    n[5U] = (uint64_t)0xffffffffffffffffU;
++    n[6U] = (uint64_t)0xffffffffffffffffU;
++    n[7U] = (uint64_t)0xffffffffffffffffU;
++    n[8U] = (uint64_t)0x1ffU;
++}
++
++/**
++Private key validation.
++
++  The function returns `true` if a private key is valid and `false` otherwise.
++
++  The argument `private_key` points to 66 bytes of valid memory, i.e., uint8_t[66].
++
++  The private key is valid:
++    • 0 < `private_key` < the order of the curve
++*/
++bool
++Hacl_P521_validate_private_key(uint8_t *private_key)
++{
++    uint64_t bn_sk[9U] = { 0U };
++    bn_from_bytes_be(bn_sk, private_key);
++    uint64_t tmp[9U] = { 0U };
++    p521_make_order(tmp);
++    uint64_t c = bn_sub(tmp, bn_sk, tmp);
++    uint64_t is_lt_order = (uint64_t)0U - c;
++    uint64_t bn_zero[9U] = { 0U };
++    uint64_t res = bn_is_eq_mask(bn_sk, bn_zero);
++    uint64_t is_eq_zero = res;
++    uint64_t res0 = is_lt_order & ~is_eq_zero;
++    return res0 == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++}
+diff -up ./lib/freebl/verified/Hacl_P521.h.p384 ./lib/freebl/verified/Hacl_P521.h
+--- ./lib/freebl/verified/Hacl_P521.h.p384	2024-01-09 11:49:58.651418444 -0800
++++ ./lib/freebl/verified/Hacl_P521.h	2024-01-09 11:49:58.651418444 -0800
+@@ -0,0 +1,59 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef __Hacl_P521_H
++#define __Hacl_P521_H
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#include <string.h>
++#include "krml/internal/types.h"
++#include "krml/lowstar_endianness.h"
++
++#include "lib_intrinsics.h"
++
++/******************/
++/* Key validation */
++/******************/
++
++/**
++Private key validation.
++
++  The function returns `true` if a private key is valid and `false` otherwise.
++
++  The argument `private_key` points to 66 bytes of valid memory, i.e., uint8_t[66].
++
++  The private key is valid:
++    • 0 < `private_key` < the order of the curve
++*/
++bool Hacl_P521_validate_private_key(uint8_t *private_key);
++
++#if defined(__cplusplus)
++}
++#endif
++
++#define __Hacl_P521_H_DEFINED
++#endif

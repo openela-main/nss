@@ -1,6 +1,6 @@
 %global nss_version 3.90.0
 %global nspr_version 4.35.0
-%global baserelease 3
+%global baserelease 6
 %global nss_release %baserelease
 # NOTE: To avoid NVR clashes of nspr* packages:
 # use "%%global nspr_release %%[%%baserelease+n]" to handle offsets when
@@ -130,6 +130,8 @@ Source28:         nss-p11-kit.config
 # will have their own validation
 Source30:         fips_algorithms.h
 
+Source50:         NameConstraints_Certs.tar
+
 Source100:        nspr-%{nspr_archive_version}.tar.gz
 Source101:        nspr-config.xml
 
@@ -146,6 +148,7 @@ Source101:        nspr-config.xml
 # but it doesn't hurt to keep it.
 Patch4:           iquote.patch
 Patch12:          nss-signtool-format.patch
+Patch20:          nss-3.90-extend-db-dump-time.patch
 # connect our shared library to the build root loader flags (needed for -relro)
 Patch31:          nss-dso-ldflags.patch
 # keep RHEL 8 semantics of disabling md4 and md5 even if the env variable is set
@@ -170,21 +173,33 @@ Patch37:          nss-3.90-disable-ech.patch
 Patch51:          nss-3.79-dbtool.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1767883
 Patch58:          nss-3.79-fips.patch
+# https://bugzilla.mozilla.org/show_bug.cgi?id=1836781
+# https://bugzilla.mozilla.org/show_bug.cgi?id=1836925
+Patch60:          nss-3.90-DisablingASM.patch
 Patch61:          nss-3.79-fips-review.patches
 Patch63:          nss-3.90-pbkdf2-indicator.patch
 
 # ems policy. needs to upstream
 Patch70:          nss-3.90-add-ems-policy.patch
 
+Patch80:         blinding_ct.patch
+Patch81:         nss-3.90-fips-pkcs11-long-hash.patch
+Patch82:         nss-3.90-fips-safe-memset.patch
+Patch83:         nss-3.90-fips-indicators.patch
+Patch84:         nss-3.90-aes-gmc-indicator.patch
+Patch85:         nss-3.90-fips-indicators2.patch
+Patch86:         nss-3.90-dh-test-update.patch
+Patch90:         nss_p256_scalar_validated.patch
+Patch91:         nss_p384_scalar_validated.patch
+Patch92:         nss_p384_hacl.patch
+Patch93:         nss_p521_hacl.patch
+Patch94:         nss-3.90-ecc-wrap-fix.patch
+
 Patch100:         nspr-config-pc.patch
 Patch101:         nspr-gcc-atomics.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1769293
 Patch110:         nspr-4.34-fix-coverity-loop-issue.patch
 Patch120:         nspr-4.34-server-passive.patch
-
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1836781
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1836925
-Patch60:          nss-3.90-DisablingASM.patch
 
 
 # NSS reverse patches
@@ -366,6 +381,11 @@ popd
 # this file is release specific and matches what
 # each vendors claim in their own FIPS certification
 cp %{SOURCE30} nss/lib/softoken/
+
+#update expired test certs
+pushd nss
+tar xvf %{SOURCE50}
+popd
 
 # https://bugzilla.redhat.com/show_bug.cgi?id=1247353
 find nss/lib/libpkix -perm /u+x -type f -exec chmod -x {} \;
@@ -646,6 +666,10 @@ done
 # This is necessary because the test suite tests algorithms that are
 # disabled by the system policy.
 export NSS_IGNORE_SYSTEM_POLICY=1
+
+%ifarch i686 ppcle64
+export NSS_DB_DUMP_TIME=10
+%endif
 
 # enable the following line to force a test failure
 # find ./nss -name \*.chk | xargs rm -f
@@ -1169,6 +1193,24 @@ update-crypto-policies &> /dev/null || :
 
 
 %changelog
+* Tue Jan 23 2024 Bob Relyea <rrelyea@redhat.com> - 3.90.0-6
+- Fix ecc DER wrapping.
+
+* Tue Jan 9 2024 Bob Relyea <rrelyea@redhat.com> - 3.90.0-5
+- Pick up validated constant time implementations of p256, p384, and p521
+  from upsream
+- More Fips indicator changes
+
+* Wed Nov 22 2023 Bob Relyea <rrelyea@redhat.com> - 3.90.0-4
+- FIPS review changes
+-   add PORT_SafeZero to avoid compiler optimizing a way zeroing memory.
+-   update the indicators for this release
+-   allow hashing of longer than int32 values in a single PKCS #11 call.
+
+* Tue Nov 21 2023 Bob Relyea <rrelyea@redhat.com> - 3.90.0-3.3
+- Fix expired certs in tests
+- Fix CVE-2023-5388
+
 * Fri Aug 4 2023 Bob Relyea <rrelyea@redhat.com> - 3.90.0-3
 - add indicator for pbkdf
 - fix ems policy bug
@@ -1178,7 +1220,7 @@ update-crypto-policies &> /dev/null || :
 
 * Wed Jun 28 2023 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.90.0-1
 - fix missing dist tag in packages version
-- move from deprecate %patch format
+- move from deprecate %%patch format
 
 * Mon Jun 12 2023 Bob Relyea <rrelyea@redhat.com> - 3.90.0-1
 - Rebase to NSS-3.90

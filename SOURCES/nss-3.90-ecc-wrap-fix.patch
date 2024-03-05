@@ -1,0 +1,194 @@
+diff -up ./cmd/pk11ectest/pk11ectest.c.ecc_wrap ./cmd/pk11ectest/pk11ectest.c
+--- ./cmd/pk11ectest/pk11ectest.c.ecc_wrap	2023-06-04 01:42:53.000000000 -0700
++++ ./cmd/pk11ectest/pk11ectest.c	2024-01-23 14:07:29.421036328 -0800
+@@ -10,6 +10,32 @@
+ #include "pk11pub.h"
+ #include <stdio.h>
+ 
++typedef struct KeyLengthEntryStr {
++    SECOidTag tag;
++    unsigned int len;
++    PRBool encoded;
++} KeyLengthEntry;
++
++const KeyLengthEntry keyLengthTable[] = {
++    { SEC_OID_SECG_EC_SECP256R1, 65, PR_TRUE },
++    { SEC_OID_SECG_EC_SECP384R1, 97, PR_TRUE },
++    { SEC_OID_SECG_EC_SECP521R1, 133, PR_TRUE },
++    { SEC_OID_CURVE25519, 32, PR_FALSE }
++};
++
++const KeyLengthEntry *
++getKeyLengthEntry(SECOidTag tag)
++{
++    int i;
++
++    for (i = 0; i < PR_ARRAY_SIZE(keyLengthTable); i++) {
++        if (keyLengthTable[i].tag == tag) {
++            return &keyLengthTable[i];
++        }
++    }
++    return NULL;
++}
++
+ void
+ printBuf(const SECItem *item)
+ {
+@@ -53,6 +79,10 @@ ectest_curve_pkcs11(SECOidTag oid)
+     CK_MECHANISM_TYPE target = CKM_TLS12_MASTER_KEY_DERIVE_DH;
+     PK11SymKey *symKey = NULL;
+     SECStatus rv = SECFailure;
++    const KeyLengthEntry *keyLengthEntry;
++    SECItem point = { siBuffer, NULL, 0 };
++    SECItem value = { siBuffer, NULL, 0 };
++    PLArenaPool *arena = NULL;
+ 
+     oidData = SECOID_FindOIDByTag(oid);
+     if (oidData == NULL) {
+@@ -79,8 +109,63 @@ ectest_curve_pkcs11(SECOidTag oid)
+         goto cleanup;
+     }
+     PrintKey(symKey);
+-    rv = SECSuccess;
+ 
++    keyLengthEntry = getKeyLengthEntry(oid);
++    /* this shouldn't happen unless new curves are added without adding them
++     * to the keyLengthTable */
++    PR_ASSERT(keyLengthEntry);
++
++    /* make sure we are returning CKA_EC_POINT according to the PKCS #11 standard.
++     * NSS itself can tolerate non-standard CKA_EC_POINT, so this is the only place
++     * our test will detect incorrect behavior */
++    rv = PK11_ReadRawAttribute(PK11_TypePubKey, pubKey, CKA_EC_POINT, &point);
++    if (rv == SECFailure) {
++        printf(" >>> Couldn't get CKA_EC_POINT from the ec pubKey.\n");
++        goto cleanup;
++    }
++    rv = SECFailure;
++    if (keyLengthEntry->encoded) {
++        if (point.len == keyLengthEntry->len) {
++            printf(" >>> Expected encoded CKA_EC_POINT and got a decoded value.\n");
++            printBuf(&point);
++            goto cleanup;
++        }
++        arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
++        if (arena == NULL) {
++            printf(" >>> arena alloc failed.\n");
++            goto cleanup;
++        }
++
++        rv = SEC_QuickDERDecodeItem(arena, &value, SEC_ASN1_GET(SEC_OctetStringTemplate),
++                                    &point);
++        if (rv != SECSuccess) {
++            printf(" >>> invalid endoded CKA_EC_POINT.\n");
++            printBuf(&point);
++            goto cleanup;
++        }
++        rv = SECFailure;
++        if (value.len != keyLengthEntry->len) {
++            printf(" >>> invalid decoded CKA_EC_POINT len (%d) expected %d.\n",
++                   value.len, keyLengthEntry->len);
++            printBuf(&value);
++            goto cleanup;
++        }
++        if (value.data[0] != EC_POINT_FORM_UNCOMPRESSED) {
++            printf(" >>> invalid CKA_EC_POINT format (%02x) expected %02x.\n",
++                   value.data[0], EC_POINT_FORM_UNCOMPRESSED);
++            printBuf(&value);
++            goto cleanup;
++        }
++    } else {
++        if (point.len != keyLengthEntry->len) {
++            printf(" >>> invalid CKA_EC_POINT len (%d) expected %d.\n",
++                   point.len, keyLengthEntry->len);
++            printBuf(&point);
++            goto cleanup;
++        }
++    }
++
++    rv = SECSuccess;
+ cleanup:
+     if (privKey) {
+         SECKEY_DestroyPrivateKey(privKey);
+@@ -91,7 +176,11 @@ cleanup:
+     if (symKey) {
+         PK11_FreeSymKey(symKey);
+     }
++    if (arena) {
++        PORT_FreeArena(arena, PR_TRUE);
++    }
+     SECITEM_FreeItem(&pk_11_ecParams, PR_FALSE);
++    SECITEM_FreeItem(&point, PR_FALSE);
+ 
+     return rv;
+ }
+diff -up ./lib/freebl/blapit.h.ecc_wrap ./lib/freebl/blapit.h
+--- ./lib/freebl/blapit.h.ecc_wrap	2023-06-04 01:42:53.000000000 -0700
++++ ./lib/freebl/blapit.h	2024-01-23 14:07:29.421036328 -0800
+@@ -375,7 +375,9 @@ typedef struct DHPrivateKeyStr DHPrivate
+ */
+ 
+ typedef enum { ec_params_explicit,
+-               ec_params_named
++               ec_params_named,
++               ec_params_edwards_named,
++               ec_params_montgomery_named,
+ } ECParamsType;
+ 
+ typedef enum { ec_field_GFp = 1,
+diff -up ./lib/freebl/ecdecode.c.ecc_wrap ./lib/freebl/ecdecode.c
+--- ./lib/freebl/ecdecode.c.ecc_wrap	2024-01-23 14:07:14.533870602 -0800
++++ ./lib/freebl/ecdecode.c	2024-01-23 14:07:29.422036340 -0800
+@@ -176,6 +176,7 @@ EC_FillParams(PLArenaPool *arena, const
+ 
+         case SEC_OID_CURVE25519:
+             /* Populate params for Curve25519 */
++            params->type = ec_params_montgomery_named;
+             CHECK_SEC_OK(gf_populate_params_bytes(ECCurve25519,
+                                                   ec_field_plain,
+                                                   params));
+diff -up ./lib/softoken/pkcs11c.c.ecc_wrap ./lib/softoken/pkcs11c.c
+--- ./lib/softoken/pkcs11c.c.ecc_wrap	2024-01-23 14:07:14.520870457 -0800
++++ ./lib/softoken/pkcs11c.c	2024-01-23 14:08:38.198801966 -0800
+@@ -5164,7 +5164,7 @@ sftk_PairwiseConsistencyCheck(CK_SESSION
+             }
+             /* make sure it has the same encoding */
+             if (PR_GetEnvSecure("NSS_USE_DECODED_CKA_EC_POINT") ||
+-                lowPrivKey->u.ec.ecParams.fieldID.type == ec_field_plain) {
++                lowPrivKey->u.ec.ecParams.type != ec_params_named) {
+               lowPubValue = SECITEM_DupItem(&ecPriv->publicValue);
+             } else {
+               lowPubValue = SEC_ASN1EncodeItem(NULL, NULL, &ecPriv->publicValue,
+@@ -5694,7 +5694,7 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+             }
+ 
+             if (PR_GetEnvSecure("NSS_USE_DECODED_CKA_EC_POINT") ||
+-                ecParams->fieldID.type == ec_field_plain) {
++                ecParams->type != ec_params_named) {
+                 PORT_FreeArena(ecParams->arena, PR_TRUE);
+                 crv = sftk_AddAttributeType(publicKey, CKA_EC_POINT,
+                                             sftk_item_expand(&ecPriv->publicValue));
+diff -up ./lib/softoken/pkcs11.c.ecc_wrap ./lib/softoken/pkcs11.c
+--- ./lib/softoken/pkcs11.c.ecc_wrap	2024-01-23 14:07:14.505870290 -0800
++++ ./lib/softoken/pkcs11.c	2024-01-23 14:07:29.423036351 -0800
+@@ -1897,8 +1897,8 @@ sftk_GetPubKey(SFTKObject *object, CK_KE
+                 /* Handle the non-DER encoded case.
+                  * Some curves are always pressumed to be non-DER.
+                  */
+-                if (pubKey->u.ec.publicValue.len == keyLen &&
+-                    (pubKey->u.ec.ecParams.fieldID.type == ec_field_plain ||
++                if (pubKey->u.ec.ecParams.type != ec_params_named ||
++                    (pubKey->u.ec.publicValue.len == keyLen &&
+                      pubKey->u.ec.publicValue.data[0] == EC_POINT_FORM_UNCOMPRESSED)) {
+                     break; /* key was not DER encoded, no need to unwrap */
+                 }
+@@ -1918,8 +1918,7 @@ sftk_GetPubKey(SFTKObject *object, CK_KE
+                         break;
+                     }
+                     /* we don't handle compressed points except in the case of ECCurve25519 */
+-                    if ((pubKey->u.ec.ecParams.fieldID.type != ec_field_plain) &&
+-                        (publicValue.data[0] != EC_POINT_FORM_UNCOMPRESSED)) {
++                    if (publicValue.data[0] != EC_POINT_FORM_UNCOMPRESSED) {
+                         crv = CKR_ATTRIBUTE_VALUE_INVALID;
+                         break;
+                     }

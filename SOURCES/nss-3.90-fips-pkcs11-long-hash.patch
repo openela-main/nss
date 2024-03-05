@@ -1,0 +1,83 @@
+diff --git a/lib/softoken/pkcs11c.c b/lib/softoken/pkcs11c.c
+--- a/lib/softoken/pkcs11c.c
++++ b/lib/softoken/pkcs11c.c
+@@ -15,10 +15,13 @@
+  *   keys and their associated Certificates are saved on the token.
+  *
+  *   In this implementation, session objects are only visible to the session
+  *   that created or generated them.
+  */
++
++#include <limits.h> /* for UINT_MAX and ULONG_MAX */
++
+ #include "seccomon.h"
+ #include "secitem.h"
+ #include "secport.h"
+ #include "blapi.h"
+ #include "pkcs11.h"
+@@ -1954,12 +1957,21 @@
+     if (pDigest == NULL) {
+         *pulDigestLen = context->maxLen;
+         goto finish;
+     }
+ 
+-    /* do it: */
++#if (ULONG_MAX > UINT_MAX)
++    /* The context->hashUpdate function takes an unsigned int for its data
++     * length argument, but NSC_Digest takes an unsigned long. */
++    while (ulDataLen > UINT_MAX) {
++        (*context->hashUpdate)(context->cipherInfo, pData, UINT_MAX);
++        pData += UINT_MAX;
++        ulDataLen -= UINT_MAX;
++    }
++#endif
+     (*context->hashUpdate)(context->cipherInfo, pData, ulDataLen);
++
+     /*  NOTE: this assumes buf size is bigenough for the algorithm */
+     (*context->end)(context->cipherInfo, pDigest, &digestLen, maxout);
+     *pulDigestLen = digestLen;
+ 
+     sftk_TerminateOp(session, SFTK_HASH, context);
+@@ -1980,12 +1992,22 @@
+ 
+     /* make sure we're legal */
+     crv = sftk_GetContext(hSession, &context, SFTK_HASH, PR_TRUE, NULL);
+     if (crv != CKR_OK)
+         return crv;
+-    /* do it: */
++
++#if (ULONG_MAX > UINT_MAX)
++    /* The context->hashUpdate function takes an unsigned int for its data
++     * length argument, but NSC_DigestUpdate takes an unsigned long. */
++    while (ulPartLen > UINT_MAX) {
++        (*context->hashUpdate)(context->cipherInfo, pPart, UINT_MAX);
++        pPart += UINT_MAX;
++        ulPartLen -= UINT_MAX;
++    }
++#endif
+     (*context->hashUpdate)(context->cipherInfo, pPart, ulPartLen);
++
+     return CKR_OK;
+ }
+ 
+ /* NSC_DigestFinal finishes a multiple-part message-digesting operation. */
+ CK_RV
+@@ -3166,10 +3188,17 @@
+     crv = sftk_GetContext(hSession, &context, type, PR_TRUE, &session);
+     if (crv != CKR_OK)
+         return crv;
+ 
+     if (context->hashInfo) {
++#if (ULONG_MAX > UINT_MAX)
++        while (ulPartLen > UINT_MAX) {
++            (*context->hashUpdate)(context->cipherInfo, pPart, UINT_MAX);
++            pPart += UINT_MAX;
++            ulPartLen -= UINT_MAX;
++        }
++#endif
+         (*context->hashUpdate)(context->hashInfo, pPart, ulPartLen);
+     } else {
+         /* must be block cipher MACing */
+ 
+         unsigned int blkSize = context->blockSize;
+
