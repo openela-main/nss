@@ -63,7 +63,7 @@ print(string.sub(hash, 0, 16))
 Summary:          Network Security Services
 Name:             nss
 Version:          %{nss_version}
-Release:          3%{?dist}
+Release:          6%{?dist}
 License:          MPLv2.0
 URL:              http://www.mozilla.org/projects/security/pki/nss/
 Requires:         nspr >= %{nspr_version}%{nspr_release}
@@ -113,6 +113,8 @@ Source28:         nss-p11-kit.config
 # will have their own validation
 Source30:         fips_algorithms.h
 
+Source50:         NameConstraints_Certs.tar
+
 # To inject hardening flags for DSO
 Patch1:           nss-dso-ldflags.patch
 # This patch uses the GCC -iquote option documented at
@@ -131,8 +133,8 @@ Patch4:           iquote.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=818686
 Patch9:		  nss-sysinit-userdb.patch
 # Disable nss-sysinit test which is solely to test the above change
-Patch10:	  nss-skip-sysinit-gtests.patch
-
+Patch10:          nss-skip-sysinit-gtests.patch
+Patch15:          nss-3.90-extend-db-dump-time.patch
 # For compatibility reasons, we stick with the old PKCS #11 2.40
 # definition of CK_GCM_PARAMS:
 %if 0%{?fedora} < 34
@@ -142,9 +144,10 @@ Patch20:          nss-gcm-param-default-pkcs11v2.patch
 %endif
 # Local patch: disable MD5 (also MD2 and MD4) completely
 # https://bugzilla.redhat.com/show_bug.cgi?id=1849938
-Patch25:         nss-disable-md5.patch
+Patch25:          nss-disable-md5.patch
 # Local patch for TLS_ECDHE_{ECDSA|RSA}_WITH_3DES_EDE_CBC_SHA ciphers
 Patch30:          rhbz1185708-enable-ecc-3des-ciphers-by-default.patch
+Patch34:          nss-3.71-fix-lto-gtests.patch
 # Local patch: disable Delegated Credentials
 Patch35:	  nss-disable-dc.patch
 # Local patch: ignore rsa, rsa-pss, ecdsa policies until crypto-policies
@@ -164,15 +167,28 @@ Patch54:          nss-3.90-disable-ech.patch
 # https://bugzilla.redhat.com/show_bug.cgi?id=1774659
 Patch57:          nss-3.79-dbtool.patch
 Patch58:          nss-3.79-fips.patch
-Patch61:          nss-3.79-fips-review.patches
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1836781
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1836925
-Patch62:          nss-3.90-DisablingASM.patch
-Patch63:          nss-3.90-no-dbm-25519.patch
-Patch64:          nss-3.90-pbkdf2-indicator.patch
+Patch60:          nss-3.90-DisablingASM.patch
+Patch61:          nss-3.79-fips-review.patches
+Patch62:          nss-3.90-no-dbm-25519.patch
+Patch63:          nss-3.90-pbkdf2-indicator.patch
 
 #ems policy. needs to upstream
 Patch70:          nss-3.90-add-ems-policy.patch
+
+Patch80:         blinding_ct.patch
+Patch81:         nss-3.90-fips-pkcs11-long-hash.patch
+Patch82:         nss-3.90-fips-safe-memset.patch
+Patch83:         nss-3.90-fips-indicators.patch
+Patch84:         nss-3.90-aes-gmc-indicator.patch
+Patch85:         nss-3.90-fips-indicators2.patch
+Patch86:         nss-3.90-dh-test-update.patch
+Patch90:         nss_p256_scalar_validated.patch
+Patch91:         nss_p384_scalar_validated.patch
+Patch92:         nss_p384_hacl.patch
+Patch93:         nss_p521_hacl.patch
+Patch94:         nss-3.90-ecc-wrap-fix.patch
 
 %description
 Network Security Services (NSS) is a set of libraries designed to
@@ -309,6 +325,11 @@ popd
 # this file is release specific and matches what
 # each vendors claim in their own FIPS certification
 cp %{SOURCE30} nss/lib/softoken/
+
+#update expired test certs
+pushd nss
+tar xvf %{SOURCE50}
+popd
 
 # https://bugzilla.redhat.com/show_bug.cgi?id=1247353
 find nss/lib/libpkix -perm /u+x -type f -exec chmod -x {} \;
@@ -508,6 +529,10 @@ export USE_64=1
 # This is necessary because the test suite tests algorithms that are
 # disabled by the system policy.
 export NSS_IGNORE_SYSTEM_POLICY=1
+
+%ifarch i686 ppcle64
+export NSS_DB_DUMP_TIME=10
+%endif
 
 # enable the following line to force a test failure
 # find ./nss -name \*.chk | xargs rm -f
@@ -955,6 +980,24 @@ update-crypto-policies --no-reload &> /dev/null || :
 
 
 %changelog
+* Tue Jan 23 2024 Bob Relyea <rrelyea@redhat.com> - 3.90.0-6
+- Fix ecc DER wrapping.
+
+* Wed Jan 17 2024 Bob Relyea <rrelyea@redhat.com> - 3.90.0-5
+- Pick up validated constant time implementations of p256, p384, and p521
+  from upsream
+- More Fips indicator changes
+
+* Wed Dec 6 2023 Bob Relyea <rrelyea@redhat.com> - 3.90.0-4
+- FIPS review changes
+-   add PORT_SafeZero to avoid compiler optimizing a way zeroing memory.
+-   update the indicators for this release
+-   allow hashing of longer than int32 values in a single PKCS #11 call.
+
+* Tue Nov 21 2023 Bob Relyea <rrelyea@redhat.com> - 3.90.0-3.1
+- Fix expired certs in tests
+- Fix CVE-2023-5388
+
 * Thu Aug 3 2023 Bob Relyea <rrelyea@redhat.com> - 3.90.0-3
 - add indicators for pbkdf2
 - add camellia to pkcs12 doc files

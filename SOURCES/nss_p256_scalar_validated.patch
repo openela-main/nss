@@ -1,0 +1,4210 @@
+diff -up ./lib/freebl/blapi.h.p256 ./lib/freebl/blapi.h
+--- ./lib/freebl/blapi.h.p256	2023-06-04 01:42:53.000000000 -0700
++++ ./lib/freebl/blapi.h	2024-01-09 11:25:43.802382184 -0800
+@@ -1791,6 +1791,11 @@ extern SECStatus EC_CopyParams(PLArenaPo
+  */
+ extern int EC_GetPointSize(const ECParams *params);
+ 
++/*
++ * use the internal table to get the size in bytes of a single EC coordinate
++ */
++extern int EC_GetScalarSize(const ECParams *params);
++
+ SEC_END_PROTOS
+ 
+ #endif /* _BLAPI_H_ */
+diff -up ./lib/freebl/ec.c.p256 ./lib/freebl/ec.c
+--- ./lib/freebl/ec.c.p256	2023-06-04 01:42:53.000000000 -0700
++++ ./lib/freebl/ec.c	2024-01-09 11:43:03.868335326 -0800
+@@ -21,7 +21,17 @@
+ static const ECMethod kMethods[] = {
+     { ECCurve25519,
+       ec_Curve25519_pt_mul,
+-      ec_Curve25519_pt_validate }
++      ec_Curve25519_pt_validate,
++      ec_Curve25519_scalar_validate,
++      NULL, NULL },
++    {
++        ECCurve_NIST_P256,
++        ec_secp256r1_pt_mul,
++        ec_secp256r1_pt_validate,
++        ec_secp256r1_scalar_validate,
++        ec_secp256r1_sign_digest,
++        ec_secp256r1_verify_digest,
++    }
+ };
+ 
+ static const ECMethod *
+@@ -281,13 +291,17 @@ ec_NewKey(ECParams *ecParams, ECPrivateK
+     /* Use curve specific code for point multiplication */
+     if (ecParams->fieldID.type == ec_field_plain) {
+         const ECMethod *method = ec_get_method_from_name(ecParams->name);
+-        if (method == NULL || method->mul == NULL) {
++        if (method == NULL || method->pt_mul == NULL) {
+             /* unknown curve */
+             rv = SECFailure;
+             goto cleanup;
+         }
+-        rv = method->mul(&key->publicValue, &key->privateValue, NULL);
+-        goto done;
++        rv = method->pt_mul(&key->publicValue, &key->privateValue, NULL);
++        if (rv != SECSuccess) {
++            goto cleanup;
++        } else {
++            goto done;
++        }
+     }
+ 
+     CHECK_MPI_OK(mp_init(&k));
+@@ -330,25 +344,54 @@ EC_NewKeyFromSeed(ECParams *ecParams, EC
+     return rv;
+ }
+ 
+-/* Generate a random private key using the algorithm A.4.1 of ANSI X9.62,
++/* Generate a random private key using the algorithm A.4.1 or A.4.2 of ANSI X9.62,
+  * modified a la FIPS 186-2 Change Notice 1 to eliminate the bias in the
+  * random number generator.
+- *
+- * Parameters
+- * - order: a buffer that holds the curve's group order
+- * - len: the length in octets of the order buffer
+- *
+- * Return Value
+- * Returns a buffer of len octets that holds the private key. The caller
+- * is responsible for freeing the buffer with PORT_ZFree.
+  */
+-static unsigned char *
+-ec_GenerateRandomPrivateKey(const unsigned char *order, int len)
++
++SECStatus
++ec_GenerateRandomPrivateKey(ECParams *ecParams, SECItem *privKey)
+ {
+     SECStatus rv = SECSuccess;
+     mp_err err;
+-    unsigned char *privKeyBytes = NULL;
++
++    unsigned int len = EC_GetScalarSize(ecParams);
++
++    if (privKey->len != len || privKey->data == NULL) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        return SECFailure;
++    }
++
++    /* For known curves, use rejection sampling A.4.2 */
++    if (ecParams->fieldID.type == ec_field_plain) {
++        const ECMethod *method = ec_get_method_from_name(ecParams->name);
++        rv = SECFailure;
++        if (method == NULL || method->scalar_validate == NULL) {
++            /* unknown curve */
++            PORT_SetError(SEC_ERROR_INVALID_ARGS);
++            goto done;
++        }
++        int count = 100;
++        while (rv != SECSuccess && count >= 0) {
++            rv = RNG_GenerateGlobalRandomBytes(privKey->data, len);
++            if (rv != SECSuccess) {
++                PORT_SetError(SEC_ERROR_NEED_RANDOM);
++                goto done;
++            }
++            rv = method->scalar_validate(privKey);
++            count--;
++        }
++        if (rv != SECSuccess) {
++            PORT_SetError(SEC_ERROR_BAD_KEY);
++        }
++        goto done;
++    }
++
++    /* For unknown curves, use algotithm A.4.1 */
++
++    unsigned char *order = ecParams->order.data;
+     mp_int privKeyVal, order_1, one;
++    unsigned char *privKeyBytes = NULL;
+ 
+     MP_DIGITS(&privKeyVal) = 0;
+     MP_DIGITS(&order_1) = 0;
+@@ -361,8 +404,13 @@ ec_GenerateRandomPrivateKey(const unsign
+      * (which implements Algorithm 1 of FIPS 186-2 Change Notice 1) then
+      * reduces modulo the group order.
+      */
+-    if ((privKeyBytes = PORT_Alloc(2 * len)) == NULL)
++
++    if ((privKeyBytes = PORT_Alloc(2 * len)) == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        rv = SECFailure;
+         goto cleanup;
++    }
++
+     CHECK_SEC_OK(RNG_GenerateGlobalRandomBytes(privKeyBytes, 2 * len));
+     CHECK_MPI_OK(mp_read_unsigned_octets(&privKeyVal, privKeyBytes, 2 * len));
+     CHECK_MPI_OK(mp_read_unsigned_octets(&order_1, order, len));
+@@ -371,20 +419,26 @@ ec_GenerateRandomPrivateKey(const unsign
+     CHECK_MPI_OK(mp_mod(&privKeyVal, &order_1, &privKeyVal));
+     CHECK_MPI_OK(mp_add(&privKeyVal, &one, &privKeyVal));
+     CHECK_MPI_OK(mp_to_fixlen_octets(&privKeyVal, privKeyBytes, len));
+-    memset(privKeyBytes + len, 0, len);
++    memcpy(privKey->data, privKeyBytes, len);
++
+ cleanup:
+     mp_clear(&privKeyVal);
+     mp_clear(&order_1);
+     mp_clear(&one);
++    if (privKeyBytes) {
++        PORT_ZFree(privKeyBytes, 2 * len);
++    }
+     if (err < MP_OKAY) {
+         MP_TO_SEC_ERROR(err);
+         rv = SECFailure;
+     }
+-    if (rv != SECSuccess && privKeyBytes) {
+-        PORT_ZFree(privKeyBytes, 2 * len);
+-        privKeyBytes = NULL;
++
++done:
++    if (rv != SECSuccess && privKey->data) {
++        SECITEM_ZfreeItem(privKey, PR_FALSE);
++        return rv;
+     }
+-    return privKeyBytes;
++    return rv;
+ }
+ 
+ /* Generates a new EC key pair. The private key is a random value and
+@@ -395,24 +449,28 @@ SECStatus
+ EC_NewKey(ECParams *ecParams, ECPrivateKey **privKey)
+ {
+     SECStatus rv = SECFailure;
+-    int len;
+-    unsigned char *privKeyBytes = NULL;
++    SECItem privKeyRand = { siBuffer, NULL, 0 };
+ 
+     if (!ecParams || ecParams->name == ECCurve_noName || !privKey) {
+         PORT_SetError(SEC_ERROR_INVALID_ARGS);
+         return SECFailure;
+     }
+ 
+-    len = ecParams->order.len;
+-    privKeyBytes = ec_GenerateRandomPrivateKey(ecParams->order.data, len);
+-    if (privKeyBytes == NULL)
++    SECITEM_AllocItem(NULL, &privKeyRand, EC_GetScalarSize(ecParams));
++    if (privKeyRand.data == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        rv = SECFailure;
++        goto cleanup;
++    }
++    rv = ec_GenerateRandomPrivateKey(ecParams, &privKeyRand);
++    if (rv != SECSuccess || privKeyRand.data == NULL)
+         goto cleanup;
+     /* generate public key */
+-    CHECK_SEC_OK(ec_NewKey(ecParams, privKey, privKeyBytes, len));
++    CHECK_SEC_OK(ec_NewKey(ecParams, privKey, privKeyRand.data, privKeyRand.len));
+ 
+ cleanup:
+-    if (privKeyBytes) {
+-        PORT_ZFree(privKeyBytes, len);
++    if (privKeyRand.data) {
++        SECITEM_ZfreeItem(&privKeyRand, PR_FALSE);
+     }
+ #if EC_DEBUG
+     printf("EC_NewKey returning %s\n",
+@@ -440,18 +498,24 @@ EC_ValidatePublicKey(ECParams *ecParams,
+     if (!ecParams || ecParams->name == ECCurve_noName ||
+         !publicValue || !publicValue->len) {
+         PORT_SetError(SEC_ERROR_INVALID_ARGS);
+-        return SECFailure;
++        rv = SECFailure;
++        return rv;
+     }
+ 
+     /* Uses curve specific code for point validation. */
+     if (ecParams->fieldID.type == ec_field_plain) {
+         const ECMethod *method = ec_get_method_from_name(ecParams->name);
+-        if (method == NULL || method->validate == NULL) {
++        if (method == NULL || method->pt_validate == NULL) {
+             /* unknown curve */
+             PORT_SetError(SEC_ERROR_INVALID_ARGS);
+-            return SECFailure;
++            rv = SECFailure;
++            return rv;
+         }
+-        return method->validate(publicValue);
++        rv = method->pt_validate(publicValue);
++        if (rv != SECSuccess) {
++            PORT_SetError(SEC_ERROR_BAD_KEY);
++        }
++        return rv;
+     }
+ 
+     /* NOTE: We only support uncompressed points for now */
+@@ -510,6 +574,7 @@ cleanup:
+     ECGroup_free(group);
+     mp_clear(&Px);
+     mp_clear(&Py);
++
+     if (err) {
+         MP_TO_SEC_ERROR(err);
+         rv = SECFailure;
+@@ -536,18 +601,14 @@ ECDH_Derive(SECItem *publicValue,
+ {
+     SECStatus rv = SECFailure;
+     unsigned int len = 0;
+-    SECItem pointQ = { siBuffer, NULL, 0 };
+-    mp_int k; /* to hold the private value */
+     mp_err err = MP_OKAY;
+-#if EC_DEBUG
+-    int i;
+-#endif
+ 
+     if (!publicValue || !publicValue->len ||
+         !ecParams || ecParams->name == ECCurve_noName ||
+         !privateValue || !privateValue->len || !derivedSecret) {
+         PORT_SetError(SEC_ERROR_INVALID_ARGS);
+-        return SECFailure;
++        rv = SECFailure;
++        return rv;
+     }
+ 
+     /*
+@@ -556,31 +617,40 @@ ECDH_Derive(SECItem *publicValue,
+      */
+     if (EC_ValidatePublicKey(ecParams, publicValue) != SECSuccess) {
+         PORT_SetError(SEC_ERROR_BAD_KEY);
+-        return SECFailure;
++        rv = SECFailure;
++        return rv;
+     }
+ 
+     /* Perform curve specific multiplication using ECMethod */
+     if (ecParams->fieldID.type == ec_field_plain) {
+         const ECMethod *method;
+         memset(derivedSecret, 0, sizeof(*derivedSecret));
+-        derivedSecret = SECITEM_AllocItem(NULL, derivedSecret, EC_GetPointSize(ecParams));
++        derivedSecret = SECITEM_AllocItem(NULL, derivedSecret, EC_GetScalarSize(ecParams));
+         if (derivedSecret == NULL) {
+             PORT_SetError(SEC_ERROR_NO_MEMORY);
+-            return SECFailure;
++            rv = SECFailure;
++            return rv;
+         }
+         method = ec_get_method_from_name(ecParams->name);
+-        if (method == NULL || method->validate == NULL ||
+-            method->mul == NULL) {
++        if (method == NULL || method->pt_validate == NULL ||
++            method->pt_mul == NULL) {
+             PORT_SetError(SEC_ERROR_UNSUPPORTED_ELLIPTIC_CURVE);
+-            return SECFailure;
++            rv = SECFailure;
++            goto done;
+         }
+-        rv = method->mul(derivedSecret, privateValue, publicValue);
++        rv = method->pt_mul(derivedSecret, privateValue, publicValue);
+         if (rv != SECSuccess) {
+-            SECITEM_ZfreeItem(derivedSecret, PR_FALSE);
++            PORT_SetError(SEC_ERROR_BAD_KEY);
+         }
+-        return rv;
++        goto done;
+     }
+ 
++    SECItem pointQ = { siBuffer, NULL, 0 };
++    mp_int k; /* to hold the private value */
++#if EC_DEBUG
++    int i;
++#endif
++
+     /*
+      * We fail if the public value is the point at infinity, since
+      * this produces predictable results.
+@@ -638,14 +708,18 @@ ECDH_Derive(SECItem *publicValue,
+ cleanup:
+     mp_clear(&k);
+ 
+-    if (err) {
+-        MP_TO_SEC_ERROR(err);
+-    }
+-
+     if (pointQ.data) {
+         PORT_ZFree(pointQ.data, pointQ.len);
+     }
+ 
++done:
++
++    if (err) {
++        MP_TO_SEC_ERROR(err);
++    }
++    if (rv != SECSuccess) {
++        SECITEM_ZfreeItem(derivedSecret, PR_FALSE);
++    }
+     return rv;
+ }
+ 
+@@ -659,19 +733,57 @@ ec_SignDigestWithSeed(ECPrivateKey *key,
+                       const SECItem *digest, const unsigned char *kb, const int kblen)
+ {
+     SECStatus rv = SECFailure;
++    ECParams *ecParams = NULL;
++    mp_err err = MP_OKAY;
++    int flen = 0;  /* length in bytes of the field size */
++    unsigned olen; /* length in bytes of the base point order */
++
++    /* Check args */
++    if (!key || !signature || !digest || !kb || (kblen <= 0)) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        rv = SECFailure;
++        goto done;
++    }
++
++    ecParams = &(key->ecParams);
++    flen = (ecParams->fieldID.size + 7) >> 3;
++    olen = ecParams->order.len;
++    if (signature->data == NULL) {
++        /* a call to get the signature length only */
++        signature->len = 2 * olen;
++        rv = SECSuccess;
++        goto done;
++    }
++    if (signature->len < 2 * olen) {
++        PORT_SetError(SEC_ERROR_OUTPUT_LEN);
++        rv = SECFailure;
++        goto done;
++    }
++
++    /* Perform curve specific signature using ECMethod */
++    if (ecParams->fieldID.type == ec_field_plain) {
++        const ECMethod *method = ec_get_method_from_name(ecParams->name);
++        if (method == NULL || method->sign_digest == NULL) {
++            PORT_SetError(SEC_ERROR_UNSUPPORTED_ELLIPTIC_CURVE);
++            rv = SECFailure;
++            goto done;
++        }
++        rv = method->sign_digest(key, signature, digest, kb, kblen);
++        if (rv != SECSuccess) {
++            PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        }
++        goto done;
++    }
++
+     mp_int x1;
+     mp_int d, k; /* private key, random integer */
+     mp_int r, s; /* tuple (r, s) is the signature */
+     mp_int t;    /* holding tmp values */
+     mp_int n;
+     mp_int ar; /* blinding value */
+-    mp_err err = MP_OKAY;
+-    ECParams *ecParams = NULL;
+     SECItem kGpoint = { siBuffer, NULL, 0 };
+-    int flen = 0;   /* length in bytes of the field size */
+-    unsigned olen;  /* length in bytes of the base point order */
+-    unsigned obits; /* length in bits  of the base point order */
+     unsigned char *t2 = NULL;
++    unsigned obits; /* length in bits  of the base point order */
+ 
+ #if EC_DEBUG
+     char mpstr[256];
+@@ -688,24 +800,6 @@ ec_SignDigestWithSeed(ECPrivateKey *key,
+     MP_DIGITS(&t) = 0;
+     MP_DIGITS(&ar) = 0;
+ 
+-    /* Check args */
+-    if (!key || !signature || !digest || !kb || (kblen < 0)) {
+-        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+-        goto cleanup;
+-    }
+-
+-    ecParams = &(key->ecParams);
+-    flen = (ecParams->fieldID.size + 7) >> 3;
+-    olen = ecParams->order.len;
+-    if (signature->data == NULL) {
+-        /* a call to get the signature length only */
+-        goto finish;
+-    }
+-    if (signature->len < 2 * olen) {
+-        PORT_SetError(SEC_ERROR_OUTPUT_LEN);
+-        goto cleanup;
+-    }
+-
+     CHECK_MPI_OK(mp_init(&x1));
+     CHECK_MPI_OK(mp_init(&d));
+     CHECK_MPI_OK(mp_init(&k));
+@@ -851,11 +945,11 @@ ec_SignDigestWithSeed(ECPrivateKey *key,
+     */
+     CHECK_MPI_OK(mp_to_fixlen_octets(&r, signature->data, olen));
+     CHECK_MPI_OK(mp_to_fixlen_octets(&s, signature->data + olen, olen));
+-finish:
+-    signature->len = 2 * olen;
+ 
++    signature->len = 2 * olen;
+     rv = SECSuccess;
+     err = MP_OKAY;
++
+ cleanup:
+     mp_clear(&x1);
+     mp_clear(&d);
+@@ -874,6 +968,7 @@ cleanup:
+         PORT_ZFree(kGpoint.data, kGpoint.len);
+     }
+ 
++done:
+     if (err) {
+         MP_TO_SEC_ERROR(err);
+         rv = SECFailure;
+@@ -892,12 +987,12 @@ ECDSA_SignDigestWithSeed(ECPrivateKey *k
+                          const SECItem *digest, const unsigned char *kb, const int kblen)
+ {
+ #if EC_DEBUG || EC_DOUBLECHECK
+-
+     SECItem *signature2 = SECITEM_AllocItem(NULL, NULL, signature->len);
+     SECStatus signSuccess = ec_SignDigestWithSeed(key, signature, digest, kb, kblen);
+     SECStatus signSuccessDouble = ec_SignDigestWithSeed(key, signature2, digest, kb, kblen);
+-    int signaturesEqual = NSS_SecureMemcmp(signature, signature2, signature->len);
++    int signaturesEqual = NSS_SecureMemcmp(signature->data, signature2->data, signature->len);
+     SECStatus rv;
++
+     if ((signaturesEqual == 0) && (signSuccess == SECSuccess) && (signSuccessDouble == SECSuccess)) {
+         rv = SECSuccess;
+     } else {
+@@ -923,8 +1018,7 @@ SECStatus
+ ECDSA_SignDigest(ECPrivateKey *key, SECItem *signature, const SECItem *digest)
+ {
+     SECStatus rv = SECFailure;
+-    int len;
+-    unsigned char *kBytes = NULL;
++    SECItem nonceRand = { siBuffer, NULL, 0 };
+ 
+     if (!key) {
+         PORT_SetError(SEC_ERROR_INVALID_ARGS);
+@@ -932,17 +1026,22 @@ ECDSA_SignDigest(ECPrivateKey *key, SECI
+     }
+ 
+     /* Generate random value k */
+-    len = key->ecParams.order.len;
+-    kBytes = ec_GenerateRandomPrivateKey(key->ecParams.order.data, len);
+-    if (kBytes == NULL)
++    SECITEM_AllocItem(NULL, &nonceRand, EC_GetScalarSize(&key->ecParams));
++    if (nonceRand.data == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        rv = SECFailure;
++        goto cleanup;
++    }
++    rv = ec_GenerateRandomPrivateKey(&key->ecParams, &nonceRand);
++    if (rv != SECSuccess || nonceRand.data == NULL)
+         goto cleanup;
+ 
+     /* Generate ECDSA signature with the specified k value */
+-    rv = ECDSA_SignDigestWithSeed(key, signature, digest, kBytes, len);
++    rv = ECDSA_SignDigestWithSeed(key, signature, digest, nonceRand.data, nonceRand.len);
+ 
+ cleanup:
+-    if (kBytes) {
+-        PORT_ZFree(kBytes, len);
++    if (nonceRand.data) {
++        SECITEM_ZfreeItem(&nonceRand, PR_FALSE);
+     }
+ 
+ #if EC_DEBUG
+@@ -966,12 +1065,37 @@ ECDSA_VerifyDigest(ECPublicKey *key, con
+                    const SECItem *digest)
+ {
+     SECStatus rv = SECFailure;
++    ECParams *ecParams = NULL;
++    mp_err err = MP_OKAY;
++
++    /* Check args */
++    if (!key || !signature || !digest) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        rv = SECFailure;
++        goto done;
++    }
++
++    ecParams = &(key->ecParams);
++
++    /* Perform curve specific signature verification using ECMethod */
++    if (ecParams->fieldID.type == ec_field_plain) {
++        const ECMethod *method = ec_get_method_from_name(ecParams->name);
++        if (method == NULL || method->verify_digest == NULL) {
++            PORT_SetError(SEC_ERROR_UNSUPPORTED_ELLIPTIC_CURVE);
++            rv = SECFailure;
++            goto done;
++        }
++        rv = method->verify_digest(key, signature, digest);
++        if (rv != SECSuccess) {
++            PORT_SetError(SEC_ERROR_BAD_SIGNATURE);
++        }
++        goto done;
++    }
++
+     mp_int r_, s_;       /* tuple (r', s') is received signature) */
+     mp_int c, u1, u2, v; /* intermediate values used in verification */
+     mp_int x1;
+     mp_int n;
+-    mp_err err = MP_OKAY;
+-    ECParams *ecParams = NULL;
+     SECItem pointC = { siBuffer, NULL, 0 };
+     int slen;       /* length in bytes of a half signature (r or s) */
+     int flen;       /* length in bytes of the field size */
+@@ -983,6 +1107,15 @@ ECDSA_VerifyDigest(ECPublicKey *key, con
+     printf("ECDSA verification called\n");
+ #endif
+ 
++    flen = (ecParams->fieldID.size + 7) >> 3;
++    olen = ecParams->order.len;
++    if (signature->len == 0 || signature->len % 2 != 0 ||
++        signature->len > 2 * olen) {
++        PORT_SetError(SEC_ERROR_INPUT_LEN);
++        goto cleanup;
++    }
++    slen = signature->len / 2;
++
+     /* Initialize MPI integers. */
+     /* must happen before the first potential call to cleanup */
+     MP_DIGITS(&r_) = 0;
+@@ -994,22 +1127,6 @@ ECDSA_VerifyDigest(ECPublicKey *key, con
+     MP_DIGITS(&v) = 0;
+     MP_DIGITS(&n) = 0;
+ 
+-    /* Check args */
+-    if (!key || !signature || !digest) {
+-        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+-        goto cleanup;
+-    }
+-
+-    ecParams = &(key->ecParams);
+-    flen = (ecParams->fieldID.size + 7) >> 3;
+-    olen = ecParams->order.len;
+-    if (signature->len == 0 || signature->len % 2 != 0 ||
+-        signature->len > 2 * olen) {
+-        PORT_SetError(SEC_ERROR_INPUT_LEN);
+-        goto cleanup;
+-    }
+-    slen = signature->len / 2;
+-
+     /*
+      * The incoming point has been verified in sftk_handlePublicKeyObject.
+      */
+@@ -1156,6 +1273,8 @@ cleanup:
+ 
+     if (pointC.data)
+         SECITEM_ZfreeItem(&pointC, PR_FALSE);
++
++done:
+     if (err) {
+         MP_TO_SEC_ERROR(err);
+         rv = SECFailure;
+diff -up ./lib/freebl/ecdecode.c.p256 ./lib/freebl/ecdecode.c
+--- ./lib/freebl/ecdecode.c.p256	2023-06-04 01:42:53.000000000 -0700
++++ ./lib/freebl/ecdecode.c	2024-01-09 11:25:43.802382184 -0800
+@@ -155,7 +155,7 @@ EC_FillParams(PLArenaPool *arena, const
+              * (the NIST P-256 curve)
+              */
+             CHECK_SEC_OK(gf_populate_params_bytes(ECCurve_X9_62_PRIME_256V1,
+-                                                  ec_field_GFp, params));
++                                                  ec_field_plain, params));
+             break;
+ 
+         case SEC_OID_SECG_EC_SECP384R1:
+@@ -176,7 +176,8 @@ EC_FillParams(PLArenaPool *arena, const
+ 
+         case SEC_OID_CURVE25519:
+             /* Populate params for Curve25519 */
+-            CHECK_SEC_OK(gf_populate_params_bytes(ECCurve25519, ec_field_plain,
++            CHECK_SEC_OK(gf_populate_params_bytes(ECCurve25519,
++                                                  ec_field_plain,
+                                                   params));
+             break;
+ 
+@@ -250,3 +251,18 @@ EC_GetPointSize(const ECParams *params)
+     }
+     return curveParams->pointSize - 1;
+ }
++
++int
++EC_GetScalarSize(const ECParams *params)
++{
++    ECCurveName name = params->name;
++    const ECCurveBytes *curveParams;
++
++    if ((name < ECCurve_noName) || (name > ECCurve_pastLastCurve) ||
++        ((curveParams = ecCurve_map[name]) == NULL)) {
++        /* unknown curve, calculate scalar size from field size in params */
++        int sizeInBytes = (params->fieldID.size + 7) / 8;
++        return sizeInBytes;
++    }
++    return curveParams->scalarSize;
++}
+diff -up ./lib/freebl/ec.h.p256 ./lib/freebl/ec.h
+--- ./lib/freebl/ec.h.p256	2023-06-04 01:42:53.000000000 -0700
++++ ./lib/freebl/ec.h	2024-01-09 11:43:03.868335326 -0800
+@@ -13,8 +13,11 @@
+ 
+ struct ECMethodStr {
+     ECCurveName name;
+-    SECStatus (*mul)(SECItem *result, SECItem *scalar, SECItem *point);
+-    SECStatus (*validate)(const SECItem *point);
++    SECStatus (*pt_mul)(SECItem *result, SECItem *scalar, SECItem *point);
++    SECStatus (*pt_validate)(const SECItem *point);
++    SECStatus (*scalar_validate)(const SECItem *scalar);
++    SECStatus (*sign_digest)(ECPrivateKey *key, SECItem *signature, const SECItem *digest, const unsigned char *kb, const unsigned int kblen);
++    SECStatus (*verify_digest)(ECPublicKey *key, const SECItem *signature, const SECItem *digest);
+ };
+ typedef struct ECMethodStr ECMethod;
+ 
+diff -up ./lib/freebl/ecl/ecl.h.p256 ./lib/freebl/ecl/ecl.h
+--- ./lib/freebl/ecl/ecl.h.p256	2023-06-04 01:42:53.000000000 -0700
++++ ./lib/freebl/ecl/ecl.h	2024-01-09 11:43:03.868335326 -0800
+@@ -45,5 +45,16 @@ mp_err ECPoint_validate(const ECGroup *g
+ 
+ SECStatus ec_Curve25519_pt_mul(SECItem *X, SECItem *k, SECItem *P);
+ SECStatus ec_Curve25519_pt_validate(const SECItem *px);
++SECStatus ec_Curve25519_scalar_validate(const SECItem *scalar);
++
++SECStatus ec_secp256r1_pt_mul(SECItem *X, SECItem *k, SECItem *P);
++SECStatus ec_secp256r1_pt_validate(const SECItem *px);
++SECStatus ec_secp256r1_scalar_validate(const SECItem *scalar);
++
++SECStatus ec_secp256r1_sign_digest(ECPrivateKey *key, SECItem *signature,
++                                   const SECItem *digest, const unsigned char *kb,
++                                   const unsigned int kblen);
++SECStatus ec_secp256r1_verify_digest(ECPublicKey *key, const SECItem *signature,
++                                     const SECItem *digest);
+ 
+ #endif /* __ecl_h_ */
+diff -up ./lib/freebl/ecl/ecp_25519.c.p256 ./lib/freebl/ecl/ecp_25519.c
+--- ./lib/freebl/ecl/ecp_25519.c.p256	2023-06-04 01:42:53.000000000 -0700
++++ ./lib/freebl/ecl/ecp_25519.c	2024-01-09 11:43:03.868335326 -0800
+@@ -15,6 +15,7 @@
+ #include "mpi-priv.h"
+ #include "secmpi.h"
+ #include "secitem.h"
++#include "secerr.h"
+ #include "secport.h"
+ #include <stdlib.h>
+ #include <stdio.h>
+@@ -94,6 +95,24 @@ ec_Curve25519_pt_validate(const SECItem
+     return SECSuccess;
+ }
+ 
++/*
++ * scalar validation is not necessary. 
++ */
++SECStatus
++ec_Curve25519_scalar_validate(const SECItem *scalar)
++{
++    if (!scalar || !scalar->data) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        return SECFailure;
++    }
++
++    if (scalar->len != 32) {
++        PORT_SetError(SEC_ERROR_BAD_KEY);
++        return SECFailure;
++    }
++    return SECSuccess;
++}
++
+ /*
+  * Scalar multiplication for Curve25519.
+  * If P == NULL, the base point is used.
+diff -up ./lib/freebl/ecl/ecp_secp256r1.c.p256 ./lib/freebl/ecl/ecp_secp256r1.c
+--- ./lib/freebl/ecl/ecp_secp256r1.c.p256	2024-01-09 11:25:43.802382184 -0800
++++ ./lib/freebl/ecl/ecp_secp256r1.c	2024-01-09 11:43:03.868335326 -0800
+@@ -0,0 +1,258 @@
++/* P-256 from HACL* */
++
++#ifdef FREEBL_NO_DEPEND
++#include "../stubs.h"
++#endif
++
++#include "ecl-priv.h"
++#include "secitem.h"
++#include "secerr.h"
++#include "secmpi.h"
++#include "../verified/Hacl_P256.h"
++
++/*
++ * Point Validation for P-256.
++ */
++
++SECStatus
++ec_secp256r1_pt_validate(const SECItem *pt)
++{
++    SECStatus res = SECSuccess;
++    if (!pt || !pt->data) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        res = SECFailure;
++        return res;
++    }
++
++    if (pt->len != 65) {
++        PORT_SetError(SEC_ERROR_BAD_KEY);
++        res = SECFailure;
++        return res;
++    }
++
++    if (pt->data[0] != EC_POINT_FORM_UNCOMPRESSED) {
++        PORT_SetError(SEC_ERROR_UNSUPPORTED_EC_POINT_FORM);
++        res = SECFailure;
++        return res;
++    }
++
++    bool b = Hacl_P256_validate_public_key(pt->data + 1);
++
++    if (!b) {
++        PORT_SetError(SEC_ERROR_BAD_KEY);
++        res = SECFailure;
++    }
++    return res;
++}
++
++/*
++ * Scalar Validation for P-256.
++ */
++
++SECStatus
++ec_secp256r1_scalar_validate(const SECItem *scalar)
++{
++    SECStatus res = SECSuccess;
++    if (!scalar || !scalar->data) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        res = SECFailure;
++        return res;
++    }
++
++    if (scalar->len != 32) {
++        PORT_SetError(SEC_ERROR_BAD_KEY);
++        res = SECFailure;
++        return res;
++    }
++
++    bool b = Hacl_P256_validate_private_key(scalar->data);
++
++    if (!b) {
++        PORT_SetError(SEC_ERROR_BAD_KEY);
++        res = SECFailure;
++    }
++    return res;
++}
++
++/*
++ * Scalar multiplication for P-256.
++ * If P == NULL, the base point is used.
++ * Returns X = k*P
++ */
++
++SECStatus
++ec_secp256r1_pt_mul(SECItem *X, SECItem *k, SECItem *P)
++{
++    SECStatus res = SECSuccess;
++    if (!P) {
++        uint8_t derived[64] = { 0 };
++
++        if (!X || !k || !X->data || !k->data ||
++            X->len < 65 || k->len != 32) {
++            PORT_SetError(SEC_ERROR_INVALID_ARGS);
++            res = SECFailure;
++            return res;
++        }
++
++        bool b = Hacl_P256_dh_initiator(derived, k->data);
++
++        if (!b) {
++            PORT_SetError(SEC_ERROR_BAD_KEY);
++            res = SECFailure;
++            return res;
++        }
++
++        X->len = 65;
++        X->data[0] = EC_POINT_FORM_UNCOMPRESSED;
++        memcpy(X->data + 1, derived, 64);
++
++    } else {
++        uint8_t full_key[32] = { 0 };
++        uint8_t *key;
++        uint8_t derived[64] = { 0 };
++
++        if (!X || !k || !P || !X->data || !k->data || !P->data ||
++            X->len < 32 || P->len != 65 ||
++            P->data[0] != EC_POINT_FORM_UNCOMPRESSED) {
++            PORT_SetError(SEC_ERROR_INVALID_ARGS);
++            res = SECFailure;
++            return res;
++        }
++
++        /* We consider keys of up to size 32, or of size 33 with a single leading 0 */
++        if (k->len < 32) {
++            memcpy(full_key + 32 - k->len, k->data, k->len);
++            key = full_key;
++        } else if (k->len == 32) {
++            key = k->data;
++        } else if (k->len == 33 && k->data[0] == 0) {
++            key = k->data + 1;
++        } else {
++            PORT_SetError(SEC_ERROR_INVALID_ARGS);
++            res = SECFailure;
++            return res;
++        }
++
++        bool b = Hacl_P256_dh_responder(derived, P->data + 1, key);
++
++        if (!b) {
++            PORT_SetError(SEC_ERROR_BAD_KEY);
++            res = SECFailure;
++            return res;
++        }
++
++        X->len = 32;
++        memcpy(X->data, derived, 32);
++    }
++
++    return res;
++}
++
++/*
++ * ECDSA Signature for P-256
++ */
++
++SECStatus
++ec_secp256r1_sign_digest(ECPrivateKey *key, SECItem *signature,
++                         const SECItem *digest, const unsigned char *kb,
++                         const unsigned int kblen)
++{
++    SECStatus res = SECSuccess;
++
++    if (!key || !signature || !digest || !kb ||
++        !key->privateValue.data ||
++        !signature->data || !digest->data ||
++        key->ecParams.name != ECCurve_NIST_P256) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        res = SECFailure;
++        return res;
++    }
++
++    if (key->privateValue.len != 32 ||
++        kblen == 0 ||
++        digest->len == 0 ||
++        signature->len < 64) {
++        PORT_SetError(SEC_ERROR_INPUT_LEN);
++        res = SECFailure;
++        return res;
++    }
++
++    uint8_t hash[32] = { 0 };
++    if (digest->len < 32) {
++        memcpy(hash + 32 - digest->len, digest->data, digest->len);
++    } else {
++        memcpy(hash, digest->data, 32);
++    }
++
++    uint8_t nonce[32] = { 0 };
++    if (kblen < 32) {
++        memcpy(nonce + 32 - kblen, kb, kblen);
++    } else {
++        memcpy(nonce, kb, 32);
++    }
++
++    bool b = Hacl_P256_ecdsa_sign_p256_without_hash(
++        signature->data, 32, hash,
++        key->privateValue.data, nonce);
++    if (!b) {
++        PORT_SetError(SEC_ERROR_BAD_KEY);
++        res = SECFailure;
++        return res;
++    }
++
++    signature->len = 64;
++    return res;
++}
++
++/*
++ * ECDSA Signature Verification for P-256
++ */
++
++SECStatus
++ec_secp256r1_verify_digest(ECPublicKey *key, const SECItem *signature,
++                           const SECItem *digest)
++{
++    SECStatus res = SECSuccess;
++
++    if (!key || !signature || !digest ||
++        !key->publicValue.data ||
++        !signature->data || !digest->data ||
++        key->ecParams.name != ECCurve_NIST_P256) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
++        res = SECFailure;
++        return res;
++    }
++
++    if (key->publicValue.len != 65 ||
++        digest->len == 0 ||
++        signature->len != 64) {
++        PORT_SetError(SEC_ERROR_INPUT_LEN);
++        res = SECFailure;
++        return res;
++    }
++
++    if (key->publicValue.data[0] != EC_POINT_FORM_UNCOMPRESSED) {
++        PORT_SetError(SEC_ERROR_UNSUPPORTED_EC_POINT_FORM);
++        res = SECFailure;
++        return res;
++    }
++
++    uint8_t hash[32] = { 0 };
++    if (digest->len < 32) {
++        memcpy(hash + 32 - digest->len, digest->data, digest->len);
++    } else {
++        memcpy(hash, digest->data, 32);
++    }
++
++    bool b = Hacl_P256_ecdsa_verif_without_hash(
++        32, hash,
++        key->publicValue.data + 1,
++        signature->data, signature->data + 32);
++    if (!b) {
++        PORT_SetError(SEC_ERROR_BAD_SIGNATURE);
++        res = SECFailure;
++        return res;
++    }
++
++    return res;
++}
+diff -up ./lib/freebl/freebl_base.gypi.p256 ./lib/freebl/freebl_base.gypi
+--- ./lib/freebl/freebl_base.gypi.p256	2024-01-09 11:22:17.628127464 -0800
++++ ./lib/freebl/freebl_base.gypi	2024-01-09 11:25:43.802382184 -0800
+@@ -34,8 +34,10 @@
+     'ecl/ecp_jac.c',
+     'ecl/ecp_jm.c',
+     'ecl/ecp_mont.c',
++    'ecl/ecp_secp256r1.c',
+     'ecl/ecp_secp384r1.c',
+     'ecl/ecp_secp521r1.c',
++    'verified/Hacl_P256.c',
+     'fipsfreebl.c',
+     'blinit.c',
+     'freeblver.c',
+diff -up ./lib/freebl/freebl.gyp.p256 ./lib/freebl/freebl.gyp
+--- ./lib/freebl/freebl.gyp.p256	2024-01-09 11:22:17.628127464 -0800
++++ ./lib/freebl/freebl.gyp	2024-01-09 11:25:43.802382184 -0800
+@@ -839,6 +839,7 @@
+         'defines':[
+           'HACL_CAN_COMPILE_VEC128',
+           'HACL_CAN_COMPILE_VEC256',
++          'HACL_CAN_COMPILE_INTRINSICS',
+         ],
+       }],
+       # MSVC has no __int128 type. Use emulated int128 and leave
+@@ -847,6 +848,7 @@
+         'defines': [
+           # The Makefile does version-tests on GCC, but we're not doing that here.
+           'HAVE_INT128_SUPPORT',
++          'HACL_CAN_COMPILE_UINT128'
+         ],
+       }, {
+         'defines': [
+diff -up ./lib/freebl/Makefile.p256 ./lib/freebl/Makefile
+--- ./lib/freebl/Makefile.p256	2024-01-09 11:25:43.802382184 -0800
++++ ./lib/freebl/Makefile	2024-01-09 11:27:42.154676474 -0800
+@@ -612,6 +612,8 @@ ifndef NSS_DISABLE_CHACHAPOLY
+     VERIFIED_SRCS += Hacl_Poly1305_32.c Hacl_Chacha20.c Hacl_Chacha20Poly1305_32.c
+ endif # NSS_DISABLE_CHACHAPOLY
+ 
++VERIFIED_SRCS += Hacl_P256.c
++
+ ifeq (,$(filter-out x86_64 aarch64,$(CPU_ARCH)))
+     # All 64-bit architectures get the 64 bit version.
+     ECL_SRCS += curve25519_64.c
+diff -up ./lib/freebl/manifest.mn.p256 ./lib/freebl/manifest.mn
+--- ./lib/freebl/manifest.mn.p256	2023-06-04 01:42:53.000000000 -0700
++++ ./lib/freebl/manifest.mn	2024-01-09 11:25:43.803382195 -0800
+@@ -107,7 +107,7 @@ ECL_HDRS = ecl-exp.h ecl.h ecp.h ecl-pri
+ ECL_SRCS = ecl.c ecl_mult.c ecl_gf.c \
+ 	ecp_aff.c ecp_jac.c ecp_mont.c \
+ 	ec_naf.c ecp_jm.c ecp_256.c ecp_384.c ecp_521.c \
+-	ecp_256_32.c ecp_25519.c ecp_secp384r1.c ecp_secp521r1.c
++	ecp_256_32.c ecp_25519.c ecp_secp256r1.c ecp_secp384r1.c ecp_secp521r1.c
+ SHA_SRCS = sha_fast.c
+ MPCPU_SRCS = mpcpucache.c
+ VERIFIED_SRCS = $(NULL)
+diff -up ./lib/freebl/verified/Hacl_P256.c.p256 ./lib/freebl/verified/Hacl_P256.c
+--- ./lib/freebl/verified/Hacl_P256.c.p256	2024-01-09 11:25:43.803382195 -0800
++++ ./lib/freebl/verified/Hacl_P256.c	2024-01-09 11:25:43.803382195 -0800
+@@ -0,0 +1,1832 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include "internal/Hacl_P256.h"
++
++#include "internal/Hacl_P256_PrecompTable.h"
++#include "internal/Hacl_Krmllib.h"
++#include "internal/Hacl_Bignum_Base.h"
++#include "lib_intrinsics.h"
++
++static inline uint64_t
++bn_is_zero_mask4(uint64_t *f)
++{
++    uint64_t bn_zero[4U] = { 0U };
++    uint64_t mask = (uint64_t)0xFFFFFFFFFFFFFFFFU;
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t uu____0 = FStar_UInt64_eq_mask(f[i], bn_zero[i]);
++                    mask = uu____0 & mask;);
++    uint64_t mask1 = mask;
++    uint64_t res = mask1;
++    return res;
++}
++
++static inline bool
++bn_is_zero_vartime4(uint64_t *f)
++{
++    uint64_t m = bn_is_zero_mask4(f);
++    return m == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++}
++
++static inline uint64_t
++bn_is_eq_mask4(uint64_t *a, uint64_t *b)
++{
++    uint64_t mask = (uint64_t)0xFFFFFFFFFFFFFFFFU;
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t uu____0 = FStar_UInt64_eq_mask(a[i], b[i]);
++                    mask = uu____0 & mask;);
++    uint64_t mask1 = mask;
++    return mask1;
++}
++
++static inline bool
++bn_is_eq_vartime4(uint64_t *a, uint64_t *b)
++{
++    uint64_t m = bn_is_eq_mask4(a, b);
++    return m == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++}
++
++static inline void
++bn_cmovznz4(uint64_t *res, uint64_t cin, uint64_t *x, uint64_t *y)
++{
++    uint64_t mask = ~FStar_UInt64_eq_mask(cin, (uint64_t)0U);
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t *os = res;
++                    uint64_t uu____0 = x[i];
++                    uint64_t x1 = uu____0 ^ (mask & (y[i] ^ uu____0));
++                    os[i] = x1;);
++}
++
++static inline void
++bn_add_mod4(uint64_t *res, uint64_t *n, uint64_t *x, uint64_t *y)
++{
++    uint64_t c0 = (uint64_t)0U;
++    {
++        uint64_t t1 = x[(uint32_t)4U * (uint32_t)0U];
++        uint64_t t20 = y[(uint32_t)4U * (uint32_t)0U];
++        uint64_t *res_i0 = res + (uint32_t)4U * (uint32_t)0U;
++        c0 = Lib_IntTypes_Intrinsics_add_carry_u64(c0, t1, t20, res_i0);
++        uint64_t t10 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t t21 = y[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t *res_i1 = res + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++        c0 = Lib_IntTypes_Intrinsics_add_carry_u64(c0, t10, t21, res_i1);
++        uint64_t t11 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t t22 = y[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t *res_i2 = res + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++        c0 = Lib_IntTypes_Intrinsics_add_carry_u64(c0, t11, t22, res_i2);
++        uint64_t t12 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t t2 = y[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t *res_i = res + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++        c0 = Lib_IntTypes_Intrinsics_add_carry_u64(c0, t12, t2, res_i);
++    }
++    uint64_t c00 = c0;
++    uint64_t tmp[4U] = { 0U };
++    uint64_t c = (uint64_t)0U;
++    {
++        uint64_t t1 = res[(uint32_t)4U * (uint32_t)0U];
++        uint64_t t20 = n[(uint32_t)4U * (uint32_t)0U];
++        uint64_t *res_i0 = tmp + (uint32_t)4U * (uint32_t)0U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t1, t20, res_i0);
++        uint64_t t10 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t t21 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t *res_i1 = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t10, t21, res_i1);
++        uint64_t t11 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t t22 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t *res_i2 = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t11, t22, res_i2);
++        uint64_t t12 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t t2 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t *res_i = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t12, t2, res_i);
++    }
++    uint64_t c1 = c;
++    uint64_t c2 = c00 - c1;
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t *os = res;
++                    uint64_t x1 = (c2 & res[i]) | (~c2 & tmp[i]);
++                    os[i] = x1;);
++}
++
++static inline uint64_t
++bn_sub4(uint64_t *res, uint64_t *x, uint64_t *y)
++{
++    uint64_t c = (uint64_t)0U;
++    {
++        uint64_t t1 = x[(uint32_t)4U * (uint32_t)0U];
++        uint64_t t20 = y[(uint32_t)4U * (uint32_t)0U];
++        uint64_t *res_i0 = res + (uint32_t)4U * (uint32_t)0U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t1, t20, res_i0);
++        uint64_t t10 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t t21 = y[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t *res_i1 = res + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t10, t21, res_i1);
++        uint64_t t11 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t t22 = y[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t *res_i2 = res + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t11, t22, res_i2);
++        uint64_t t12 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t t2 = y[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t *res_i = res + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t12, t2, res_i);
++    }
++    uint64_t c0 = c;
++    return c0;
++}
++
++static inline void
++bn_sub_mod4(uint64_t *res, uint64_t *n, uint64_t *x, uint64_t *y)
++{
++    uint64_t c0 = (uint64_t)0U;
++    {
++        uint64_t t1 = x[(uint32_t)4U * (uint32_t)0U];
++        uint64_t t20 = y[(uint32_t)4U * (uint32_t)0U];
++        uint64_t *res_i0 = res + (uint32_t)4U * (uint32_t)0U;
++        c0 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c0, t1, t20, res_i0);
++        uint64_t t10 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t t21 = y[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t *res_i1 = res + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++        c0 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c0, t10, t21, res_i1);
++        uint64_t t11 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t t22 = y[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t *res_i2 = res + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++        c0 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c0, t11, t22, res_i2);
++        uint64_t t12 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t t2 = y[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t *res_i = res + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++        c0 = Lib_IntTypes_Intrinsics_sub_borrow_u64(c0, t12, t2, res_i);
++    }
++    uint64_t c00 = c0;
++    uint64_t tmp[4U] = { 0U };
++    uint64_t c = (uint64_t)0U;
++    {
++        uint64_t t1 = res[(uint32_t)4U * (uint32_t)0U];
++        uint64_t t20 = n[(uint32_t)4U * (uint32_t)0U];
++        uint64_t *res_i0 = tmp + (uint32_t)4U * (uint32_t)0U;
++        c = Lib_IntTypes_Intrinsics_add_carry_u64(c, t1, t20, res_i0);
++        uint64_t t10 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t t21 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t *res_i1 = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++        c = Lib_IntTypes_Intrinsics_add_carry_u64(c, t10, t21, res_i1);
++        uint64_t t11 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t t22 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t *res_i2 = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++        c = Lib_IntTypes_Intrinsics_add_carry_u64(c, t11, t22, res_i2);
++        uint64_t t12 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t t2 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t *res_i = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++        c = Lib_IntTypes_Intrinsics_add_carry_u64(c, t12, t2, res_i);
++    }
++    uint64_t c1 = c;
++    // TODO: remove unused variable
++    (void)c1;
++    uint64_t c2 = (uint64_t)0U - c00;
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t *os = res;
++                    uint64_t x1 = (c2 & tmp[i]) | (~c2 & res[i]);
++                    os[i] = x1;);
++}
++
++static inline void
++bn_mul4(uint64_t *res, uint64_t *x, uint64_t *y)
++{
++    memset(res, 0U, (uint32_t)8U * sizeof(uint64_t));
++    KRML_MAYBE_FOR4(
++        i0,
++        (uint32_t)0U,
++        (uint32_t)4U,
++        (uint32_t)1U,
++        uint64_t bj = y[i0];
++        uint64_t *res_j = res + i0;
++        uint64_t c = (uint64_t)0U;
++        {
++            uint64_t a_i = x[(uint32_t)4U * (uint32_t)0U];
++            uint64_t *res_i0 = res_j + (uint32_t)4U * (uint32_t)0U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i, bj, c, res_i0);
++            uint64_t a_i0 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++            uint64_t *res_i1 = res_j + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i0, bj, c, res_i1);
++            uint64_t a_i1 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++            uint64_t *res_i2 = res_j + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i1, bj, c, res_i2);
++            uint64_t a_i2 = x[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++            uint64_t *res_i = res_j + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i2, bj, c, res_i);
++        } uint64_t r = c;
++        res[(uint32_t)4U + i0] = r;);
++}
++
++static inline void
++bn_sqr4(uint64_t *res, uint64_t *x)
++{
++    memset(res, 0U, (uint32_t)8U * sizeof(uint64_t));
++    KRML_MAYBE_FOR4(
++        i0,
++        (uint32_t)0U,
++        (uint32_t)4U,
++        (uint32_t)1U,
++        uint64_t *ab = x;
++        uint64_t a_j = x[i0];
++        uint64_t *res_j = res + i0;
++        uint64_t c = (uint64_t)0U;
++        for (uint32_t i = (uint32_t)0U; i < i0 / (uint32_t)4U; i++) {
++            uint64_t a_i = ab[(uint32_t)4U * i];
++            uint64_t *res_i0 = res_j + (uint32_t)4U * i;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i, a_j, c, res_i0);
++            uint64_t a_i0 = ab[(uint32_t)4U * i + (uint32_t)1U];
++            uint64_t *res_i1 = res_j + (uint32_t)4U * i + (uint32_t)1U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i0, a_j, c, res_i1);
++            uint64_t a_i1 = ab[(uint32_t)4U * i + (uint32_t)2U];
++            uint64_t *res_i2 = res_j + (uint32_t)4U * i + (uint32_t)2U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i1, a_j, c, res_i2);
++            uint64_t a_i2 = ab[(uint32_t)4U * i + (uint32_t)3U];
++            uint64_t *res_i = res_j + (uint32_t)4U * i + (uint32_t)3U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i2, a_j, c, res_i);
++        }
++	for (uint32_t i = i0 / (uint32_t)4U * (uint32_t)4U; i < i0; i++) {
++            uint64_t a_i = ab[i];
++            uint64_t *res_i = res_j + i;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i, a_j, c, res_i);
++        }
++	uint64_t r = c;
++        res[i0 + i0] = r;);
++    uint64_t c0 = Hacl_Bignum_Addition_bn_add_eq_len_u64((uint32_t)8U, res, res, res);
++    // TODO: remove unused variable
++    (void)c0;
++    uint64_t tmp[8U] = { 0U };
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    FStar_UInt128_uint128 res1 = FStar_UInt128_mul_wide(x[i], x[i]);
++                    uint64_t hi = FStar_UInt128_uint128_to_uint64(FStar_UInt128_shift_right(res1, (uint32_t)64U));
++                    uint64_t lo = FStar_UInt128_uint128_to_uint64(res1);
++                    tmp[(uint32_t)2U * i] = lo;
++                    tmp[(uint32_t)2U * i + (uint32_t)1U] = hi;);
++    uint64_t c1 = Hacl_Bignum_Addition_bn_add_eq_len_u64((uint32_t)8U, res, tmp, res);
++    // TODO: remove unused variable
++    (void)c1;
++}
++
++static inline void
++bn_to_bytes_be4(uint8_t *res, uint64_t *f)
++{
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    store64_be(res + i * (uint32_t)8U, f[(uint32_t)4U - i - (uint32_t)1U]););
++}
++
++static inline void
++bn_from_bytes_be4(uint64_t *res, uint8_t *b)
++{
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t *os = res;
++                    uint64_t u = load64_be(b + ((uint32_t)4U - i - (uint32_t)1U) * (uint32_t)8U);
++                    uint64_t x = u;
++                    os[i] = x;);
++}
++
++static inline void
++bn2_to_bytes_be4(uint8_t *res, uint64_t *x, uint64_t *y)
++{
++    bn_to_bytes_be4(res, x);
++    bn_to_bytes_be4(res + (uint32_t)32U, y);
++}
++
++static inline void
++make_prime(uint64_t *n)
++{
++    n[0U] = (uint64_t)0xffffffffffffffffU;
++    n[1U] = (uint64_t)0xffffffffU;
++    n[2U] = (uint64_t)0x0U;
++    n[3U] = (uint64_t)0xffffffff00000001U;
++}
++
++static inline void
++make_order(uint64_t *n)
++{
++    n[0U] = (uint64_t)0xf3b9cac2fc632551U;
++    n[1U] = (uint64_t)0xbce6faada7179e84U;
++    n[2U] = (uint64_t)0xffffffffffffffffU;
++    n[3U] = (uint64_t)0xffffffff00000000U;
++}
++
++static inline void
++make_a_coeff(uint64_t *a)
++{
++    a[0U] = (uint64_t)0xfffffffffffffffcU;
++    a[1U] = (uint64_t)0x3ffffffffU;
++    a[2U] = (uint64_t)0x0U;
++    a[3U] = (uint64_t)0xfffffffc00000004U;
++}
++
++static inline void
++make_b_coeff(uint64_t *b)
++{
++    b[0U] = (uint64_t)0xd89cdf6229c4bddfU;
++    b[1U] = (uint64_t)0xacf005cd78843090U;
++    b[2U] = (uint64_t)0xe5a220abf7212ed6U;
++    b[3U] = (uint64_t)0xdc30061d04874834U;
++}
++
++static inline void
++make_g_x(uint64_t *n)
++{
++    n[0U] = (uint64_t)0x79e730d418a9143cU;
++    n[1U] = (uint64_t)0x75ba95fc5fedb601U;
++    n[2U] = (uint64_t)0x79fb732b77622510U;
++    n[3U] = (uint64_t)0x18905f76a53755c6U;
++}
++
++static inline void
++make_g_y(uint64_t *n)
++{
++    n[0U] = (uint64_t)0xddf25357ce95560aU;
++    n[1U] = (uint64_t)0x8b4ab8e4ba19e45cU;
++    n[2U] = (uint64_t)0xd2e88688dd21f325U;
++    n[3U] = (uint64_t)0x8571ff1825885d85U;
++}
++
++static inline void
++make_fmont_R2(uint64_t *n)
++{
++    n[0U] = (uint64_t)0x3U;
++    n[1U] = (uint64_t)0xfffffffbffffffffU;
++    n[2U] = (uint64_t)0xfffffffffffffffeU;
++    n[3U] = (uint64_t)0x4fffffffdU;
++}
++
++static inline void
++make_fzero(uint64_t *n)
++{
++    n[0U] = (uint64_t)0U;
++    n[1U] = (uint64_t)0U;
++    n[2U] = (uint64_t)0U;
++    n[3U] = (uint64_t)0U;
++}
++
++static inline void
++make_fone(uint64_t *n)
++{
++    n[0U] = (uint64_t)0x1U;
++    n[1U] = (uint64_t)0xffffffff00000000U;
++    n[2U] = (uint64_t)0xffffffffffffffffU;
++    n[3U] = (uint64_t)0xfffffffeU;
++}
++
++static inline uint64_t
++bn_is_lt_prime_mask4(uint64_t *f)
++{
++    uint64_t tmp[4U] = { 0U };
++    make_prime(tmp);
++    uint64_t c = bn_sub4(tmp, f, tmp);
++    return (uint64_t)0U - c;
++}
++
++static inline uint64_t
++feq_mask(uint64_t *a, uint64_t *b)
++{
++    uint64_t r = bn_is_eq_mask4(a, b);
++    return r;
++}
++
++static inline void
++fadd0(uint64_t *res, uint64_t *x, uint64_t *y)
++{
++    uint64_t n[4U] = { 0U };
++    make_prime(n);
++    bn_add_mod4(res, n, x, y);
++}
++
++static inline void
++fsub0(uint64_t *res, uint64_t *x, uint64_t *y)
++{
++    uint64_t n[4U] = { 0U };
++    make_prime(n);
++    bn_sub_mod4(res, n, x, y);
++}
++
++static inline void
++fnegate_conditional_vartime(uint64_t *f, bool is_negate)
++{
++    uint64_t zero[4U] = { 0U };
++    if (is_negate) {
++        fsub0(f, zero, f);
++    }
++}
++
++static inline void
++mont_reduction(uint64_t *res, uint64_t *x)
++{
++    uint64_t n[4U] = { 0U };
++    make_prime(n);
++    uint64_t c0 = (uint64_t)0U;
++    KRML_MAYBE_FOR4(
++        i0,
++        (uint32_t)0U,
++        (uint32_t)4U,
++        (uint32_t)1U,
++        uint64_t qj = (uint64_t)1U * x[i0];
++        uint64_t *res_j0 = x + i0;
++        uint64_t c = (uint64_t)0U;
++        {
++            uint64_t a_i = n[(uint32_t)4U * (uint32_t)0U];
++            uint64_t *res_i0 = res_j0 + (uint32_t)4U * (uint32_t)0U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i, qj, c, res_i0);
++            uint64_t a_i0 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++            uint64_t *res_i1 = res_j0 + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i0, qj, c, res_i1);
++            uint64_t a_i1 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++            uint64_t *res_i2 = res_j0 + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i1, qj, c, res_i2);
++            uint64_t a_i2 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++            uint64_t *res_i = res_j0 + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i2, qj, c, res_i);
++        } uint64_t r = c;
++        uint64_t c1 = r;
++        uint64_t *resb = x + (uint32_t)4U + i0;
++        uint64_t res_j = x[(uint32_t)4U + i0];
++        c0 = Lib_IntTypes_Intrinsics_add_carry_u64(c0, c1, res_j, resb););
++    memcpy(res, x + (uint32_t)4U, (uint32_t)4U * sizeof(uint64_t));
++    uint64_t c00 = c0;
++    uint64_t tmp[4U] = { 0U };
++    uint64_t c = (uint64_t)0U;
++    {
++        uint64_t t1 = res[(uint32_t)4U * (uint32_t)0U];
++        uint64_t t20 = n[(uint32_t)4U * (uint32_t)0U];
++        uint64_t *res_i0 = tmp + (uint32_t)4U * (uint32_t)0U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t1, t20, res_i0);
++        uint64_t t10 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t t21 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t *res_i1 = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t10, t21, res_i1);
++        uint64_t t11 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t t22 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t *res_i2 = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t11, t22, res_i2);
++        uint64_t t12 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t t2 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t *res_i = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t12, t2, res_i);
++    }
++    uint64_t c1 = c;
++    uint64_t c2 = c00 - c1;
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t *os = res;
++                    uint64_t x1 = (c2 & res[i]) | (~c2 & tmp[i]);
++                    os[i] = x1;);
++}
++
++static inline void
++fmul0(uint64_t *res, uint64_t *x, uint64_t *y)
++{
++    uint64_t tmp[8U] = { 0U };
++    bn_mul4(tmp, x, y);
++    mont_reduction(res, tmp);
++}
++
++static inline void
++fsqr0(uint64_t *res, uint64_t *x)
++{
++    uint64_t tmp[8U] = { 0U };
++    bn_sqr4(tmp, x);
++    mont_reduction(res, tmp);
++}
++
++static inline void
++from_mont(uint64_t *res, uint64_t *a)
++{
++    uint64_t tmp[8U] = { 0U };
++    memcpy(tmp, a, (uint32_t)4U * sizeof(uint64_t));
++    mont_reduction(res, tmp);
++}
++
++static inline void
++to_mont(uint64_t *res, uint64_t *a)
++{
++    uint64_t r2modn[4U] = { 0U };
++    make_fmont_R2(r2modn);
++    fmul0(res, a, r2modn);
++}
++
++static inline void
++fmul_by_b_coeff(uint64_t *res, uint64_t *x)
++{
++    uint64_t b_coeff[4U] = { 0U };
++    make_b_coeff(b_coeff);
++    fmul0(res, b_coeff, x);
++}
++
++static inline void
++fcube(uint64_t *res, uint64_t *x)
++{
++    fsqr0(res, x);
++    fmul0(res, res, x);
++}
++
++static inline void
++finv(uint64_t *res, uint64_t *a)
++{
++    uint64_t tmp[16U] = { 0U };
++    uint64_t *x30 = tmp;
++    uint64_t *x2 = tmp + (uint32_t)4U;
++    uint64_t *tmp1 = tmp + (uint32_t)8U;
++    uint64_t *tmp2 = tmp + (uint32_t)12U;
++    memcpy(x2, a, (uint32_t)4U * sizeof(uint64_t));
++    {
++        fsqr0(x2, x2);
++    }
++    fmul0(x2, x2, a);
++    memcpy(x30, x2, (uint32_t)4U * sizeof(uint64_t));
++    {
++        fsqr0(x30, x30);
++    }
++    fmul0(x30, x30, a);
++    memcpy(tmp1, x30, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR3(i, (uint32_t)0U, (uint32_t)3U, (uint32_t)1U, fsqr0(tmp1, tmp1););
++    fmul0(tmp1, tmp1, x30);
++    memcpy(tmp2, tmp1, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR6(i, (uint32_t)0U, (uint32_t)6U, (uint32_t)1U, fsqr0(tmp2, tmp2););
++    fmul0(tmp2, tmp2, tmp1);
++    memcpy(tmp1, tmp2, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR3(i, (uint32_t)0U, (uint32_t)3U, (uint32_t)1U, fsqr0(tmp1, tmp1););
++    fmul0(tmp1, tmp1, x30);
++    memcpy(x30, tmp1, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR15(i, (uint32_t)0U, (uint32_t)15U, (uint32_t)1U, fsqr0(x30, x30););
++    fmul0(x30, x30, tmp1);
++    memcpy(tmp1, x30, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR2(i, (uint32_t)0U, (uint32_t)2U, (uint32_t)1U, fsqr0(tmp1, tmp1););
++    fmul0(tmp1, tmp1, x2);
++    memcpy(x2, tmp1, (uint32_t)4U * sizeof(uint64_t));
++    for (uint32_t i = (uint32_t)0U; i < (uint32_t)32U; i++) {
++        fsqr0(x2, x2);
++    }
++    fmul0(x2, x2, a);
++    for (uint32_t i = (uint32_t)0U; i < (uint32_t)128U; i++) {
++        fsqr0(x2, x2);
++    }
++    fmul0(x2, x2, tmp1);
++    for (uint32_t i = (uint32_t)0U; i < (uint32_t)32U; i++) {
++        fsqr0(x2, x2);
++    }
++    fmul0(x2, x2, tmp1);
++    for (uint32_t i = (uint32_t)0U; i < (uint32_t)30U; i++) {
++        fsqr0(x2, x2);
++    }
++    fmul0(x2, x2, x30);
++    KRML_MAYBE_FOR2(i, (uint32_t)0U, (uint32_t)2U, (uint32_t)1U, fsqr0(x2, x2););
++    fmul0(tmp1, x2, a);
++    memcpy(res, tmp1, (uint32_t)4U * sizeof(uint64_t));
++}
++
++static inline void
++fsqrt(uint64_t *res, uint64_t *a)
++{
++    uint64_t tmp[8U] = { 0U };
++    uint64_t *tmp1 = tmp;
++    uint64_t *tmp2 = tmp + (uint32_t)4U;
++    memcpy(tmp1, a, (uint32_t)4U * sizeof(uint64_t));
++    {
++        fsqr0(tmp1, tmp1);
++    }
++    fmul0(tmp1, tmp1, a);
++    memcpy(tmp2, tmp1, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR2(i, (uint32_t)0U, (uint32_t)2U, (uint32_t)1U, fsqr0(tmp2, tmp2););
++    fmul0(tmp2, tmp2, tmp1);
++    memcpy(tmp1, tmp2, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR4(i, (uint32_t)0U, (uint32_t)4U, (uint32_t)1U, fsqr0(tmp1, tmp1););
++    fmul0(tmp1, tmp1, tmp2);
++    memcpy(tmp2, tmp1, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR8(i, (uint32_t)0U, (uint32_t)8U, (uint32_t)1U, fsqr0(tmp2, tmp2););
++    fmul0(tmp2, tmp2, tmp1);
++    memcpy(tmp1, tmp2, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR16(i, (uint32_t)0U, (uint32_t)16U, (uint32_t)1U, fsqr0(tmp1, tmp1););
++    fmul0(tmp1, tmp1, tmp2);
++    memcpy(tmp2, tmp1, (uint32_t)4U * sizeof(uint64_t));
++    for (uint32_t i = (uint32_t)0U; i < (uint32_t)32U; i++) {
++        fsqr0(tmp2, tmp2);
++    }
++    fmul0(tmp2, tmp2, a);
++    for (uint32_t i = (uint32_t)0U; i < (uint32_t)96U; i++) {
++        fsqr0(tmp2, tmp2);
++    }
++    fmul0(tmp2, tmp2, a);
++    for (uint32_t i = (uint32_t)0U; i < (uint32_t)94U; i++) {
++        fsqr0(tmp2, tmp2);
++    }
++    memcpy(res, tmp2, (uint32_t)4U * sizeof(uint64_t));
++}
++
++static inline void
++make_base_point(uint64_t *p)
++{
++    uint64_t *x = p;
++    uint64_t *y = p + (uint32_t)4U;
++    uint64_t *z = p + (uint32_t)8U;
++    make_g_x(x);
++    make_g_y(y);
++    make_fone(z);
++}
++
++static inline void
++make_point_at_inf(uint64_t *p)
++{
++    uint64_t *x = p;
++    uint64_t *y = p + (uint32_t)4U;
++    uint64_t *z = p + (uint32_t)8U;
++    make_fzero(x);
++    make_fone(y);
++    make_fzero(z);
++}
++
++static inline bool
++is_point_at_inf_vartime(uint64_t *p)
++{
++    uint64_t *pz = p + (uint32_t)8U;
++    return bn_is_zero_vartime4(pz);
++}
++
++static inline void
++to_aff_point(uint64_t *res, uint64_t *p)
++{
++    uint64_t zinv[4U] = { 0U };
++    uint64_t *px = p;
++    uint64_t *py = p + (uint32_t)4U;
++    uint64_t *pz = p + (uint32_t)8U;
++    uint64_t *x = res;
++    uint64_t *y = res + (uint32_t)4U;
++    finv(zinv, pz);
++    fmul0(x, px, zinv);
++    fmul0(y, py, zinv);
++    from_mont(x, x);
++    from_mont(y, y);
++}
++
++static inline void
++to_aff_point_x(uint64_t *res, uint64_t *p)
++{
++    uint64_t zinv[4U] = { 0U };
++    uint64_t *px = p;
++    uint64_t *pz = p + (uint32_t)8U;
++    finv(zinv, pz);
++    fmul0(res, px, zinv);
++    from_mont(res, res);
++}
++
++static inline void
++to_proj_point(uint64_t *res, uint64_t *p)
++{
++    uint64_t *px = p;
++    uint64_t *py = p + (uint32_t)4U;
++    uint64_t *rx = res;
++    uint64_t *ry = res + (uint32_t)4U;
++    uint64_t *rz = res + (uint32_t)8U;
++    to_mont(rx, px);
++    to_mont(ry, py);
++    make_fone(rz);
++}
++
++static inline bool
++is_on_curve_vartime(uint64_t *p)
++{
++    uint64_t rp[4U] = { 0U };
++    uint64_t tx[4U] = { 0U };
++    uint64_t ty[4U] = { 0U };
++    uint64_t *px = p;
++    uint64_t *py = p + (uint32_t)4U;
++    to_mont(tx, px);
++    to_mont(ty, py);
++    uint64_t tmp[4U] = { 0U };
++    fcube(rp, tx);
++    make_a_coeff(tmp);
++    fmul0(tmp, tmp, tx);
++    fadd0(rp, tmp, rp);
++    make_b_coeff(tmp);
++    fadd0(rp, tmp, rp);
++    fsqr0(ty, ty);
++    uint64_t r = feq_mask(ty, rp);
++    bool r0 = r == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++    return r0;
++}
++
++static inline void
++aff_point_store(uint8_t *res, uint64_t *p)
++{
++    uint64_t *px = p;
++    uint64_t *py = p + (uint32_t)4U;
++    bn2_to_bytes_be4(res, px, py);
++}
++
++static inline void
++point_store(uint8_t *res, uint64_t *p)
++{
++    uint64_t aff_p[8U] = { 0U };
++    to_aff_point(aff_p, p);
++    aff_point_store(res, aff_p);
++}
++
++static inline bool
++aff_point_load_vartime(uint64_t *p, uint8_t *b)
++{
++    uint8_t *p_x = b;
++    uint8_t *p_y = b + (uint32_t)32U;
++    uint64_t *bn_p_x = p;
++    uint64_t *bn_p_y = p + (uint32_t)4U;
++    bn_from_bytes_be4(bn_p_x, p_x);
++    bn_from_bytes_be4(bn_p_y, p_y);
++    uint64_t *px = p;
++    uint64_t *py = p + (uint32_t)4U;
++    uint64_t lessX = bn_is_lt_prime_mask4(px);
++    uint64_t lessY = bn_is_lt_prime_mask4(py);
++    uint64_t res = lessX & lessY;
++    bool is_xy_valid = res == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++    if (!is_xy_valid) {
++        return false;
++    }
++    return is_on_curve_vartime(p);
++}
++
++static inline bool
++load_point_vartime(uint64_t *p, uint8_t *b)
++{
++    uint64_t p_aff[8U] = { 0U };
++    bool res = aff_point_load_vartime(p_aff, b);
++    if (res) {
++        to_proj_point(p, p_aff);
++    }
++    return res;
++}
++
++static inline bool
++aff_point_decompress_vartime(uint64_t *x, uint64_t *y, uint8_t *s)
++{
++    uint8_t s0 = s[0U];
++    uint8_t s01 = s0;
++    if (!(s01 == (uint8_t)0x02U || s01 == (uint8_t)0x03U)) {
++        return false;
++    }
++    uint8_t *xb = s + (uint32_t)1U;
++    bn_from_bytes_be4(x, xb);
++    uint64_t is_x_valid = bn_is_lt_prime_mask4(x);
++    bool is_x_valid1 = is_x_valid == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++    bool is_y_odd = s01 == (uint8_t)0x03U;
++    if (!is_x_valid1) {
++        return false;
++    }
++    uint64_t y2M[4U] = { 0U };
++    uint64_t xM[4U] = { 0U };
++    uint64_t yM[4U] = { 0U };
++    to_mont(xM, x);
++    uint64_t tmp[4U] = { 0U };
++    fcube(y2M, xM);
++    make_a_coeff(tmp);
++    fmul0(tmp, tmp, xM);
++    fadd0(y2M, tmp, y2M);
++    make_b_coeff(tmp);
++    fadd0(y2M, tmp, y2M);
++    fsqrt(yM, y2M);
++    from_mont(y, yM);
++    fsqr0(yM, yM);
++    uint64_t r = feq_mask(yM, y2M);
++    bool is_y_valid = r == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++    bool is_y_valid0 = is_y_valid;
++    if (!is_y_valid0) {
++        return false;
++    }
++    uint64_t is_y_odd1 = y[0U] & (uint64_t)1U;
++    bool is_y_odd2 = is_y_odd1 == (uint64_t)1U;
++    fnegate_conditional_vartime(y, is_y_odd2 != is_y_odd);
++    return true;
++}
++
++static inline void
++point_double(uint64_t *res, uint64_t *p)
++{
++    uint64_t tmp[20U] = { 0U };
++    uint64_t *x = p;
++    uint64_t *z = p + (uint32_t)8U;
++    uint64_t *x3 = res;
++    uint64_t *y3 = res + (uint32_t)4U;
++    uint64_t *z3 = res + (uint32_t)8U;
++    uint64_t *t0 = tmp;
++    uint64_t *t1 = tmp + (uint32_t)4U;
++    uint64_t *t2 = tmp + (uint32_t)8U;
++    uint64_t *t3 = tmp + (uint32_t)12U;
++    uint64_t *t4 = tmp + (uint32_t)16U;
++    uint64_t *x1 = p;
++    uint64_t *y = p + (uint32_t)4U;
++    uint64_t *z1 = p + (uint32_t)8U;
++    fsqr0(t0, x1);
++    fsqr0(t1, y);
++    fsqr0(t2, z1);
++    fmul0(t3, x1, y);
++    fadd0(t3, t3, t3);
++    fmul0(t4, y, z1);
++    fmul0(z3, x, z);
++    fadd0(z3, z3, z3);
++    fmul_by_b_coeff(y3, t2);
++    fsub0(y3, y3, z3);
++    fadd0(x3, y3, y3);
++    fadd0(y3, x3, y3);
++    fsub0(x3, t1, y3);
++    fadd0(y3, t1, y3);
++    fmul0(y3, x3, y3);
++    fmul0(x3, x3, t3);
++    fadd0(t3, t2, t2);
++    fadd0(t2, t2, t3);
++    fmul_by_b_coeff(z3, z3);
++    fsub0(z3, z3, t2);
++    fsub0(z3, z3, t0);
++    fadd0(t3, z3, z3);
++    fadd0(z3, z3, t3);
++    fadd0(t3, t0, t0);
++    fadd0(t0, t3, t0);
++    fsub0(t0, t0, t2);
++    fmul0(t0, t0, z3);
++    fadd0(y3, y3, t0);
++    fadd0(t0, t4, t4);
++    fmul0(z3, t0, z3);
++    fsub0(x3, x3, z3);
++    fmul0(z3, t0, t1);
++    fadd0(z3, z3, z3);
++    fadd0(z3, z3, z3);
++}
++
++static inline void
++point_add(uint64_t *res, uint64_t *p, uint64_t *q)
++{
++    uint64_t tmp[36U] = { 0U };
++    uint64_t *t0 = tmp;
++    uint64_t *t1 = tmp + (uint32_t)24U;
++    uint64_t *x3 = t1;
++    uint64_t *y3 = t1 + (uint32_t)4U;
++    uint64_t *z3 = t1 + (uint32_t)8U;
++    uint64_t *t01 = t0;
++    uint64_t *t11 = t0 + (uint32_t)4U;
++    uint64_t *t2 = t0 + (uint32_t)8U;
++    uint64_t *t3 = t0 + (uint32_t)12U;
++    uint64_t *t4 = t0 + (uint32_t)16U;
++    uint64_t *t5 = t0 + (uint32_t)20U;
++    uint64_t *x1 = p;
++    uint64_t *y1 = p + (uint32_t)4U;
++    uint64_t *z10 = p + (uint32_t)8U;
++    uint64_t *x20 = q;
++    uint64_t *y20 = q + (uint32_t)4U;
++    uint64_t *z20 = q + (uint32_t)8U;
++    fmul0(t01, x1, x20);
++    fmul0(t11, y1, y20);
++    fmul0(t2, z10, z20);
++    fadd0(t3, x1, y1);
++    fadd0(t4, x20, y20);
++    fmul0(t3, t3, t4);
++    fadd0(t4, t01, t11);
++    uint64_t *y10 = p + (uint32_t)4U;
++    uint64_t *z11 = p + (uint32_t)8U;
++    uint64_t *y2 = q + (uint32_t)4U;
++    uint64_t *z21 = q + (uint32_t)8U;
++    fsub0(t3, t3, t4);
++    fadd0(t4, y10, z11);
++    fadd0(t5, y2, z21);
++    fmul0(t4, t4, t5);
++    fadd0(t5, t11, t2);
++    fsub0(t4, t4, t5);
++    uint64_t *x10 = p;
++    uint64_t *z1 = p + (uint32_t)8U;
++    uint64_t *x2 = q;
++    uint64_t *z2 = q + (uint32_t)8U;
++    fadd0(x3, x10, z1);
++    fadd0(y3, x2, z2);
++    fmul0(x3, x3, y3);
++    fadd0(y3, t01, t2);
++    fsub0(y3, x3, y3);
++    fmul_by_b_coeff(z3, t2);
++    fsub0(x3, y3, z3);
++    fadd0(z3, x3, x3);
++    fadd0(x3, x3, z3);
++    fsub0(z3, t11, x3);
++    fadd0(x3, t11, x3);
++    fmul_by_b_coeff(y3, y3);
++    fadd0(t11, t2, t2);
++    fadd0(t2, t11, t2);
++    fsub0(y3, y3, t2);
++    fsub0(y3, y3, t01);
++    fadd0(t11, y3, y3);
++    fadd0(y3, t11, y3);
++    fadd0(t11, t01, t01);
++    fadd0(t01, t11, t01);
++    fsub0(t01, t01, t2);
++    fmul0(t11, t4, y3);
++    fmul0(t2, t01, y3);
++    fmul0(y3, x3, z3);
++    fadd0(y3, y3, t2);
++    fmul0(x3, t3, x3);
++    fsub0(x3, x3, t11);
++    fmul0(z3, t4, z3);
++    fmul0(t11, t3, t01);
++    fadd0(z3, z3, t11);
++    memcpy(res, t1, (uint32_t)12U * sizeof(uint64_t));
++}
++
++static inline void
++point_mul(uint64_t *res, uint64_t *scalar, uint64_t *p)
++{
++    uint64_t table[192U] = { 0U };
++    uint64_t tmp[12U] = { 0U };
++    uint64_t *t0 = table;
++    uint64_t *t1 = table + (uint32_t)12U;
++    make_point_at_inf(t0);
++    memcpy(t1, p, (uint32_t)12U * sizeof(uint64_t));
++    KRML_MAYBE_FOR7(i,
++                    (uint32_t)0U,
++                    (uint32_t)7U,
++                    (uint32_t)1U,
++                    uint64_t *t11 = table + (i + (uint32_t)1U) * (uint32_t)12U;
++                    point_double(tmp, t11);
++                    memcpy(table + ((uint32_t)2U * i + (uint32_t)2U) * (uint32_t)12U,
++                           tmp,
++                           (uint32_t)12U * sizeof(uint64_t));
++                    uint64_t *t2 = table + ((uint32_t)2U * i + (uint32_t)2U) * (uint32_t)12U;
++                    point_add(tmp, p, t2);
++                    memcpy(table + ((uint32_t)2U * i + (uint32_t)3U) * (uint32_t)12U,
++                           tmp,
++                           (uint32_t)12U * sizeof(uint64_t)););
++    make_point_at_inf(res);
++    uint64_t tmp0[12U] = { 0U };
++    for (uint32_t i0 = (uint32_t)0U; i0 < (uint32_t)64U; i0++) {
++        KRML_MAYBE_FOR4(i, (uint32_t)0U, (uint32_t)4U, (uint32_t)1U, point_double(res, res););
++        uint32_t k = (uint32_t)256U - (uint32_t)4U * i0 - (uint32_t)4U;
++        uint64_t bits_l = Hacl_Bignum_Lib_bn_get_bits_u64((uint32_t)4U, scalar, k, (uint32_t)4U);
++        memcpy(tmp0, (uint64_t *)table, (uint32_t)12U * sizeof(uint64_t));
++        KRML_MAYBE_FOR15(i1,
++                         (uint32_t)0U,
++                         (uint32_t)15U,
++                         (uint32_t)1U,
++                         uint64_t c = FStar_UInt64_eq_mask(bits_l, (uint64_t)(i1 + (uint32_t)1U));
++                         const uint64_t *res_j = table + (i1 + (uint32_t)1U) * (uint32_t)12U;
++                         KRML_MAYBE_FOR12(i,
++                                          (uint32_t)0U,
++                                          (uint32_t)12U,
++                                          (uint32_t)1U,
++                                          uint64_t *os = tmp0;
++                                          uint64_t x = (c & res_j[i]) | (~c & tmp0[i]);
++                                          os[i] = x;););
++        point_add(res, res, tmp0);
++    }
++}
++
++static inline void
++precomp_get_consttime(const uint64_t *table, uint64_t bits_l, uint64_t *tmp)
++{
++    memcpy(tmp, (uint64_t *)table, (uint32_t)12U * sizeof(uint64_t));
++    KRML_MAYBE_FOR15(i0,
++                     (uint32_t)0U,
++                     (uint32_t)15U,
++                     (uint32_t)1U,
++                     uint64_t c = FStar_UInt64_eq_mask(bits_l, (uint64_t)(i0 + (uint32_t)1U));
++                     const uint64_t *res_j = table + (i0 + (uint32_t)1U) * (uint32_t)12U;
++                     KRML_MAYBE_FOR12(i,
++                                      (uint32_t)0U,
++                                      (uint32_t)12U,
++                                      (uint32_t)1U,
++                                      uint64_t *os = tmp;
++                                      uint64_t x = (c & res_j[i]) | (~c & tmp[i]);
++                                      os[i] = x;););
++}
++
++static inline void
++point_mul_g(uint64_t *res, uint64_t *scalar)
++{
++    uint64_t q1[12U] = { 0U };
++    make_base_point(q1);
++    /*
++    uint64_t
++    q2[12U] =
++      {
++        (uint64_t)1499621593102562565U, (uint64_t)16692369783039433128U,
++        (uint64_t)15337520135922861848U, (uint64_t)5455737214495366228U,
++        (uint64_t)17827017231032529600U, (uint64_t)12413621606240782649U,
++        (uint64_t)2290483008028286132U, (uint64_t)15752017553340844820U,
++        (uint64_t)4846430910634234874U, (uint64_t)10861682798464583253U,
++        (uint64_t)15404737222404363049U, (uint64_t)363586619281562022U
++      };
++    uint64_t
++    q3[12U] =
++      {
++        (uint64_t)14619254753077084366U, (uint64_t)13913835116514008593U,
++        (uint64_t)15060744674088488145U, (uint64_t)17668414598203068685U,
++        (uint64_t)10761169236902342334U, (uint64_t)15467027479157446221U,
++        (uint64_t)14989185522423469618U, (uint64_t)14354539272510107003U,
++        (uint64_t)14298211796392133693U, (uint64_t)13270323784253711450U,
++        (uint64_t)13380964971965046957U, (uint64_t)8686204248456909699U
++      };
++    uint64_t
++    q4[12U] =
++      {
++        (uint64_t)7870395003430845958U, (uint64_t)18001862936410067720U,
++        (uint64_t)8006461232116967215U, (uint64_t)5921313779532424762U,
++        (uint64_t)10702113371959864307U, (uint64_t)8070517410642379879U,
++        (uint64_t)7139806720777708306U, (uint64_t)8253938546650739833U,
++        (uint64_t)17490482834545705718U, (uint64_t)1065249776797037500U,
++        (uint64_t)5018258455937968775U, (uint64_t)14100621120178668337U
++      };
++    */
++    uint64_t *r1 = scalar;
++    uint64_t *r2 = scalar + (uint32_t)1U;
++    uint64_t *r3 = scalar + (uint32_t)2U;
++    uint64_t *r4 = scalar + (uint32_t)3U;
++    make_point_at_inf(res);
++    uint64_t tmp[12U] = { 0U };
++    KRML_MAYBE_FOR16(i,
++                     (uint32_t)0U,
++                     (uint32_t)16U,
++                     (uint32_t)1U,
++                     KRML_MAYBE_FOR4(i0, (uint32_t)0U, (uint32_t)4U, (uint32_t)1U, point_double(res, res););
++                     uint32_t k = (uint32_t)64U - (uint32_t)4U * i - (uint32_t)4U;
++                     uint64_t bits_l = Hacl_Bignum_Lib_bn_get_bits_u64((uint32_t)1U, r4, k, (uint32_t)4U);
++                     precomp_get_consttime(Hacl_P256_PrecompTable_precomp_g_pow2_192_table_w4, bits_l, tmp);
++                     point_add(res, res, tmp);
++                     uint32_t k0 = (uint32_t)64U - (uint32_t)4U * i - (uint32_t)4U;
++                     uint64_t bits_l0 = Hacl_Bignum_Lib_bn_get_bits_u64((uint32_t)1U, r3, k0, (uint32_t)4U);
++                     precomp_get_consttime(Hacl_P256_PrecompTable_precomp_g_pow2_128_table_w4, bits_l0, tmp);
++                     point_add(res, res, tmp);
++                     uint32_t k1 = (uint32_t)64U - (uint32_t)4U * i - (uint32_t)4U;
++                     uint64_t bits_l1 = Hacl_Bignum_Lib_bn_get_bits_u64((uint32_t)1U, r2, k1, (uint32_t)4U);
++                     precomp_get_consttime(Hacl_P256_PrecompTable_precomp_g_pow2_64_table_w4, bits_l1, tmp);
++                     point_add(res, res, tmp);
++                     uint32_t k2 = (uint32_t)64U - (uint32_t)4U * i - (uint32_t)4U;
++                     uint64_t bits_l2 = Hacl_Bignum_Lib_bn_get_bits_u64((uint32_t)1U, r1, k2, (uint32_t)4U);
++                     precomp_get_consttime(Hacl_P256_PrecompTable_precomp_basepoint_table_w4, bits_l2, tmp);
++                     point_add(res, res, tmp););
++}
++
++static inline void
++point_mul_double_g(uint64_t *res, uint64_t *scalar1, uint64_t *scalar2, uint64_t *q2)
++{
++    uint64_t q1[12U] = { 0U };
++    make_base_point(q1);
++    uint64_t table2[384U] = { 0U };
++    uint64_t tmp[12U] = { 0U };
++    uint64_t *t0 = table2;
++    uint64_t *t1 = table2 + (uint32_t)12U;
++    make_point_at_inf(t0);
++    memcpy(t1, q2, (uint32_t)12U * sizeof(uint64_t));
++    KRML_MAYBE_FOR15(i,
++                     (uint32_t)0U,
++                     (uint32_t)15U,
++                     (uint32_t)1U,
++                     uint64_t *t11 = table2 + (i + (uint32_t)1U) * (uint32_t)12U;
++                     point_double(tmp, t11);
++                     memcpy(table2 + ((uint32_t)2U * i + (uint32_t)2U) * (uint32_t)12U,
++                            tmp,
++                            (uint32_t)12U * sizeof(uint64_t));
++                     uint64_t *t2 = table2 + ((uint32_t)2U * i + (uint32_t)2U) * (uint32_t)12U;
++                     point_add(tmp, q2, t2);
++                     memcpy(table2 + ((uint32_t)2U * i + (uint32_t)3U) * (uint32_t)12U,
++                            tmp,
++                            (uint32_t)12U * sizeof(uint64_t)););
++    uint64_t tmp0[12U] = { 0U };
++    uint32_t i0 = (uint32_t)255U;
++    uint64_t bits_c = Hacl_Bignum_Lib_bn_get_bits_u64((uint32_t)4U, scalar1, i0, (uint32_t)5U);
++    uint32_t bits_l32 = (uint32_t)bits_c;
++    const uint64_t
++        *a_bits_l = Hacl_P256_PrecompTable_precomp_basepoint_table_w5 + bits_l32 * (uint32_t)12U;
++    memcpy(res, (uint64_t *)a_bits_l, (uint32_t)12U * sizeof(uint64_t));
++    uint32_t i1 = (uint32_t)255U;
++    uint64_t bits_c0 = Hacl_Bignum_Lib_bn_get_bits_u64((uint32_t)4U, scalar2, i1, (uint32_t)5U);
++    uint32_t bits_l320 = (uint32_t)bits_c0;
++    const uint64_t *a_bits_l0 = table2 + bits_l320 * (uint32_t)12U;
++    memcpy(tmp0, (uint64_t *)a_bits_l0, (uint32_t)12U * sizeof(uint64_t));
++    point_add(res, res, tmp0);
++    uint64_t tmp1[12U] = { 0U };
++    for (uint32_t i = (uint32_t)0U; i < (uint32_t)51U; i++) {
++        KRML_MAYBE_FOR5(i2, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, point_double(res, res););
++        uint32_t k = (uint32_t)255U - (uint32_t)5U * i - (uint32_t)5U;
++        uint64_t bits_l = Hacl_Bignum_Lib_bn_get_bits_u64((uint32_t)4U, scalar2, k, (uint32_t)5U);
++        uint32_t bits_l321 = (uint32_t)bits_l;
++        const uint64_t *a_bits_l1 = table2 + bits_l321 * (uint32_t)12U;
++        memcpy(tmp1, (uint64_t *)a_bits_l1, (uint32_t)12U * sizeof(uint64_t));
++        point_add(res, res, tmp1);
++        uint32_t k0 = (uint32_t)255U - (uint32_t)5U * i - (uint32_t)5U;
++        uint64_t bits_l0 = Hacl_Bignum_Lib_bn_get_bits_u64((uint32_t)4U, scalar1, k0, (uint32_t)5U);
++        uint32_t bits_l322 = (uint32_t)bits_l0;
++        const uint64_t
++            *a_bits_l2 = Hacl_P256_PrecompTable_precomp_basepoint_table_w5 + bits_l322 * (uint32_t)12U;
++        memcpy(tmp1, (uint64_t *)a_bits_l2, (uint32_t)12U * sizeof(uint64_t));
++        point_add(res, res, tmp1);
++    }
++}
++
++static inline uint64_t
++bn_is_lt_order_mask4(uint64_t *f)
++{
++    uint64_t tmp[4U] = { 0U };
++    make_order(tmp);
++    uint64_t c = bn_sub4(tmp, f, tmp);
++    return (uint64_t)0U - c;
++}
++
++static inline uint64_t
++bn_is_lt_order_and_gt_zero_mask4(uint64_t *f)
++{
++    uint64_t is_lt_order = bn_is_lt_order_mask4(f);
++    uint64_t is_eq_zero = bn_is_zero_mask4(f);
++    return is_lt_order & ~is_eq_zero;
++}
++
++static inline void
++qmod_short(uint64_t *res, uint64_t *x)
++{
++    uint64_t tmp[4U] = { 0U };
++    make_order(tmp);
++    uint64_t c = bn_sub4(tmp, x, tmp);
++    bn_cmovznz4(res, c, tmp, x);
++}
++
++static inline void
++qadd(uint64_t *res, uint64_t *x, uint64_t *y)
++{
++    uint64_t n[4U] = { 0U };
++    make_order(n);
++    bn_add_mod4(res, n, x, y);
++}
++
++static inline void
++qmont_reduction(uint64_t *res, uint64_t *x)
++{
++    uint64_t n[4U] = { 0U };
++    make_order(n);
++    uint64_t c0 = (uint64_t)0U;
++    KRML_MAYBE_FOR4(
++        i0,
++        (uint32_t)0U,
++        (uint32_t)4U,
++        (uint32_t)1U,
++        uint64_t qj = (uint64_t)0xccd1c8aaee00bc4fU * x[i0];
++        uint64_t *res_j0 = x + i0;
++        uint64_t c = (uint64_t)0U;
++        {
++            uint64_t a_i = n[(uint32_t)4U * (uint32_t)0U];
++            uint64_t *res_i0 = res_j0 + (uint32_t)4U * (uint32_t)0U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i, qj, c, res_i0);
++            uint64_t a_i0 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++            uint64_t *res_i1 = res_j0 + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i0, qj, c, res_i1);
++            uint64_t a_i1 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++            uint64_t *res_i2 = res_j0 + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i1, qj, c, res_i2);
++            uint64_t a_i2 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++            uint64_t *res_i = res_j0 + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++            c = Hacl_Bignum_Base_mul_wide_add2_u64(a_i2, qj, c, res_i);
++        } uint64_t r = c;
++        uint64_t c1 = r;
++        uint64_t *resb = x + (uint32_t)4U + i0;
++        uint64_t res_j = x[(uint32_t)4U + i0];
++        c0 = Lib_IntTypes_Intrinsics_add_carry_u64(c0, c1, res_j, resb););
++    memcpy(res, x + (uint32_t)4U, (uint32_t)4U * sizeof(uint64_t));
++    uint64_t c00 = c0;
++    uint64_t tmp[4U] = { 0U };
++    uint64_t c = (uint64_t)0U;
++    {
++        uint64_t t1 = res[(uint32_t)4U * (uint32_t)0U];
++        uint64_t t20 = n[(uint32_t)4U * (uint32_t)0U];
++        uint64_t *res_i0 = tmp + (uint32_t)4U * (uint32_t)0U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t1, t20, res_i0);
++        uint64_t t10 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t t21 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)1U];
++        uint64_t *res_i1 = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)1U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t10, t21, res_i1);
++        uint64_t t11 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t t22 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)2U];
++        uint64_t *res_i2 = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)2U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t11, t22, res_i2);
++        uint64_t t12 = res[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t t2 = n[(uint32_t)4U * (uint32_t)0U + (uint32_t)3U];
++        uint64_t *res_i = tmp + (uint32_t)4U * (uint32_t)0U + (uint32_t)3U;
++        c = Lib_IntTypes_Intrinsics_sub_borrow_u64(c, t12, t2, res_i);
++    }
++    uint64_t c1 = c;
++    uint64_t c2 = c00 - c1;
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t *os = res;
++                    uint64_t x1 = (c2 & res[i]) | (~c2 & tmp[i]);
++                    os[i] = x1;);
++}
++
++static inline void
++from_qmont(uint64_t *res, uint64_t *x)
++{
++    uint64_t tmp[8U] = { 0U };
++    memcpy(tmp, x, (uint32_t)4U * sizeof(uint64_t));
++    qmont_reduction(res, tmp);
++}
++
++static inline void
++qmul(uint64_t *res, uint64_t *x, uint64_t *y)
++{
++    uint64_t tmp[8U] = { 0U };
++    bn_mul4(tmp, x, y);
++    qmont_reduction(res, tmp);
++}
++
++static inline void
++qsqr(uint64_t *res, uint64_t *x)
++{
++    uint64_t tmp[8U] = { 0U };
++    bn_sqr4(tmp, x);
++    qmont_reduction(res, tmp);
++}
++
++bool
++Hacl_Impl_P256_DH_ecp256dh_i(uint8_t *public_key, uint8_t *private_key)
++{
++    uint64_t tmp[16U] = { 0U };
++    uint64_t *sk = tmp;
++    uint64_t *pk = tmp + (uint32_t)4U;
++    bn_from_bytes_be4(sk, private_key);
++    uint64_t is_b_valid = bn_is_lt_order_and_gt_zero_mask4(sk);
++    uint64_t oneq[4U] = { 0U };
++    oneq[0U] = (uint64_t)1U;
++    oneq[1U] = (uint64_t)0U;
++    oneq[2U] = (uint64_t)0U;
++    oneq[3U] = (uint64_t)0U;
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t *os = sk;
++                    uint64_t uu____0 = oneq[i];
++                    uint64_t x = uu____0 ^ (is_b_valid & (sk[i] ^ uu____0));
++                    os[i] = x;);
++    uint64_t is_sk_valid = is_b_valid;
++    point_mul_g(pk, sk);
++    point_store(public_key, pk);
++    return is_sk_valid == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++}
++
++bool
++Hacl_Impl_P256_DH_ecp256dh_r(
++    uint8_t *shared_secret,
++    uint8_t *their_pubkey,
++    uint8_t *private_key)
++{
++    uint64_t tmp[16U] = { 0U };
++    uint64_t *sk = tmp;
++    uint64_t *pk = tmp + (uint32_t)4U;
++    bool is_pk_valid = load_point_vartime(pk, their_pubkey);
++    bn_from_bytes_be4(sk, private_key);
++    uint64_t is_b_valid = bn_is_lt_order_and_gt_zero_mask4(sk);
++    uint64_t oneq[4U] = { 0U };
++    oneq[0U] = (uint64_t)1U;
++    oneq[1U] = (uint64_t)0U;
++    oneq[2U] = (uint64_t)0U;
++    oneq[3U] = (uint64_t)0U;
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t *os = sk;
++                    uint64_t uu____0 = oneq[i];
++                    uint64_t x = uu____0 ^ (is_b_valid & (sk[i] ^ uu____0));
++                    os[i] = x;);
++    uint64_t is_sk_valid = is_b_valid;
++    uint64_t ss_proj[12U] = { 0U };
++    if (is_pk_valid) {
++        point_mul(ss_proj, sk, pk);
++        point_store(shared_secret, ss_proj);
++    }
++    return is_sk_valid == (uint64_t)0xFFFFFFFFFFFFFFFFU && is_pk_valid;
++}
++
++static inline void
++qinv(uint64_t *res, uint64_t *r)
++{
++    uint64_t tmp[28U] = { 0U };
++    uint64_t *x6 = tmp;
++    uint64_t *x_11 = tmp + (uint32_t)4U;
++    uint64_t *x_101 = tmp + (uint32_t)8U;
++    uint64_t *x_111 = tmp + (uint32_t)12U;
++    uint64_t *x_1111 = tmp + (uint32_t)16U;
++    uint64_t *x_10101 = tmp + (uint32_t)20U;
++    uint64_t *x_101111 = tmp + (uint32_t)24U;
++    memcpy(x6, r, (uint32_t)4U * sizeof(uint64_t));
++    {
++        qsqr(x6, x6);
++    }
++    qmul(x_11, x6, r);
++    qmul(x_101, x6, x_11);
++    qmul(x_111, x6, x_101);
++    memcpy(x6, x_101, (uint32_t)4U * sizeof(uint64_t));
++    {
++        qsqr(x6, x6);
++    }
++    qmul(x_1111, x_101, x6);
++    {
++        qsqr(x6, x6);
++    }
++    qmul(x_10101, x6, r);
++    memcpy(x6, x_10101, (uint32_t)4U * sizeof(uint64_t));
++    {
++        qsqr(x6, x6);
++    }
++    qmul(x_101111, x_101, x6);
++    qmul(x6, x_10101, x6);
++    uint64_t tmp1[4U] = { 0U };
++    KRML_MAYBE_FOR2(i, (uint32_t)0U, (uint32_t)2U, (uint32_t)1U, qsqr(x6, x6););
++    qmul(x6, x6, x_11);
++    memcpy(tmp1, x6, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR8(i, (uint32_t)0U, (uint32_t)8U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x6);
++    memcpy(x6, tmp1, (uint32_t)4U * sizeof(uint64_t));
++    KRML_MAYBE_FOR16(i, (uint32_t)0U, (uint32_t)16U, (uint32_t)1U, qsqr(x6, x6););
++    qmul(x6, x6, tmp1);
++    memcpy(tmp1, x6, (uint32_t)4U * sizeof(uint64_t));
++    for (uint32_t i = (uint32_t)0U; i < (uint32_t)64U; i++) {
++        qsqr(tmp1, tmp1);
++    }
++    qmul(tmp1, tmp1, x6);
++    for (uint32_t i = (uint32_t)0U; i < (uint32_t)32U; i++) {
++        qsqr(tmp1, tmp1);
++    }
++    qmul(tmp1, tmp1, x6);
++    KRML_MAYBE_FOR6(i, (uint32_t)0U, (uint32_t)6U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_101111);
++    KRML_MAYBE_FOR5(i, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_111);
++    KRML_MAYBE_FOR4(i, (uint32_t)0U, (uint32_t)4U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_11);
++    KRML_MAYBE_FOR5(i, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_1111);
++    KRML_MAYBE_FOR5(i, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_10101);
++    KRML_MAYBE_FOR4(i, (uint32_t)0U, (uint32_t)4U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_101);
++    KRML_MAYBE_FOR3(i, (uint32_t)0U, (uint32_t)3U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_101);
++    KRML_MAYBE_FOR3(i, (uint32_t)0U, (uint32_t)3U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_101);
++    KRML_MAYBE_FOR5(i, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_111);
++    KRML_MAYBE_FOR9(i, (uint32_t)0U, (uint32_t)9U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_101111);
++    KRML_MAYBE_FOR6(i, (uint32_t)0U, (uint32_t)6U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_1111);
++    KRML_MAYBE_FOR2(i, (uint32_t)0U, (uint32_t)2U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, r);
++    KRML_MAYBE_FOR5(i, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, r);
++    KRML_MAYBE_FOR6(i, (uint32_t)0U, (uint32_t)6U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_1111);
++    KRML_MAYBE_FOR5(i, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_111);
++    KRML_MAYBE_FOR4(i, (uint32_t)0U, (uint32_t)4U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_111);
++    KRML_MAYBE_FOR5(i, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_111);
++    KRML_MAYBE_FOR5(i, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_101);
++    KRML_MAYBE_FOR3(i, (uint32_t)0U, (uint32_t)3U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_11);
++    KRML_MAYBE_FOR10(i, (uint32_t)0U, (uint32_t)10U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_101111);
++    KRML_MAYBE_FOR2(i, (uint32_t)0U, (uint32_t)2U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_11);
++    KRML_MAYBE_FOR5(i, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_11);
++    KRML_MAYBE_FOR5(i, (uint32_t)0U, (uint32_t)5U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_11);
++    KRML_MAYBE_FOR3(i, (uint32_t)0U, (uint32_t)3U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, r);
++    KRML_MAYBE_FOR7(i, (uint32_t)0U, (uint32_t)7U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_10101);
++    KRML_MAYBE_FOR6(i, (uint32_t)0U, (uint32_t)6U, (uint32_t)1U, qsqr(tmp1, tmp1););
++    qmul(tmp1, tmp1, x_1111);
++    memcpy(x6, tmp1, (uint32_t)4U * sizeof(uint64_t));
++    memcpy(res, x6, (uint32_t)4U * sizeof(uint64_t));
++}
++
++static inline void
++qmul_mont(uint64_t *sinv, uint64_t *b, uint64_t *res)
++{
++    uint64_t tmp[4U] = { 0U };
++    from_qmont(tmp, b);
++    qmul(res, sinv, tmp);
++}
++
++static inline bool
++ecdsa_verify_msg_as_qelem(
++    uint64_t *m_q,
++    uint8_t *public_key,
++    uint8_t *signature_r,
++    uint8_t *signature_s)
++{
++    uint64_t tmp[28U] = { 0U };
++    uint64_t *pk = tmp;
++    uint64_t *r_q = tmp + (uint32_t)12U;
++    uint64_t *s_q = tmp + (uint32_t)16U;
++    uint64_t *u1 = tmp + (uint32_t)20U;
++    uint64_t *u2 = tmp + (uint32_t)24U;
++    bool is_pk_valid = load_point_vartime(pk, public_key);
++    bn_from_bytes_be4(r_q, signature_r);
++    bn_from_bytes_be4(s_q, signature_s);
++    uint64_t is_r_valid = bn_is_lt_order_and_gt_zero_mask4(r_q);
++    uint64_t is_s_valid = bn_is_lt_order_and_gt_zero_mask4(s_q);
++    bool
++        is_rs_valid =
++            is_r_valid == (uint64_t)0xFFFFFFFFFFFFFFFFU && is_s_valid == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++    if (!(is_pk_valid && is_rs_valid)) {
++        return false;
++    }
++    uint64_t sinv[4U] = { 0U };
++    qinv(sinv, s_q);
++    qmul_mont(sinv, m_q, u1);
++    qmul_mont(sinv, r_q, u2);
++    uint64_t res[12U] = { 0U };
++    point_mul_double_g(res, u1, u2, pk);
++    if (is_point_at_inf_vartime(res)) {
++        return false;
++    }
++    uint64_t x[4U] = { 0U };
++    to_aff_point_x(x, res);
++    qmod_short(x, x);
++    bool res1 = bn_is_eq_vartime4(x, r_q);
++    return res1;
++}
++
++static inline bool
++ecdsa_sign_msg_as_qelem(
++    uint8_t *signature,
++    uint64_t *m_q,
++    uint8_t *private_key,
++    uint8_t *nonce)
++{
++    uint64_t rsdk_q[16U] = { 0U };
++    uint64_t *r_q = rsdk_q;
++    uint64_t *s_q = rsdk_q + (uint32_t)4U;
++    uint64_t *d_a = rsdk_q + (uint32_t)8U;
++    uint64_t *k_q = rsdk_q + (uint32_t)12U;
++    bn_from_bytes_be4(d_a, private_key);
++    uint64_t is_b_valid0 = bn_is_lt_order_and_gt_zero_mask4(d_a);
++    uint64_t oneq0[4U] = { 0U };
++    oneq0[0U] = (uint64_t)1U;
++    oneq0[1U] = (uint64_t)0U;
++    oneq0[2U] = (uint64_t)0U;
++    oneq0[3U] = (uint64_t)0U;
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t *os = d_a;
++                    uint64_t uu____0 = oneq0[i];
++                    uint64_t x = uu____0 ^ (is_b_valid0 & (d_a[i] ^ uu____0));
++                    os[i] = x;);
++    uint64_t is_sk_valid = is_b_valid0;
++    bn_from_bytes_be4(k_q, nonce);
++    uint64_t is_b_valid = bn_is_lt_order_and_gt_zero_mask4(k_q);
++    uint64_t oneq[4U] = { 0U };
++    oneq[0U] = (uint64_t)1U;
++    oneq[1U] = (uint64_t)0U;
++    oneq[2U] = (uint64_t)0U;
++    oneq[3U] = (uint64_t)0U;
++    KRML_MAYBE_FOR4(i,
++                    (uint32_t)0U,
++                    (uint32_t)4U,
++                    (uint32_t)1U,
++                    uint64_t *os = k_q;
++                    uint64_t uu____1 = oneq[i];
++                    uint64_t x = uu____1 ^ (is_b_valid & (k_q[i] ^ uu____1));
++                    os[i] = x;);
++    uint64_t is_nonce_valid = is_b_valid;
++    uint64_t are_sk_nonce_valid = is_sk_valid & is_nonce_valid;
++    uint64_t p[12U] = { 0U };
++    point_mul_g(p, k_q);
++    to_aff_point_x(r_q, p);
++    qmod_short(r_q, r_q);
++    uint64_t kinv[4U] = { 0U };
++    qinv(kinv, k_q);
++    qmul(s_q, r_q, d_a);
++    from_qmont(m_q, m_q);
++    qadd(s_q, m_q, s_q);
++    qmul(s_q, kinv, s_q);
++    bn2_to_bytes_be4(signature, r_q, s_q);
++    uint64_t is_r_zero = bn_is_zero_mask4(r_q);
++    uint64_t is_s_zero = bn_is_zero_mask4(s_q);
++    uint64_t m = are_sk_nonce_valid & (~is_r_zero & ~is_s_zero);
++    bool res = m == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++    return res;
++}
++
++/*******************************************************************************
++
++ Verified C library for ECDSA and ECDH functions over the P-256 NIST curve.
++
++ This module implements signing and verification, key validation, conversions
++ between various point representations, and ECDH key agreement.
++
++*******************************************************************************/
++
++/*****************/
++/* ECDSA signing */
++/*****************/
++
++/**
++Create an ECDSA signature WITHOUT hashing first.
++
++  This function is intended to receive a hash of the input.
++  For convenience, we recommend using one of the hash-and-sign combined functions above.
++
++  The argument `msg` MUST be at least 32 bytes (i.e. `msg_len >= 32`).
++
++  NOTE: The equivalent functions in OpenSSL and Fiat-Crypto both accept inputs
++  smaller than 32 bytes. These libraries left-pad the input with enough zeroes to
++  reach the minimum 32 byte size. Clients who need behavior identical to OpenSSL
++  need to perform the left-padding themselves.
++
++  The function returns `true` for successful creation of an ECDSA signature and `false` otherwise.
++
++  The outparam `signature` (R || S) points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `msg` points to `msg_len` bytes of valid memory, i.e., uint8_t[msg_len].
++  The arguments `private_key` and `nonce` point to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The function also checks whether `private_key` and `nonce` are valid values:
++    • 0 < `private_key` < the order of the curve
++    • 0 < `nonce` < the order of the curve
++*/
++bool
++Hacl_P256_ecdsa_sign_p256_without_hash(
++    uint8_t *signature,
++    uint32_t msg_len,
++    uint8_t *msg,
++    uint8_t *private_key,
++    uint8_t *nonce)
++{
++    uint64_t m_q[4U] = { 0U };
++    uint8_t mHash[32U] = { 0U };
++    memcpy(mHash, msg, (uint32_t)32U * sizeof(uint8_t));
++    uint8_t *mHash32 = mHash;
++    bn_from_bytes_be4(m_q, mHash32);
++    qmod_short(m_q, m_q);
++    bool res = ecdsa_sign_msg_as_qelem(signature, m_q, private_key, nonce);
++    return res;
++}
++
++/**********************/
++/* ECDSA verification */
++/**********************/
++
++/**
++Verify an ECDSA signature WITHOUT hashing first.
++
++  This function is intended to receive a hash of the input.
++  For convenience, we recommend using one of the hash-and-verify combined functions above.
++
++  The argument `msg` MUST be at least 32 bytes (i.e. `msg_len >= 32`).
++
++  The function returns `true` if the signature is valid and `false` otherwise.
++
++  The argument `msg` points to `msg_len` bytes of valid memory, i.e., uint8_t[msg_len].
++  The argument `public_key` (x || y) points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The arguments `signature_r` and `signature_s` point to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The function also checks whether `public_key` is valid
++*/
++bool
++Hacl_P256_ecdsa_verif_without_hash(
++    uint32_t msg_len,
++    uint8_t *msg,
++    uint8_t *public_key,
++    uint8_t *signature_r,
++    uint8_t *signature_s)
++{
++    uint64_t m_q[4U] = { 0U };
++    uint8_t mHash[32U] = { 0U };
++    memcpy(mHash, msg, (uint32_t)32U * sizeof(uint8_t));
++    uint8_t *mHash32 = mHash;
++    bn_from_bytes_be4(m_q, mHash32);
++    qmod_short(m_q, m_q);
++    bool res = ecdsa_verify_msg_as_qelem(m_q, public_key, signature_r, signature_s);
++    return res;
++}
++
++/******************/
++/* Key validation */
++/******************/
++
++/**
++Public key validation.
++
++  The function returns `true` if a public key is valid and `false` otherwise.
++
++  The argument `public_key` points to 64 bytes of valid memory, i.e., uint8_t[64].
++
++  The public key (x || y) is valid (with respect to SP 800-56A):
++    • the public key is not the “point at infinity”, represented as O.
++    • the affine x and y coordinates of the point represented by the public key are
++      in the range [0, p – 1] where p is the prime defining the finite field.
++    • y^2 = x^3 + ax + b where a and b are the coefficients of the curve equation.
++  The last extract is taken from: https://neilmadden.blog/2017/05/17/so-how-do-you-validate-nist-ecdh-public-keys/
++*/
++bool
++Hacl_P256_validate_public_key(uint8_t *public_key)
++{
++    uint64_t point_jac[12U] = { 0U };
++    bool res = load_point_vartime(point_jac, public_key);
++    return res;
++}
++
++/**
++Private key validation.
++
++  The function returns `true` if a private key is valid and `false` otherwise.
++
++  The argument `private_key` points to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The private key is valid:
++    • 0 < `private_key` < the order of the curve
++*/
++bool
++Hacl_P256_validate_private_key(uint8_t *private_key)
++{
++    uint64_t bn_sk[4U] = { 0U };
++    bn_from_bytes_be4(bn_sk, private_key);
++    uint64_t res = bn_is_lt_order_and_gt_zero_mask4(bn_sk);
++    return res == (uint64_t)0xFFFFFFFFFFFFFFFFU;
++}
++
++/*******************************************************************************
++  Parsing and Serializing public keys.
++
++  A public key is a point (x, y) on the P-256 NIST curve.
++
++  The point can be represented in the following three ways.
++    • raw          = [ x || y ], 64 bytes
++    • uncompressed = [ 0x04 || x || y ], 65 bytes
++    • compressed   = [ (0x02 for even `y` and 0x03 for odd `y`) || x ], 33 bytes
++
++*******************************************************************************/
++
++/**
++Convert a public key from uncompressed to its raw form.
++
++  The function returns `true` for successful conversion of a public key and `false` otherwise.
++
++  The outparam `pk_raw` points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `pk` points to 65 bytes of valid memory, i.e., uint8_t[65].
++
++  The function DOESN'T check whether (x, y) is a valid point.
++*/
++bool
++Hacl_P256_uncompressed_to_raw(uint8_t *pk, uint8_t *pk_raw)
++{
++    uint8_t pk0 = pk[0U];
++    if (pk0 != (uint8_t)0x04U) {
++        return false;
++    }
++    memcpy(pk_raw, pk + (uint32_t)1U, (uint32_t)64U * sizeof(uint8_t));
++    return true;
++}
++
++/**
++Convert a public key from compressed to its raw form.
++
++  The function returns `true` for successful conversion of a public key and `false` otherwise.
++
++  The outparam `pk_raw` points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `pk` points to 33 bytes of valid memory, i.e., uint8_t[33].
++
++  The function also checks whether (x, y) is a valid point.
++*/
++bool
++Hacl_P256_compressed_to_raw(uint8_t *pk, uint8_t *pk_raw)
++{
++    uint64_t xa[4U] = { 0U };
++    uint64_t ya[4U] = { 0U };
++    uint8_t *pk_xb = pk + (uint32_t)1U;
++    bool b = aff_point_decompress_vartime(xa, ya, pk);
++    if (b) {
++        memcpy(pk_raw, pk_xb, (uint32_t)32U * sizeof(uint8_t));
++        bn_to_bytes_be4(pk_raw + (uint32_t)32U, ya);
++    }
++    return b;
++}
++
++/**
++Convert a public key from raw to its uncompressed form.
++
++  The outparam `pk` points to 65 bytes of valid memory, i.e., uint8_t[65].
++  The argument `pk_raw` points to 64 bytes of valid memory, i.e., uint8_t[64].
++
++  The function DOESN'T check whether (x, y) is a valid point.
++*/
++void
++Hacl_P256_raw_to_uncompressed(uint8_t *pk_raw, uint8_t *pk)
++{
++    pk[0U] = (uint8_t)0x04U;
++    memcpy(pk + (uint32_t)1U, pk_raw, (uint32_t)64U * sizeof(uint8_t));
++}
++
++/**
++Convert a public key from raw to its compressed form.
++
++  The outparam `pk` points to 33 bytes of valid memory, i.e., uint8_t[33].
++  The argument `pk_raw` points to 64 bytes of valid memory, i.e., uint8_t[64].
++
++  The function DOESN'T check whether (x, y) is a valid point.
++*/
++void
++Hacl_P256_raw_to_compressed(uint8_t *pk_raw, uint8_t *pk)
++{
++    uint8_t *pk_x = pk_raw;
++    uint8_t *pk_y = pk_raw + (uint32_t)32U;
++    uint64_t bn_f[4U] = { 0U };
++    bn_from_bytes_be4(bn_f, pk_y);
++    uint64_t is_odd_f = bn_f[0U] & (uint64_t)1U;
++    pk[0U] = (uint8_t)is_odd_f + (uint8_t)0x02U;
++    memcpy(pk + (uint32_t)1U, pk_x, (uint32_t)32U * sizeof(uint8_t));
++}
++
++/******************/
++/* ECDH agreement */
++/******************/
++
++/**
++Compute the public key from the private key.
++
++  The function returns `true` if a private key is valid and `false` otherwise.
++
++  The outparam `public_key`  points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `private_key` points to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The private key is valid:
++    • 0 < `private_key` < the order of the curve.
++*/
++bool
++Hacl_P256_dh_initiator(uint8_t *public_key, uint8_t *private_key)
++{
++    return Hacl_Impl_P256_DH_ecp256dh_i(public_key, private_key);
++}
++
++/**
++Execute the diffie-hellmann key exchange.
++
++  The function returns `true` for successful creation of an ECDH shared secret and
++  `false` otherwise.
++
++  The outparam `shared_secret` points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `their_pubkey` points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `private_key` points to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The function also checks whether `private_key` and `their_pubkey` are valid.
++*/
++bool
++Hacl_P256_dh_responder(uint8_t *shared_secret, uint8_t *their_pubkey, uint8_t *private_key)
++{
++    return Hacl_Impl_P256_DH_ecp256dh_r(shared_secret, their_pubkey, private_key);
++}
++
+diff -up ./lib/freebl/verified/Hacl_P256.h.p256 ./lib/freebl/verified/Hacl_P256.h
+--- ./lib/freebl/verified/Hacl_P256.h.p256	2024-01-09 11:25:43.803382195 -0800
++++ ./lib/freebl/verified/Hacl_P256.h	2024-01-09 11:25:43.803382195 -0800
+@@ -0,0 +1,237 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef __Hacl_P256_H
++#define __Hacl_P256_H
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#include <string.h>
++#include "krml/internal/types.h"
++#include "krml/lowstar_endianness.h"
++#include "krml/internal/target.h"
++
++#include "Hacl_Krmllib.h"
++#include "lib_intrinsics.h"
++
++/*******************************************************************************
++
++ Verified C library for ECDSA and ECDH functions over the P-256 NIST curve.
++
++ This module implements signing and verification, key validation, conversions
++ between various point representations, and ECDH key agreement.
++
++*******************************************************************************/
++
++/*****************/
++/* ECDSA signing */
++/*****************/
++
++/**
++Create an ECDSA signature WITHOUT hashing first.
++
++  This function is intended to receive a hash of the input.
++  For convenience, we recommend using one of the hash-and-sign combined functions above.
++
++  The argument `msg` MUST be at least 32 bytes (i.e. `msg_len >= 32`).
++
++  NOTE: The equivalent functions in OpenSSL and Fiat-Crypto both accept inputs
++  smaller than 32 bytes. These libraries left-pad the input with enough zeroes to
++  reach the minimum 32 byte size. Clients who need behavior identical to OpenSSL
++  need to perform the left-padding themselves.
++
++  The function returns `true` for successful creation of an ECDSA signature and `false` otherwise.
++
++  The outparam `signature` (R || S) points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `msg` points to `msg_len` bytes of valid memory, i.e., uint8_t[msg_len].
++  The arguments `private_key` and `nonce` point to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The function also checks whether `private_key` and `nonce` are valid values:
++    • 0 < `private_key` < the order of the curve
++    • 0 < `nonce` < the order of the curve
++*/
++bool
++Hacl_P256_ecdsa_sign_p256_without_hash(
++    uint8_t *signature,
++    uint32_t msg_len,
++    uint8_t *msg,
++    uint8_t *private_key,
++    uint8_t *nonce);
++
++/**********************/
++/* ECDSA verification */
++/**********************/
++
++/**
++Verify an ECDSA signature WITHOUT hashing first.
++
++  This function is intended to receive a hash of the input.
++  For convenience, we recommend using one of the hash-and-verify combined functions above.
++
++  The argument `msg` MUST be at least 32 bytes (i.e. `msg_len >= 32`).
++
++  The function returns `true` if the signature is valid and `false` otherwise.
++
++  The argument `msg` points to `msg_len` bytes of valid memory, i.e., uint8_t[msg_len].
++  The argument `public_key` (x || y) points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The arguments `signature_r` and `signature_s` point to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The function also checks whether `public_key` is valid
++*/
++bool
++Hacl_P256_ecdsa_verif_without_hash(
++    uint32_t msg_len,
++    uint8_t *msg,
++    uint8_t *public_key,
++    uint8_t *signature_r,
++    uint8_t *signature_s);
++
++/******************/
++/* Key validation */
++/******************/
++
++/**
++Public key validation.
++
++  The function returns `true` if a public key is valid and `false` otherwise.
++
++  The argument `public_key` points to 64 bytes of valid memory, i.e., uint8_t[64].
++
++  The public key (x || y) is valid (with respect to SP 800-56A):
++    • the public key is not the “point at infinity”, represented as O.
++    • the affine x and y coordinates of the point represented by the public key are
++      in the range [0, p – 1] where p is the prime defining the finite field.
++    • y^2 = x^3 + ax + b where a and b are the coefficients of the curve equation.
++  The last extract is taken from: https://neilmadden.blog/2017/05/17/so-how-do-you-validate-nist-ecdh-public-keys/
++*/
++bool Hacl_P256_validate_public_key(uint8_t *public_key);
++
++/**
++Private key validation.
++
++  The function returns `true` if a private key is valid and `false` otherwise.
++
++  The argument `private_key` points to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The private key is valid:
++    • 0 < `private_key` < the order of the curve
++*/
++bool Hacl_P256_validate_private_key(uint8_t *private_key);
++
++/*******************************************************************************
++  Parsing and Serializing public keys.
++
++  A public key is a point (x, y) on the P-256 NIST curve.
++
++  The point can be represented in the following three ways.
++    • raw          = [ x || y ], 64 bytes
++    • uncompressed = [ 0x04 || x || y ], 65 bytes
++    • compressed   = [ (0x02 for even `y` and 0x03 for odd `y`) || x ], 33 bytes
++
++*******************************************************************************/
++
++/**
++Convert a public key from uncompressed to its raw form.
++
++  The function returns `true` for successful conversion of a public key and `false` otherwise.
++
++  The outparam `pk_raw` points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `pk` points to 65 bytes of valid memory, i.e., uint8_t[65].
++
++  The function DOESN'T check whether (x, y) is a valid point.
++*/
++bool Hacl_P256_uncompressed_to_raw(uint8_t *pk, uint8_t *pk_raw);
++
++/**
++Convert a public key from compressed to its raw form.
++
++  The function returns `true` for successful conversion of a public key and `false` otherwise.
++
++  The outparam `pk_raw` points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `pk` points to 33 bytes of valid memory, i.e., uint8_t[33].
++
++  The function also checks whether (x, y) is a valid point.
++*/
++bool Hacl_P256_compressed_to_raw(uint8_t *pk, uint8_t *pk_raw);
++
++/**
++Convert a public key from raw to its uncompressed form.
++
++  The outparam `pk` points to 65 bytes of valid memory, i.e., uint8_t[65].
++  The argument `pk_raw` points to 64 bytes of valid memory, i.e., uint8_t[64].
++
++  The function DOESN'T check whether (x, y) is a valid point.
++*/
++void Hacl_P256_raw_to_uncompressed(uint8_t *pk_raw, uint8_t *pk);
++
++/**
++Convert a public key from raw to its compressed form.
++
++  The outparam `pk` points to 33 bytes of valid memory, i.e., uint8_t[33].
++  The argument `pk_raw` points to 64 bytes of valid memory, i.e., uint8_t[64].
++
++  The function DOESN'T check whether (x, y) is a valid point.
++*/
++void Hacl_P256_raw_to_compressed(uint8_t *pk_raw, uint8_t *pk);
++
++/******************/
++/* ECDH agreement */
++/******************/
++
++/**
++Compute the public key from the private key.
++
++  The function returns `true` if a private key is valid and `false` otherwise.
++
++  The outparam `public_key`  points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `private_key` points to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The private key is valid:
++    • 0 < `private_key` < the order of the curve.
++*/
++bool Hacl_P256_dh_initiator(uint8_t *public_key, uint8_t *private_key);
++
++/**
++Execute the diffie-hellmann key exchange.
++
++  The function returns `true` for successful creation of an ECDH shared secret and
++  `false` otherwise.
++
++  The outparam `shared_secret` points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `their_pubkey` points to 64 bytes of valid memory, i.e., uint8_t[64].
++  The argument `private_key` points to 32 bytes of valid memory, i.e., uint8_t[32].
++
++  The function also checks whether `private_key` and `their_pubkey` are valid.
++*/
++bool
++Hacl_P256_dh_responder(uint8_t *shared_secret, uint8_t *their_pubkey, uint8_t *private_key);
++
++#if defined(__cplusplus)
++}
++#endif
++
++#define __Hacl_P256_H_DEFINED
++#endif
+diff -up ./lib/freebl/verified/internal/Hacl_Bignum_Base.h.p256 ./lib/freebl/verified/internal/Hacl_Bignum_Base.h
+--- ./lib/freebl/verified/internal/Hacl_Bignum_Base.h.p256	2024-01-09 11:25:43.803382195 -0800
++++ ./lib/freebl/verified/internal/Hacl_Bignum_Base.h	2024-01-09 11:25:43.803382195 -0800
+@@ -0,0 +1,114 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef __internal_Hacl_Bignum_Base_H
++#define __internal_Hacl_Bignum_Base_H
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#include <string.h>
++#include "krml/internal/types.h"
++#include "krml/lowstar_endianness.h"
++#include "krml/internal/target.h"
++
++#include "internal/Hacl_Krmllib.h"
++#include "Hacl_Krmllib.h"
++#include "internal/lib_intrinsics.h"
++
++static inline uint32_t
++Hacl_Bignum_Base_mul_wide_add2_u32(uint32_t a, uint32_t b, uint32_t c_in, uint32_t *out)
++{
++    uint32_t out0 = out[0U];
++    uint64_t res = (uint64_t)a * (uint64_t)b + (uint64_t)c_in + (uint64_t)out0;
++    out[0U] = (uint32_t)res;
++    return (uint32_t)(res >> (uint32_t)32U);
++}
++
++static inline uint64_t
++Hacl_Bignum_Base_mul_wide_add2_u64(uint64_t a, uint64_t b, uint64_t c_in, uint64_t *out)
++{
++    uint64_t out0 = out[0U];
++    FStar_UInt128_uint128
++        res =
++            FStar_UInt128_add(FStar_UInt128_add(FStar_UInt128_mul_wide(a, b),
++                                                FStar_UInt128_uint64_to_uint128(c_in)),
++                              FStar_UInt128_uint64_to_uint128(out0));
++    out[0U] = FStar_UInt128_uint128_to_uint64(res);
++    return FStar_UInt128_uint128_to_uint64(FStar_UInt128_shift_right(res, (uint32_t)64U));
++}
++
++static inline uint64_t
++Hacl_Bignum_Lib_bn_get_bits_u64(uint32_t len, uint64_t *b, uint32_t i, uint32_t l)
++{
++    uint32_t i1 = i / (uint32_t)64U;
++    uint32_t j = i % (uint32_t)64U;
++    uint64_t p1 = b[i1] >> j;
++    uint64_t ite;
++    if (i1 + (uint32_t)1U < len && (uint32_t)0U < j) {
++        ite = p1 | b[i1 + (uint32_t)1U] << ((uint32_t)64U - j);
++    } else {
++        ite = p1;
++    }
++    return ite & (((uint64_t)1U << l) - (uint64_t)1U);
++}
++
++static inline uint64_t
++Hacl_Bignum_Addition_bn_add_eq_len_u64(uint32_t aLen, uint64_t *a, uint64_t *b, uint64_t *res)
++{
++    uint64_t c = (uint64_t)0U;
++    for (uint32_t i = (uint32_t)0U; i < aLen / (uint32_t)4U; i++) {
++        uint64_t t1 = a[(uint32_t)4U * i];
++        uint64_t t20 = b[(uint32_t)4U * i];
++        uint64_t *res_i0 = res + (uint32_t)4U * i;
++        c = Lib_IntTypes_Intrinsics_add_carry_u64(c, t1, t20, res_i0);
++        uint64_t t10 = a[(uint32_t)4U * i + (uint32_t)1U];
++        uint64_t t21 = b[(uint32_t)4U * i + (uint32_t)1U];
++        uint64_t *res_i1 = res + (uint32_t)4U * i + (uint32_t)1U;
++        c = Lib_IntTypes_Intrinsics_add_carry_u64(c, t10, t21, res_i1);
++        uint64_t t11 = a[(uint32_t)4U * i + (uint32_t)2U];
++        uint64_t t22 = b[(uint32_t)4U * i + (uint32_t)2U];
++        uint64_t *res_i2 = res + (uint32_t)4U * i + (uint32_t)2U;
++        c = Lib_IntTypes_Intrinsics_add_carry_u64(c, t11, t22, res_i2);
++        uint64_t t12 = a[(uint32_t)4U * i + (uint32_t)3U];
++        uint64_t t2 = b[(uint32_t)4U * i + (uint32_t)3U];
++        uint64_t *res_i = res + (uint32_t)4U * i + (uint32_t)3U;
++        c = Lib_IntTypes_Intrinsics_add_carry_u64(c, t12, t2, res_i);
++    }
++    for (uint32_t i = aLen / (uint32_t)4U * (uint32_t)4U; i < aLen; i++) {
++        uint64_t t1 = a[i];
++        uint64_t t2 = b[i];
++        uint64_t *res_i = res + i;
++        c = Lib_IntTypes_Intrinsics_add_carry_u64(c, t1, t2, res_i);
++    }
++    return c;
++}
++
++#if defined(__cplusplus)
++}
++#endif
++
++#define __internal_Hacl_Bignum_Base_H_DEFINED
++#endif
+diff -up ./lib/freebl/verified/internal/Hacl_IntTypes_Intrinsics_128.h.p256 ./lib/freebl/verified/internal/Hacl_IntTypes_Intrinsics_128.h
+--- ./lib/freebl/verified/internal/Hacl_IntTypes_Intrinsics_128.h.p256	2024-01-09 11:25:43.803382195 -0800
++++ ./lib/freebl/verified/internal/Hacl_IntTypes_Intrinsics_128.h	2024-01-09 11:25:43.803382195 -0800
+@@ -0,0 +1,72 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef __Hacl_IntTypes_Intrinsics_128_H
++#define __Hacl_IntTypes_Intrinsics_128_H
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#include <string.h>
++#include "krml/internal/types.h"
++#include "krml/lowstar_endianness.h"
++#include "krml/internal/target.h"
++
++#include "Hacl_Krmllib.h"
++
++static inline uint64_t
++Hacl_IntTypes_Intrinsics_128_add_carry_u64(uint64_t cin, uint64_t x, uint64_t y, uint64_t *r)
++{
++    FStar_UInt128_uint128
++        res =
++            FStar_UInt128_add_mod(FStar_UInt128_add_mod(FStar_UInt128_uint64_to_uint128(x),
++                                                        FStar_UInt128_uint64_to_uint128(cin)),
++                                  FStar_UInt128_uint64_to_uint128(y));
++    uint64_t c = FStar_UInt128_uint128_to_uint64(FStar_UInt128_shift_right(res, (uint32_t)64U));
++    r[0U] = FStar_UInt128_uint128_to_uint64(res);
++    return c;
++}
++
++static inline uint64_t
++Hacl_IntTypes_Intrinsics_128_sub_borrow_u64(uint64_t cin, uint64_t x, uint64_t y, uint64_t *r)
++{
++    FStar_UInt128_uint128
++        res =
++            FStar_UInt128_sub_mod(FStar_UInt128_sub_mod(FStar_UInt128_uint64_to_uint128(x),
++                                                        FStar_UInt128_uint64_to_uint128(y)),
++                                  FStar_UInt128_uint64_to_uint128(cin));
++    uint64_t
++        c =
++            FStar_UInt128_uint128_to_uint64(FStar_UInt128_shift_right(res, (uint32_t)64U)) & (uint64_t)1U;
++    r[0U] = FStar_UInt128_uint128_to_uint64(res);
++    return c;
++}
++
++#if defined(__cplusplus)
++}
++#endif
++
++#define __Hacl_IntTypes_Intrinsics_128_H_DEFINED
++#endif
+diff -up ./lib/freebl/verified/internal/Hacl_IntTypes_Intrinsics.h.p256 ./lib/freebl/verified/internal/Hacl_IntTypes_Intrinsics.h
+--- ./lib/freebl/verified/internal/Hacl_IntTypes_Intrinsics.h.p256	2024-01-09 11:25:43.803382195 -0800
++++ ./lib/freebl/verified/internal/Hacl_IntTypes_Intrinsics.h	2024-01-09 11:25:43.803382195 -0800
+@@ -0,0 +1,83 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef __Hacl_IntTypes_Intrinsics_H
++#define __Hacl_IntTypes_Intrinsics_H
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#include <string.h>
++#include "krml/internal/types.h"
++#include "krml/lowstar_endianness.h"
++#include "krml/internal/target.h"
++
++#include "Hacl_Krmllib.h"
++
++static inline uint32_t
++Hacl_IntTypes_Intrinsics_add_carry_u32(uint32_t cin, uint32_t x, uint32_t y, uint32_t *r)
++{
++    uint64_t res = (uint64_t)x + (uint64_t)cin + (uint64_t)y;
++    uint32_t c = (uint32_t)(res >> (uint32_t)32U);
++    r[0U] = (uint32_t)res;
++    return c;
++}
++
++static inline uint32_t
++Hacl_IntTypes_Intrinsics_sub_borrow_u32(uint32_t cin, uint32_t x, uint32_t y, uint32_t *r)
++{
++    uint64_t res = (uint64_t)x - (uint64_t)y - (uint64_t)cin;
++    uint32_t c = (uint32_t)(res >> (uint32_t)32U) & (uint32_t)1U;
++    r[0U] = (uint32_t)res;
++    return c;
++}
++
++static inline uint64_t
++Hacl_IntTypes_Intrinsics_add_carry_u64(uint64_t cin, uint64_t x, uint64_t y, uint64_t *r)
++{
++    uint64_t res = x + cin + y;
++    uint64_t
++        c = (~FStar_UInt64_gte_mask(res, x) | (FStar_UInt64_eq_mask(res, x) & cin)) & (uint64_t)1U;
++    r[0U] = res;
++    return c;
++}
++
++static inline uint64_t
++Hacl_IntTypes_Intrinsics_sub_borrow_u64(uint64_t cin, uint64_t x, uint64_t y, uint64_t *r)
++{
++    uint64_t res = x - y - cin;
++    uint64_t
++        c =
++            ((FStar_UInt64_gte_mask(res, x) & ~FStar_UInt64_eq_mask(res, x)) | (FStar_UInt64_eq_mask(res, x) & cin)) & (uint64_t)1U;
++    r[0U] = res;
++    return c;
++}
++
++#if defined(__cplusplus)
++}
++#endif
++
++#define __Hacl_IntTypes_Intrinsics_H_DEFINED
++#endif
+diff -up ./lib/freebl/verified/internal/Hacl_P256.h.p256 ./lib/freebl/verified/internal/Hacl_P256.h
+--- ./lib/freebl/verified/internal/Hacl_P256.h.p256	2024-01-09 11:25:43.803382195 -0800
++++ ./lib/freebl/verified/internal/Hacl_P256.h	2024-01-09 11:25:43.803382195 -0800
+@@ -0,0 +1,56 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef __internal_Hacl_P256_H
++#define __internal_Hacl_P256_H
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#include <string.h>
++#include "krml/internal/types.h"
++#include "krml/lowstar_endianness.h"
++#include "krml/internal/target.h"
++
++#include "internal/Hacl_P256_PrecompTable.h"
++#include "internal/Hacl_Krmllib.h"
++#include "internal/Hacl_Bignum_Base.h"
++#include "../Hacl_P256.h"
++//#include "lib_intrinsics.h"
++
++bool Hacl_Impl_P256_DH_ecp256dh_i(uint8_t *public_key, uint8_t *private_key);
++
++bool
++Hacl_Impl_P256_DH_ecp256dh_r(
++    uint8_t *shared_secret,
++    uint8_t *their_pubkey,
++    uint8_t *private_key);
++
++#if defined(__cplusplus)
++}
++#endif
++
++#define __internal_Hacl_P256_H_DEFINED
++#endif
+diff -up ./lib/freebl/verified/internal/Hacl_P256_PrecompTable.h.p256 ./lib/freebl/verified/internal/Hacl_P256_PrecompTable.h
+--- ./lib/freebl/verified/internal/Hacl_P256_PrecompTable.h.p256	2024-01-09 11:25:43.803382195 -0800
++++ ./lib/freebl/verified/internal/Hacl_P256_PrecompTable.h	2024-01-09 11:25:43.803382195 -0800
+@@ -0,0 +1,508 @@
++/* MIT License
++ *
++ * Copyright (c) 2016-2022 INRIA, CMU and Microsoft Corporation
++ * Copyright (c) 2022-2023 HACL* Contributors
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all
++ * copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef __internal_Hacl_P256_PrecompTable_H
++#define __internal_Hacl_P256_PrecompTable_H
++
++#if defined(__cplusplus)
++extern "C" {
++#endif
++
++#include <string.h>
++#include "krml/internal/types.h"
++#include "krml/lowstar_endianness.h"
++#include "krml/internal/target.h"
++
++static const uint64_t
++    Hacl_P256_PrecompTable_precomp_basepoint_table_w4[192U] = {
++        (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)1U,
++        (uint64_t)18446744069414584320U, (uint64_t)18446744073709551615U, (uint64_t)4294967294U,
++        (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)8784043285714375740U,
++        (uint64_t)8483257759279461889U, (uint64_t)8789745728267363600U, (uint64_t)1770019616739251654U,
++        (uint64_t)15992936863339206154U, (uint64_t)10037038012062884956U,
++        (uint64_t)15197544864945402661U, (uint64_t)9615747158586711429U, (uint64_t)1U,
++        (uint64_t)18446744069414584320U, (uint64_t)18446744073709551615U, (uint64_t)4294967294U,
++        (uint64_t)10634854829044225757U, (uint64_t)351552716085025155U, (uint64_t)10645315080955407736U,
++        (uint64_t)3609262091244858135U, (uint64_t)15760741698986874125U,
++        (uint64_t)14936374388219697827U, (uint64_t)15751360096993017895U,
++        (uint64_t)18012233706239762398U, (uint64_t)1993877568177495041U,
++        (uint64_t)10345888787846536528U, (uint64_t)7746511691117935375U,
++        (uint64_t)14517043990409914413U, (uint64_t)14122549297570634151U,
++        (uint64_t)16934610359517083771U, (uint64_t)5724511325497097418U, (uint64_t)8983432969107448705U,
++        (uint64_t)2687429970334080245U, (uint64_t)16525396802810050288U, (uint64_t)7602596488871585854U,
++        (uint64_t)4813919589149203084U, (uint64_t)7680395813780804519U, (uint64_t)6687709583048023590U,
++        (uint64_t)18086445169104142027U, (uint64_t)9637814708330203929U,
++        (uint64_t)14785108459960679090U, (uint64_t)3838023279095023581U, (uint64_t)3555615526157830307U,
++        (uint64_t)5177066488380472871U, (uint64_t)18218186719108038403U,
++        (uint64_t)16281556341699656105U, (uint64_t)1524227924561461191U, (uint64_t)4148060517641909597U,
++        (uint64_t)2858290374115363433U, (uint64_t)8942772026334130620U, (uint64_t)3034451298319885113U,
++        (uint64_t)8447866036736640940U, (uint64_t)11204933433076256578U,
++        (uint64_t)18333595740249588297U, (uint64_t)8259597024804538246U, (uint64_t)9539734295777539786U,
++        (uint64_t)9797290423046626413U, (uint64_t)5777303437849646537U, (uint64_t)8739356909899132020U,
++        (uint64_t)14815960973766782158U, (uint64_t)15286581798204509801U,
++        (uint64_t)17597362577777019682U, (uint64_t)13259283710820519742U,
++        (uint64_t)10501322996899164670U, (uint64_t)1221138904338319642U,
++        (uint64_t)14586685489551951885U, (uint64_t)895326705426031212U, (uint64_t)14398171728560617847U,
++        (uint64_t)9592550823745097391U, (uint64_t)17240998489162206026U, (uint64_t)8085479283308189196U,
++        (uint64_t)14844657737893882826U, (uint64_t)15923425394150618234U,
++        (uint64_t)2997808084773249525U, (uint64_t)494323555453660587U, (uint64_t)1215695327517794764U,
++        (uint64_t)9476207381098391690U, (uint64_t)7480789678419122995U, (uint64_t)15212230329321082489U,
++        (uint64_t)436189395349576388U, (uint64_t)17377474396456660834U, (uint64_t)15237013929655017939U,
++        (uint64_t)11444428846883781676U, (uint64_t)5112749694521428575U, (uint64_t)950829367509872073U,
++        (uint64_t)17665036182057559519U, (uint64_t)17205133339690002313U,
++        (uint64_t)16233765170251334549U, (uint64_t)10122775683257972591U,
++        (uint64_t)3352514236455632420U, (uint64_t)9143148522359954691U, (uint64_t)601191684005658860U,
++        (uint64_t)13398772186646349998U, (uint64_t)15512696600132928431U,
++        (uint64_t)9128416073728948653U, (uint64_t)11233051033546138578U, (uint64_t)6769345682610122833U,
++        (uint64_t)10823233224575054288U, (uint64_t)9997725227559980175U, (uint64_t)6733425642852897415U,
++        (uint64_t)16302206918151466066U, (uint64_t)1669330822143265921U, (uint64_t)2661645605036546002U,
++        (uint64_t)17182558479745802165U, (uint64_t)1165082692376932040U, (uint64_t)9470595929011488359U,
++        (uint64_t)6142147329285324932U, (uint64_t)4829075085998111287U, (uint64_t)10231370681107338930U,
++        (uint64_t)9591876895322495239U, (uint64_t)10316468561384076618U,
++        (uint64_t)11592503647238064235U, (uint64_t)13395813606055179632U, (uint64_t)511127033980815508U,
++        (uint64_t)12434976573147649880U, (uint64_t)3425094795384359127U, (uint64_t)6816971736303023445U,
++        (uint64_t)15444670609021139344U, (uint64_t)9464349818322082360U,
++        (uint64_t)16178216413042376883U, (uint64_t)9595540370774317348U, (uint64_t)7229365182662875710U,
++        (uint64_t)4601177649460012843U, (uint64_t)5455046447382487090U, (uint64_t)10854066421606187521U,
++        (uint64_t)15913416821879788071U, (uint64_t)2297365362023460173U, (uint64_t)2603252216454941350U,
++        (uint64_t)6768791943870490934U, (uint64_t)15705936687122754810U, (uint64_t)9537096567546600694U,
++        (uint64_t)17580538144855035062U, (uint64_t)4496542856965746638U, (uint64_t)8444341625922124942U,
++        (uint64_t)12191263903636183168U, (uint64_t)17427332907535974165U,
++        (uint64_t)14307569739254103736U, (uint64_t)13900598742063266169U,
++        (uint64_t)7176996424355977650U, (uint64_t)5709008170379717479U, (uint64_t)14471312052264549092U,
++        (uint64_t)1464519909491759867U, (uint64_t)3328154641049602121U, (uint64_t)13020349337171136774U,
++        (uint64_t)2772166279972051938U, (uint64_t)10854476939425975292U, (uint64_t)1967189930534630940U,
++        (uint64_t)2802919076529341959U, (uint64_t)14792226094833519208U,
++        (uint64_t)14675640928566522177U, (uint64_t)14838974364643800837U,
++        (uint64_t)17631460696099549980U, (uint64_t)17434186275364935469U,
++        (uint64_t)2665648200587705473U, (uint64_t)13202122464492564051U, (uint64_t)7576287350918073341U,
++        (uint64_t)2272206013910186424U, (uint64_t)14558761641743937843U, (uint64_t)5675729149929979729U,
++        (uint64_t)9043135187561613166U, (uint64_t)11750149293830589225U, (uint64_t)740555197954307911U,
++        (uint64_t)9871738005087190699U, (uint64_t)17178667634283502053U,
++        (uint64_t)18046255991533013265U, (uint64_t)4458222096988430430U, (uint64_t)8452427758526311627U,
++        (uint64_t)13825286929656615266U, (uint64_t)13956286357198391218U,
++        (uint64_t)15875692916799995079U, (uint64_t)10634895319157013920U,
++        (uint64_t)13230116118036304207U, (uint64_t)8795317393614625606U, (uint64_t)7001710806858862020U,
++        (uint64_t)7949746088586183478U, (uint64_t)14677556044923602317U,
++        (uint64_t)11184023437485843904U, (uint64_t)11215864722023085094U,
++        (uint64_t)6444464081471519014U, (uint64_t)1706241174022415217U, (uint64_t)8243975633057550613U,
++        (uint64_t)15502902453836085864U, (uint64_t)3799182188594003953U, (uint64_t)3538840175098724094U
++    };
++
++static const uint64_t
++    Hacl_P256_PrecompTable_precomp_g_pow2_64_table_w4[192U] = {
++        (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)1U,
++        (uint64_t)18446744069414584320U, (uint64_t)18446744073709551615U, (uint64_t)4294967294U,
++        (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)1499621593102562565U,
++        (uint64_t)16692369783039433128U, (uint64_t)15337520135922861848U,
++        (uint64_t)5455737214495366228U, (uint64_t)17827017231032529600U,
++        (uint64_t)12413621606240782649U, (uint64_t)2290483008028286132U,
++        (uint64_t)15752017553340844820U, (uint64_t)4846430910634234874U,
++        (uint64_t)10861682798464583253U, (uint64_t)15404737222404363049U, (uint64_t)363586619281562022U,
++        (uint64_t)9866710912401645115U, (uint64_t)1162548847543228595U, (uint64_t)7649967190445130486U,
++        (uint64_t)5212340432230915749U, (uint64_t)7572620550182916491U, (uint64_t)14876145112448665096U,
++        (uint64_t)2063227348838176167U, (uint64_t)3519435548295415847U, (uint64_t)8390400282019023103U,
++        (uint64_t)17666843593163037841U, (uint64_t)9450204148816496323U, (uint64_t)8483374507652916768U,
++        (uint64_t)6254661047265818424U, (uint64_t)16382127809582285023U, (uint64_t)125359443771153172U,
++        (uint64_t)1374336701588437897U, (uint64_t)11362596098420127726U, (uint64_t)2101654420738681387U,
++        (uint64_t)12772780342444840510U, (uint64_t)12546934328908550060U,
++        (uint64_t)8331880412333790397U, (uint64_t)11687262051473819904U, (uint64_t)8926848496503457587U,
++        (uint64_t)9603974142010467857U, (uint64_t)13199952163826973175U, (uint64_t)2189856264898797734U,
++        (uint64_t)11356074861870267226U, (uint64_t)2027714896422561895U, (uint64_t)5261606367808050149U,
++        (uint64_t)153855954337762312U, (uint64_t)6375919692894573986U, (uint64_t)12364041207536146533U,
++        (uint64_t)1891896010455057160U, (uint64_t)1568123795087313171U, (uint64_t)18138710056556660101U,
++        (uint64_t)6004886947510047736U, (uint64_t)4811859325589542932U, (uint64_t)3618763430148954981U,
++        (uint64_t)11434521746258554122U, (uint64_t)10086341535864049427U,
++        (uint64_t)8073421629570399570U, (uint64_t)12680586148814729338U, (uint64_t)9619958020761569612U,
++        (uint64_t)15827203580658384478U, (uint64_t)12832694810937550406U,
++        (uint64_t)14977975484447400910U, (uint64_t)5478002389061063653U,
++        (uint64_t)14731136312639060880U, (uint64_t)4317867687275472033U, (uint64_t)6642650962855259884U,
++        (uint64_t)2514254944289495285U, (uint64_t)14231405641534478436U, (uint64_t)4045448346091518946U,
++        (uint64_t)8985477013445972471U, (uint64_t)8869039454457032149U, (uint64_t)4356978486208692970U,
++        (uint64_t)10805288613335538577U, (uint64_t)12832353127812502042U,
++        (uint64_t)4576590051676547490U, (uint64_t)6728053735138655107U, (uint64_t)17814206719173206184U,
++        (uint64_t)79790138573994940U, (uint64_t)17920293215101822267U, (uint64_t)13422026625585728864U,
++        (uint64_t)5018058010492547271U, (uint64_t)110232326023384102U, (uint64_t)10834264070056942976U,
++        (uint64_t)15222249086119088588U, (uint64_t)15119439519142044997U,
++        (uint64_t)11655511970063167313U, (uint64_t)1614477029450566107U, (uint64_t)3619322817271059794U,
++        (uint64_t)9352862040415412867U, (uint64_t)14017522553242747074U,
++        (uint64_t)13138513643674040327U, (uint64_t)3610195242889455765U, (uint64_t)8371069193996567291U,
++        (uint64_t)12670227996544662654U, (uint64_t)1205961025092146303U,
++        (uint64_t)13106709934003962112U, (uint64_t)4350113471327723407U,
++        (uint64_t)15060941403739680459U, (uint64_t)13639127647823205030U,
++        (uint64_t)10790943339357725715U, (uint64_t)498760574280648264U, (uint64_t)17922071907832082887U,
++        (uint64_t)15122670976670152145U, (uint64_t)6275027991110214322U, (uint64_t)7250912847491816402U,
++        (uint64_t)15206617260142982380U, (uint64_t)3385668313694152877U,
++        (uint64_t)17522479771766801905U, (uint64_t)2965919117476170655U, (uint64_t)1553238516603269404U,
++        (uint64_t)5820770015631050991U, (uint64_t)4999445222232605348U, (uint64_t)9245650860833717444U,
++        (uint64_t)1508811811724230728U, (uint64_t)5190684913765614385U, (uint64_t)15692927070934536166U,
++        (uint64_t)12981978499190500902U, (uint64_t)5143491963193394698U, (uint64_t)7705698092144084129U,
++        (uint64_t)581120653055084783U, (uint64_t)13886552864486459714U, (uint64_t)6290301270652587255U,
++        (uint64_t)8663431529954393128U, (uint64_t)17033405846475472443U, (uint64_t)5206780355442651635U,
++        (uint64_t)12580364474736467688U, (uint64_t)17934601912005283310U,
++        (uint64_t)15119491731028933652U, (uint64_t)17848231399859044858U,
++        (uint64_t)4427673319524919329U, (uint64_t)2673607337074368008U, (uint64_t)14034876464294699949U,
++        (uint64_t)10938948975420813697U, (uint64_t)15202340615298669183U,
++        (uint64_t)5496603454069431071U, (uint64_t)2486526142064906845U, (uint64_t)4507882119510526802U,
++        (uint64_t)13888151172411390059U, (uint64_t)15049027856908071726U,
++        (uint64_t)9667231543181973158U, (uint64_t)6406671575277563202U, (uint64_t)3395801050331215139U,
++        (uint64_t)9813607433539108308U, (uint64_t)2681417728820980381U, (uint64_t)18407064643927113994U,
++        (uint64_t)7707177692113485527U, (uint64_t)14218149384635317074U, (uint64_t)3658668346206375919U,
++        (uint64_t)15404713991002362166U, (uint64_t)10152074687696195207U,
++        (uint64_t)10926946599582128139U, (uint64_t)16907298600007085320U,
++        (uint64_t)16544287219664720279U, (uint64_t)11007075933432813205U,
++        (uint64_t)8652245965145713599U, (uint64_t)7857626748965990384U, (uint64_t)5602306604520095870U,
++        (uint64_t)2525139243938658618U, (uint64_t)14405696176872077447U,
++        (uint64_t)18432270482137885332U, (uint64_t)9913880809120071177U,
++        (uint64_t)16896141737831216972U, (uint64_t)7484791498211214829U,
++        (uint64_t)15635259968266497469U, (uint64_t)8495118537612215624U, (uint64_t)4915477980562575356U,
++        (uint64_t)16453519279754924350U, (uint64_t)14462108244565406969U,
++        (uint64_t)14837837755237096687U, (uint64_t)14130171078892575346U,
++        (uint64_t)15423793222528491497U, (uint64_t)5460399262075036084U,
++        (uint64_t)16085440580308415349U, (uint64_t)26873200736954488U, (uint64_t)5603655807457499550U,
++        (uint64_t)3342202915871129617U, (uint64_t)1604413932150236626U, (uint64_t)9684226585089458974U,
++        (uint64_t)1213229904006618539U, (uint64_t)6782978662408837236U, (uint64_t)11197029877749307372U,
++        (uint64_t)14085968786551657744U, (uint64_t)17352273610494009342U,
++        (uint64_t)7876582961192434984U
++    };
++
++static const uint64_t
++    Hacl_P256_PrecompTable_precomp_g_pow2_128_table_w4[192U] = {
++        (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)1U,
++        (uint64_t)18446744069414584320U, (uint64_t)18446744073709551615U, (uint64_t)4294967294U,
++        (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)14619254753077084366U,
++        (uint64_t)13913835116514008593U, (uint64_t)15060744674088488145U,
++        (uint64_t)17668414598203068685U, (uint64_t)10761169236902342334U,
++        (uint64_t)15467027479157446221U, (uint64_t)14989185522423469618U,
++        (uint64_t)14354539272510107003U, (uint64_t)14298211796392133693U,
++        (uint64_t)13270323784253711450U, (uint64_t)13380964971965046957U,
++        (uint64_t)8686204248456909699U, (uint64_t)17434630286744937066U, (uint64_t)1355903775279084720U,
++        (uint64_t)7554695053550308662U, (uint64_t)11354971222741863570U, (uint64_t)564601613420749879U,
++        (uint64_t)8466325837259054896U, (uint64_t)10752965181772434263U,
++        (uint64_t)11405876547368426319U, (uint64_t)13791894568738930940U,
++        (uint64_t)8230587134406354675U, (uint64_t)12415514098722758608U,
++        (uint64_t)18414183046995786744U, (uint64_t)15508000368227372870U,
++        (uint64_t)5781062464627999307U, (uint64_t)15339429052219195590U,
++        (uint64_t)16038703753810741903U, (uint64_t)9587718938298980714U, (uint64_t)4822658817952386407U,
++        (uint64_t)1376351024833260660U, (uint64_t)1120174910554766702U, (uint64_t)1730170933262569274U,
++        (uint64_t)5187428548444533500U, (uint64_t)16242053503368957131U, (uint64_t)3036811119519868279U,
++        (uint64_t)1760267587958926638U, (uint64_t)170244572981065185U, (uint64_t)8063080791967388171U,
++        (uint64_t)4824892826607692737U, (uint64_t)16286391083472040552U,
++        (uint64_t)11945158615253358747U, (uint64_t)14096887760410224200U,
++        (uint64_t)1613720831904557039U, (uint64_t)14316966673761197523U,
++        (uint64_t)17411006201485445341U, (uint64_t)8112301506943158801U, (uint64_t)2069889233927989984U,
++        (uint64_t)10082848378277483927U, (uint64_t)3609691194454404430U, (uint64_t)6110437205371933689U,
++        (uint64_t)9769135977342231601U, (uint64_t)11977962151783386478U,
++        (uint64_t)18088718692559983573U, (uint64_t)11741637975753055U, (uint64_t)11110390325701582190U,
++        (uint64_t)1341402251566067019U, (uint64_t)3028229550849726478U, (uint64_t)10438984083997451310U,
++        (uint64_t)12730851885100145709U, (uint64_t)11524169532089894189U,
++        (uint64_t)4523375903229602674U, (uint64_t)2028602258037385622U, (uint64_t)17082839063089388410U,
++        (uint64_t)6103921364634113167U, (uint64_t)17066180888225306102U,
++        (uint64_t)11395680486707876195U, (uint64_t)10952892272443345484U,
++        (uint64_t)8792831960605859401U, (uint64_t)14194485427742325139U,
++        (uint64_t)15146020821144305250U, (uint64_t)1654766014957123343U, (uint64_t)7955526243090948551U,
++        (uint64_t)3989277566080493308U, (uint64_t)12229385116397931231U,
++        (uint64_t)13430548930727025562U, (uint64_t)3434892688179800602U, (uint64_t)8431998794645622027U,
++        (uint64_t)12132530981596299272U, (uint64_t)2289461608863966999U,
++        (uint64_t)18345870950201487179U, (uint64_t)13517947207801901576U,
++        (uint64_t)5213113244172561159U, (uint64_t)17632986594098340879U, (uint64_t)4405251818133148856U,
++        (uint64_t)11783009269435447793U, (uint64_t)9332138983770046035U,
++        (uint64_t)12863411548922539505U, (uint64_t)3717030292816178224U,
++        (uint64_t)10026078446427137374U, (uint64_t)11167295326594317220U,
++        (uint64_t)12425328773141588668U, (uint64_t)5760335125172049352U, (uint64_t)9016843701117277863U,
++        (uint64_t)5657892835694680172U, (uint64_t)11025130589305387464U, (uint64_t)1368484957977406173U,
++        (uint64_t)17361351345281258834U, (uint64_t)1907113641956152700U,
++        (uint64_t)16439233413531427752U, (uint64_t)5893322296986588932U,
++        (uint64_t)14000206906171746627U, (uint64_t)14979266987545792900U,
++        (uint64_t)6926291766898221120U, (uint64_t)7162023296083360752U, (uint64_t)14762747553625382529U,
++        (uint64_t)12610831658612406849U, (uint64_t)10462926899548715515U,
++        (uint64_t)4794017723140405312U, (uint64_t)5234438200490163319U, (uint64_t)8019519110339576320U,
++        (uint64_t)7194604241290530100U, (uint64_t)12626770134810813246U,
++        (uint64_t)10793074474236419890U, (uint64_t)11323224347913978783U,
++        (uint64_t)16831128015895380245U, (uint64_t)18323094195124693378U,
++        (uint64_t)2361097165281567692U, (uint64_t)15755578675014279498U,
++        (uint64_t)14289876470325854580U, (uint64_t)12856787656093616839U,
++        (uint64_t)3578928531243900594U, (uint64_t)3847532758790503699U, (uint64_t)8377953190224748743U,
++        (uint64_t)3314546646092744596U, (uint64_t)800810188859334358U, (uint64_t)4626344124229343596U,
++        (uint64_t)6620381605850876621U, (uint64_t)11422073570955989527U,
++        (uint64_t)12676813626484814469U, (uint64_t)16725029886764122240U,
++        (uint64_t)16648497372773830008U, (uint64_t)9135702594931291048U,
++        (uint64_t)16080949688826680333U, (uint64_t)11528096561346602947U,
++        (uint64_t)2632498067099740984U, (uint64_t)11583842699108800714U, (uint64_t)8378404864573610526U,
++        (uint64_t)1076560261627788534U, (uint64_t)13836015994325032828U,
++        (uint64_t)11234295937817067909U, (uint64_t)5893659808396722708U,
++        (uint64_t)11277421142886984364U, (uint64_t)8968549037166726491U,
++        (uint64_t)14841374331394032822U, (uint64_t)9967344773947889341U, (uint64_t)8799244393578496085U,
++        (uint64_t)5094686877301601410U, (uint64_t)8780316747074726862U, (uint64_t)9119697306829835718U,
++        (uint64_t)15381243327921855368U, (uint64_t)2686250164449435196U,
++        (uint64_t)16466917280442198358U, (uint64_t)13791704489163125216U,
++        (uint64_t)16955859337117924272U, (uint64_t)17112836394923783642U,
++        (uint64_t)4639176427338618063U, (uint64_t)16770029310141094964U,
++        (uint64_t)11049953922966416185U, (uint64_t)12012669590884098968U,
++        (uint64_t)4859326885929417214U, (uint64_t)896380084392586061U, (uint64_t)7153028362977034008U,
++        (uint64_t)10540021163316263301U, (uint64_t)9318277998512936585U,
++        (uint64_t)18344496977694796523U, (uint64_t)11374737400567645494U,
++        (uint64_t)17158800051138212954U, (uint64_t)18343197867863253153U,
++        (uint64_t)18204799297967861226U, (uint64_t)15798973531606348828U,
++        (uint64_t)9870158263408310459U, (uint64_t)17578869832774612627U, (uint64_t)8395748875822696932U,
++        (uint64_t)15310679007370670872U, (uint64_t)11205576736030808860U,
++        (uint64_t)10123429210002838967U, (uint64_t)5910544144088393959U,
++        (uint64_t)14016615653353687369U, (uint64_t)11191676704772957822U
++    };
++
++static const uint64_t
++    Hacl_P256_PrecompTable_precomp_g_pow2_192_table_w4[192U] = {
++        (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)1U,
++        (uint64_t)18446744069414584320U, (uint64_t)18446744073709551615U, (uint64_t)4294967294U,
++        (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)7870395003430845958U,
++        (uint64_t)18001862936410067720U, (uint64_t)8006461232116967215U, (uint64_t)5921313779532424762U,
++        (uint64_t)10702113371959864307U, (uint64_t)8070517410642379879U, (uint64_t)7139806720777708306U,
++        (uint64_t)8253938546650739833U, (uint64_t)17490482834545705718U, (uint64_t)1065249776797037500U,
++        (uint64_t)5018258455937968775U, (uint64_t)14100621120178668337U, (uint64_t)8392845221328116213U,
++        (uint64_t)14630296398338540788U, (uint64_t)4268947906723414372U, (uint64_t)9231207002243517909U,
++        (uint64_t)14261219637616504262U, (uint64_t)7786881626982345356U,
++        (uint64_t)11412720751765882139U, (uint64_t)14119585051365330009U,
++        (uint64_t)15281626286521302128U, (uint64_t)6350171933454266732U,
++        (uint64_t)16559468304937127866U, (uint64_t)13200760478271693417U,
++        (uint64_t)6733381546280350776U, (uint64_t)3801404890075189193U, (uint64_t)2741036364686993903U,
++        (uint64_t)3218612940540174008U, (uint64_t)10894914335165419505U,
++        (uint64_t)11862941430149998362U, (uint64_t)4223151729402839584U, (uint64_t)2913215088487087887U,
++        (uint64_t)14562168920104952953U, (uint64_t)2170089393468287453U,
++        (uint64_t)10520900655016579352U, (uint64_t)7040362608949989273U, (uint64_t)8376510559381705307U,
++        (uint64_t)9142237200448131532U, (uint64_t)5696859948123854080U, (uint64_t)925422306716081180U,
++        (uint64_t)11155545953469186421U, (uint64_t)1888208646862572812U,
++        (uint64_t)11151095998248845721U, (uint64_t)15793503271680275267U,
++        (uint64_t)7729877044494854851U, (uint64_t)6235134673193032913U, (uint64_t)7364280682182401564U,
++        (uint64_t)5479679373325519985U, (uint64_t)17966037684582301763U,
++        (uint64_t)14140891609330279185U, (uint64_t)5814744449740463867U, (uint64_t)5652588426712591652U,
++        (uint64_t)774745682988690912U, (uint64_t)13228255573220500373U, (uint64_t)11949122068786859397U,
++        (uint64_t)8021166392900770376U, (uint64_t)7994323710948720063U, (uint64_t)9924618472877849977U,
++        (uint64_t)17618517523141194266U, (uint64_t)2750424097794401714U,
++        (uint64_t)15481749570715253207U, (uint64_t)14646964509921760497U,
++        (uint64_t)1037442848094301355U, (uint64_t)6295995947389299132U, (uint64_t)16915049722317579514U,
++        (uint64_t)10493877400992990313U, (uint64_t)18391008753060553521U, (uint64_t)483942209623707598U,
++        (uint64_t)2017775662838016613U, (uint64_t)5933251998459363553U, (uint64_t)11789135019970707407U,
++        (uint64_t)5484123723153268336U, (uint64_t)13246954648848484954U, (uint64_t)4774374393926023505U,
++        (uint64_t)14863995618704457336U, (uint64_t)13220153167104973625U,
++        (uint64_t)5988445485312390826U, (uint64_t)17580359464028944682U, (uint64_t)7297100131969874771U,
++        (uint64_t)379931507867989375U, (uint64_t)10927113096513421444U, (uint64_t)17688881974428340857U,
++        (uint64_t)4259872578781463333U, (uint64_t)8573076295966784472U, (uint64_t)16389829450727275032U,
++        (uint64_t)1667243868963568259U, (uint64_t)17730726848925960919U,
++        (uint64_t)11408899874569778008U, (uint64_t)3576527582023272268U,
++        (uint64_t)16492920640224231656U, (uint64_t)7906130545972460130U,
++        (uint64_t)13878604278207681266U, (uint64_t)41446695125652041U, (uint64_t)8891615271337333503U,
++        (uint64_t)2594537723613594470U, (uint64_t)7699579176995770924U, (uint64_t)147458463055730655U,
++        (uint64_t)12120406862739088406U, (uint64_t)12044892493010567063U,
++        (uint64_t)8554076749615475136U, (uint64_t)1005097692260929999U, (uint64_t)2687202654471188715U,
++        (uint64_t)9457588752176879209U, (uint64_t)17472884880062444019U, (uint64_t)9792097892056020166U,
++        (uint64_t)2525246678512797150U, (uint64_t)15958903035313115662U,
++        (uint64_t)11336038170342247032U, (uint64_t)11560342382835141123U,
++        (uint64_t)6212009033479929024U, (uint64_t)8214308203775021229U, (uint64_t)8475469210070503698U,
++        (uint64_t)13287024123485719563U, (uint64_t)12956951963817520723U,
++        (uint64_t)10693035819908470465U, (uint64_t)11375478788224786725U,
++        (uint64_t)16934625208487120398U, (uint64_t)10094585729115874495U,
++        (uint64_t)2763884524395905776U, (uint64_t)13535890148969964883U,
++        (uint64_t)13514657411765064358U, (uint64_t)9903074440788027562U,
++        (uint64_t)17324720726421199990U, (uint64_t)2273931039117368789U, (uint64_t)3442641041506157854U,
++        (uint64_t)1119853641236409612U, (uint64_t)12037070344296077989U, (uint64_t)581736433335671746U,
++        (uint64_t)6019150647054369174U, (uint64_t)14864096138068789375U, (uint64_t)6652995210998318662U,
++        (uint64_t)12773883697029175304U, (uint64_t)12751275631451845119U,
++        (uint64_t)11449095003038250478U, (uint64_t)1025805267334366480U, (uint64_t)2764432500300815015U,
++        (uint64_t)18274564429002844381U, (uint64_t)10445634195592600351U,
++        (uint64_t)11814099592837202735U, (uint64_t)5006796893679120289U, (uint64_t)6908397253997261914U,
++        (uint64_t)13266696965302879279U, (uint64_t)7768715053015037430U, (uint64_t)3569923738654785686U,
++        (uint64_t)5844853453464857549U, (uint64_t)1837340805629559110U, (uint64_t)1034657624388283114U,
++        (uint64_t)711244516069456460U, (uint64_t)12519286026957934814U, (uint64_t)2613464944620837619U,
++        (uint64_t)10003023321338286213U, (uint64_t)7291332092642881376U, (uint64_t)9832199564117004897U,
++        (uint64_t)3280736694860799890U, (uint64_t)6416452202849179874U, (uint64_t)7326961381798642069U,
++        (uint64_t)8435688798040635029U, (uint64_t)16630141263910982958U,
++        (uint64_t)17222635514422533318U, (uint64_t)9482787389178881499U, (uint64_t)836561194658263905U,
++        (uint64_t)3405319043337616649U, (uint64_t)2786146577568026518U, (uint64_t)7625483685691626321U,
++        (uint64_t)6728084875304656716U, (uint64_t)1140997959232544268U, (uint64_t)12847384827606303792U,
++        (uint64_t)1719121337754572070U, (uint64_t)12863589482936438532U, (uint64_t)3880712899640530862U,
++        (uint64_t)2748456882813671564U, (uint64_t)4775988900044623019U, (uint64_t)8937847374382191162U,
++        (uint64_t)3767367347172252295U, (uint64_t)13468672401049388646U,
++        (uint64_t)14359032216842397576U, (uint64_t)2002555958685443975U,
++        (uint64_t)16488678606651526810U, (uint64_t)11826135409597474760U,
++        (uint64_t)15296495673182508601U
++    };
++
++static const uint64_t
++    Hacl_P256_PrecompTable_precomp_basepoint_table_w5[384U] = {
++        (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)1U,
++        (uint64_t)18446744069414584320U, (uint64_t)18446744073709551615U, (uint64_t)4294967294U,
++        (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)0U, (uint64_t)8784043285714375740U,
++        (uint64_t)8483257759279461889U, (uint64_t)8789745728267363600U, (uint64_t)1770019616739251654U,
++        (uint64_t)15992936863339206154U, (uint64_t)10037038012062884956U,
++        (uint64_t)15197544864945402661U, (uint64_t)9615747158586711429U, (uint64_t)1U,
++        (uint64_t)18446744069414584320U, (uint64_t)18446744073709551615U, (uint64_t)4294967294U,
++        (uint64_t)10634854829044225757U, (uint64_t)351552716085025155U, (uint64_t)10645315080955407736U,
++        (uint64_t)3609262091244858135U, (uint64_t)15760741698986874125U,
++        (uint64_t)14936374388219697827U, (uint64_t)15751360096993017895U,
++        (uint64_t)18012233706239762398U, (uint64_t)1993877568177495041U,
++        (uint64_t)10345888787846536528U, (uint64_t)7746511691117935375U,
++        (uint64_t)14517043990409914413U, (uint64_t)14122549297570634151U,
++        (uint64_t)16934610359517083771U, (uint64_t)5724511325497097418U, (uint64_t)8983432969107448705U,
++        (uint64_t)2687429970334080245U, (uint64_t)16525396802810050288U, (uint64_t)7602596488871585854U,
++        (uint64_t)4813919589149203084U, (uint64_t)7680395813780804519U, (uint64_t)6687709583048023590U,
++        (uint64_t)18086445169104142027U, (uint64_t)9637814708330203929U,
++        (uint64_t)14785108459960679090U, (uint64_t)3838023279095023581U, (uint64_t)3555615526157830307U,
++        (uint64_t)5177066488380472871U, (uint64_t)18218186719108038403U,
++        (uint64_t)16281556341699656105U, (uint64_t)1524227924561461191U, (uint64_t)4148060517641909597U,
++        (uint64_t)2858290374115363433U, (uint64_t)8942772026334130620U, (uint64_t)3034451298319885113U,
++        (uint64_t)8447866036736640940U, (uint64_t)11204933433076256578U,
++        (uint64_t)18333595740249588297U, (uint64_t)8259597024804538246U, (uint64_t)9539734295777539786U,
++        (uint64_t)9797290423046626413U, (uint64_t)5777303437849646537U, (uint64_t)8739356909899132020U,
++        (uint64_t)14815960973766782158U, (uint64_t)15286581798204509801U,
++        (uint64_t)17597362577777019682U, (uint64_t)13259283710820519742U,
++        (uint64_t)10501322996899164670U, (uint64_t)1221138904338319642U,
++        (uint64_t)14586685489551951885U, (uint64_t)895326705426031212U, (uint64_t)14398171728560617847U,
++        (uint64_t)9592550823745097391U, (uint64_t)17240998489162206026U, (uint64_t)8085479283308189196U,
++        (uint64_t)14844657737893882826U, (uint64_t)15923425394150618234U,
++        (uint64_t)2997808084773249525U, (uint64_t)494323555453660587U, (uint64_t)1215695327517794764U,
++        (uint64_t)9476207381098391690U, (uint64_t)7480789678419122995U, (uint64_t)15212230329321082489U,
++        (uint64_t)436189395349576388U, (uint64_t)17377474396456660834U, (uint64_t)15237013929655017939U,
++        (uint64_t)11444428846883781676U, (uint64_t)5112749694521428575U, (uint64_t)950829367509872073U,
++        (uint64_t)17665036182057559519U, (uint64_t)17205133339690002313U,
++        (uint64_t)16233765170251334549U, (uint64_t)10122775683257972591U,
++        (uint64_t)3352514236455632420U, (uint64_t)9143148522359954691U, (uint64_t)601191684005658860U,
++        (uint64_t)13398772186646349998U, (uint64_t)15512696600132928431U,
++        (uint64_t)9128416073728948653U, (uint64_t)11233051033546138578U, (uint64_t)6769345682610122833U,
++        (uint64_t)10823233224575054288U, (uint64_t)9997725227559980175U, (uint64_t)6733425642852897415U,
++        (uint64_t)16302206918151466066U, (uint64_t)1669330822143265921U, (uint64_t)2661645605036546002U,
++        (uint64_t)17182558479745802165U, (uint64_t)1165082692376932040U, (uint64_t)9470595929011488359U,
++        (uint64_t)6142147329285324932U, (uint64_t)4829075085998111287U, (uint64_t)10231370681107338930U,
++        (uint64_t)9591876895322495239U, (uint64_t)10316468561384076618U,
++        (uint64_t)11592503647238064235U, (uint64_t)13395813606055179632U, (uint64_t)511127033980815508U,
++        (uint64_t)12434976573147649880U, (uint64_t)3425094795384359127U, (uint64_t)6816971736303023445U,
++        (uint64_t)15444670609021139344U, (uint64_t)9464349818322082360U,
++        (uint64_t)16178216413042376883U, (uint64_t)9595540370774317348U, (uint64_t)7229365182662875710U,
++        (uint64_t)4601177649460012843U, (uint64_t)5455046447382487090U, (uint64_t)10854066421606187521U,
++        (uint64_t)15913416821879788071U, (uint64_t)2297365362023460173U, (uint64_t)2603252216454941350U,
++        (uint64_t)6768791943870490934U, (uint64_t)15705936687122754810U, (uint64_t)9537096567546600694U,
++        (uint64_t)17580538144855035062U, (uint64_t)4496542856965746638U, (uint64_t)8444341625922124942U,
++        (uint64_t)12191263903636183168U, (uint64_t)17427332907535974165U,
++        (uint64_t)14307569739254103736U, (uint64_t)13900598742063266169U,
++        (uint64_t)7176996424355977650U, (uint64_t)5709008170379717479U, (uint64_t)14471312052264549092U,
++        (uint64_t)1464519909491759867U, (uint64_t)3328154641049602121U, (uint64_t)13020349337171136774U,
++        (uint64_t)2772166279972051938U, (uint64_t)10854476939425975292U, (uint64_t)1967189930534630940U,
++        (uint64_t)2802919076529341959U, (uint64_t)14792226094833519208U,
++        (uint64_t)14675640928566522177U, (uint64_t)14838974364643800837U,
++        (uint64_t)17631460696099549980U, (uint64_t)17434186275364935469U,
++        (uint64_t)2665648200587705473U, (uint64_t)13202122464492564051U, (uint64_t)7576287350918073341U,
++        (uint64_t)2272206013910186424U, (uint64_t)14558761641743937843U, (uint64_t)5675729149929979729U,
++        (uint64_t)9043135187561613166U, (uint64_t)11750149293830589225U, (uint64_t)740555197954307911U,
++        (uint64_t)9871738005087190699U, (uint64_t)17178667634283502053U,
++        (uint64_t)18046255991533013265U, (uint64_t)4458222096988430430U, (uint64_t)8452427758526311627U,
++        (uint64_t)13825286929656615266U, (uint64_t)13956286357198391218U,
++        (uint64_t)15875692916799995079U, (uint64_t)10634895319157013920U,
++        (uint64_t)13230116118036304207U, (uint64_t)8795317393614625606U, (uint64_t)7001710806858862020U,
++        (uint64_t)7949746088586183478U, (uint64_t)14677556044923602317U,
++        (uint64_t)11184023437485843904U, (uint64_t)11215864722023085094U,
++        (uint64_t)6444464081471519014U, (uint64_t)1706241174022415217U, (uint64_t)8243975633057550613U,
++        (uint64_t)15502902453836085864U, (uint64_t)3799182188594003953U, (uint64_t)3538840175098724094U,
++        (uint64_t)13240193491554624643U, (uint64_t)12365034249541329920U,
++        (uint64_t)2924326828590977357U, (uint64_t)5687195797140589099U, (uint64_t)16880427227292834531U,
++        (uint64_t)9691471435758991112U, (uint64_t)16642385273732487288U,
++        (uint64_t)12173806747523009914U, (uint64_t)13142722756877876849U,
++        (uint64_t)8370377548305121979U, (uint64_t)17988526053752025426U, (uint64_t)4818750752684100334U,
++        (uint64_t)5669241919350361655U, (uint64_t)4964810303238518540U, (uint64_t)16709712747671533191U,
++        (uint64_t)4461414404267448242U, (uint64_t)3971798785139504238U, (uint64_t)6276818948740422136U,
++        (uint64_t)1426735892164275762U, (uint64_t)7943622674892418919U, (uint64_t)9864274225563929680U,
++        (uint64_t)57815533745003233U, (uint64_t)10893588105168960233U, (uint64_t)15739162732907069535U,
++        (uint64_t)3923866849462073470U, (uint64_t)12279826158399226875U, (uint64_t)1533015761334846582U,
++        (uint64_t)15860156818568437510U, (uint64_t)8252625373831297988U, (uint64_t)9666953804812706358U,
++        (uint64_t)8767785238646914634U, (uint64_t)14382179044941403551U,
++        (uint64_t)10401039907264254245U, (uint64_t)8584860003763157350U, (uint64_t)3120462679504470266U,
++        (uint64_t)8670255778748340069U, (uint64_t)5313789577940369984U, (uint64_t)16977072364454789224U,
++        (uint64_t)12199578693972188324U, (uint64_t)18211098771672599237U,
++        (uint64_t)12868831556008795030U, (uint64_t)5310155061431048194U,
++        (uint64_t)18114153238435112606U, (uint64_t)14482365809278304512U,
++        (uint64_t)12520721662723001511U, (uint64_t)405943624021143002U, (uint64_t)8146944101507657423U,
++        (uint64_t)181739317780393495U, (uint64_t)81743892273670099U, (uint64_t)14759561962550473930U,
++        (uint64_t)4592623849546992939U, (uint64_t)6916440441743449719U, (uint64_t)1304610503530809833U,
++        (uint64_t)5464930909232486441U, (uint64_t)15414883617496224671U, (uint64_t)8129283345256790U,
++        (uint64_t)18294252198413739489U, (uint64_t)17394115281884857288U,
++        (uint64_t)7808348415224731235U, (uint64_t)13195566655747230608U, (uint64_t)8568194219353949094U,
++        (uint64_t)15329813048672122440U, (uint64_t)9604275495885785744U, (uint64_t)1577712551205219835U,
++        (uint64_t)15964209008022052790U, (uint64_t)15087297920782098160U,
++        (uint64_t)3946031512438511898U, (uint64_t)10050061168984440631U,
++        (uint64_t)11382452014533138316U, (uint64_t)6313670788911952792U,
++        (uint64_t)12015989229696164014U, (uint64_t)5946702628076168852U, (uint64_t)5219995658774362841U,
++        (uint64_t)12230141881068377972U, (uint64_t)12361195202673441956U,
++        (uint64_t)4732862275653856711U, (uint64_t)17221430380805252370U,
++        (uint64_t)15397525953897375810U, (uint64_t)16557437297239563045U,
++        (uint64_t)10101683801868971351U, (uint64_t)1402611372245592868U, (uint64_t)1931806383735563658U,
++        (uint64_t)10991705207471512479U, (uint64_t)861333583207471392U, (uint64_t)15207766844626322355U,
++        (uint64_t)9224628129811432393U, (uint64_t)3497069567089055613U, (uint64_t)11956632757898590316U,
++        (uint64_t)8733729372586312960U, (uint64_t)18091521051714930927U, (uint64_t)77582787724373283U,
++        (uint64_t)9922437373519669237U, (uint64_t)3079321456325704615U, (uint64_t)12171198408512478457U,
++        (uint64_t)17179130884012147596U, (uint64_t)6839115479620367181U, (uint64_t)4421032569964105406U,
++        (uint64_t)10353331468657256053U, (uint64_t)17400988720335968824U,
++        (uint64_t)17138855889417480540U, (uint64_t)4507980080381370611U,
++        (uint64_t)10703175719793781886U, (uint64_t)12598516658725890426U,
++        (uint64_t)8353463412173898932U, (uint64_t)17703029389228422404U, (uint64_t)9313111267107226233U,
++        (uint64_t)5441322942995154196U, (uint64_t)8952817660034465484U, (uint64_t)17571113341183703118U,
++        (uint64_t)7375087953801067019U, (uint64_t)13381466302076453648U, (uint64_t)3218165271423914596U,
++        (uint64_t)16956372157249382685U, (uint64_t)509080090049418841U, (uint64_t)13374233893294084913U,
++        (uint64_t)2988537624204297086U, (uint64_t)4979195832939384620U, (uint64_t)3803931594068976394U,
++        (uint64_t)10731535883829627646U, (uint64_t)12954845047607194278U,
++        (uint64_t)10494298062560667399U, (uint64_t)4967351022190213065U,
++        (uint64_t)13391917938145756456U, (uint64_t)951370484866918160U, (uint64_t)13531334179067685307U,
++        (uint64_t)12868421357919390599U, (uint64_t)15918857042998130258U,
++        (uint64_t)17769743831936974016U, (uint64_t)7137921979260368809U,
++        (uint64_t)12461369180685892062U, (uint64_t)827476514081935199U, (uint64_t)15107282134224767230U,
++        (uint64_t)10084765752802805748U, (uint64_t)3303739059392464407U,
++        (uint64_t)17859532612136591428U, (uint64_t)10949414770405040164U,
++        (uint64_t)12838613589371008785U, (uint64_t)5554397169231540728U,
++        (uint64_t)18375114572169624408U, (uint64_t)15649286703242390139U,
++        (uint64_t)2957281557463706877U, (uint64_t)14000350446219393213U,
++        (uint64_t)14355199721749620351U, (uint64_t)2730856240099299695U,
++        (uint64_t)17528131000714705752U, (uint64_t)2537498525883536360U, (uint64_t)6121058967084509393U,
++        (uint64_t)16897667060435514221U, (uint64_t)12367869599571112440U,
++        (uint64_t)3388831797050807508U, (uint64_t)16791449724090982798U, (uint64_t)2673426123453294928U,
++        (uint64_t)11369313542384405846U, (uint64_t)15641960333586432634U,
++        (uint64_t)15080962589658958379U, (uint64_t)7747943772340226569U, (uint64_t)8075023376199159152U,
++        (uint64_t)8485093027378306528U, (uint64_t)13503706844122243648U, (uint64_t)8401961362938086226U,
++        (uint64_t)8125426002124226402U, (uint64_t)9005399361407785203U, (uint64_t)6847968030066906634U,
++        (uint64_t)11934937736309295197U, (uint64_t)5116750888594772351U, (uint64_t)2817039227179245227U,
++        (uint64_t)17724206901239332980U, (uint64_t)4985702708254058578U, (uint64_t)5786345435756642871U,
++        (uint64_t)17772527414940936938U, (uint64_t)1201320251272957006U,
++        (uint64_t)15787430120324348129U, (uint64_t)6305488781359965661U,
++        (uint64_t)12423900845502858433U, (uint64_t)17485949424202277720U,
++        (uint64_t)2062237315546855852U, (uint64_t)10353639467860902375U, (uint64_t)2315398490451287299U,
++        (uint64_t)15394572894814882621U, (uint64_t)232866113801165640U, (uint64_t)7413443736109338926U,
++        (uint64_t)902719806551551191U, (uint64_t)16568853118619045174U, (uint64_t)14202214862428279177U,
++        (uint64_t)11719595395278861192U, (uint64_t)5890053236389907647U, (uint64_t)9996196494965833627U,
++        (uint64_t)12967056942364782577U, (uint64_t)9034128755157395787U,
++        (uint64_t)17898204904710512655U, (uint64_t)8229373445062993977U,
++        (uint64_t)13580036169519833644U
++    };
++
++#if defined(__cplusplus)
++}
++#endif
++
++#define __internal_Hacl_P256_PrecompTable_H_DEFINED
++#endif
+diff -up ./lib/freebl/verified/internal/lib_intrinsics.h.p256 ./lib/freebl/verified/internal/lib_intrinsics.h
+--- ./lib/freebl/verified/internal/lib_intrinsics.h.p256	2024-01-09 11:25:43.803382195 -0800
++++ ./lib/freebl/verified/internal/lib_intrinsics.h	2024-01-09 11:25:43.803382195 -0800
+@@ -0,0 +1,81 @@
++#pragma once
++
++#include <sys/types.h>
++
++#if defined(__has_include)
++#if __has_include("config.h")
++#include "config.h"
++#endif
++#endif
++
++#if !defined(HACL_CAN_COMPILE_INTRINSICS) || \
++    (defined(__clang__) && (__clang_major__ < 5))
++
++#include "Hacl_IntTypes_Intrinsics.h"
++
++#if defined(HACL_CAN_COMPILE_UINT128)
++
++#include "Hacl_IntTypes_Intrinsics_128.h"
++
++#define Lib_IntTypes_Intrinsics_add_carry_u64(x1, x2, x3, x4) \
++    (Hacl_IntTypes_Intrinsics_128_add_carry_u64(x1, x2, x3, x4))
++
++#define Lib_IntTypes_Intrinsics_sub_borrow_u64(x1, x2, x3, x4) \
++    (Hacl_IntTypes_Intrinsics_128_sub_borrow_u64(x1, x2, x3, x4))
++
++#else
++
++#define Lib_IntTypes_Intrinsics_add_carry_u64(x1, x2, x3, x4) \
++    (Hacl_IntTypes_Intrinsics_add_carry_u64(x1, x2, x3, x4))
++
++#define Lib_IntTypes_Intrinsics_sub_borrow_u64(x1, x2, x3, x4) \
++    (Hacl_IntTypes_Intrinsics_sub_borrow_u64(x1, x2, x3, x4))
++
++#endif // defined(HACL_CAN_COMPILE_UINT128)
++
++#define Lib_IntTypes_Intrinsics_add_carry_u32(x1, x2, x3, x4) \
++    (Hacl_IntTypes_Intrinsics_add_carry_u32(x1, x2, x3, x4))
++
++#define Lib_IntTypes_Intrinsics_sub_borrow_u32(x1, x2, x3, x4) \
++    (Hacl_IntTypes_Intrinsics_sub_borrow_u32(x1, x2, x3, x4))
++
++#else // !defined(HACL_CAN_COMPILE_INTRINSICS)
++
++#if defined(_MSC_VER)
++#include <immintrin.h>
++#else
++#include <x86intrin.h>
++#endif
++
++#define Lib_IntTypes_Intrinsics_add_carry_u32(x1, x2, x3, x4) \
++    (_addcarry_u32(x1, x2, x3, (unsigned int *)x4))
++
++#define Lib_IntTypes_Intrinsics_add_carry_u64(x1, x2, x3, x4) \
++    (_addcarry_u64(x1, x2, x3, (long long unsigned int *)x4))
++
++/*
++   GCC versions prior to 7.2 pass arguments to _subborrow_u{32,64}
++   in an incorrect order.
++
++   See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=81294
++*/
++#if defined(__GNUC__) && !defined(__clang__) && \
++    (__GNUC__ < 7 || (__GNUC__ == 7 && (__GNUC_MINOR__ < 2)))
++
++#define Lib_IntTypes_Intrinsics_sub_borrow_u32(x1, x2, x3, x4) \
++    (_subborrow_u32(x1, x3, x2, (unsigned int *)x4))
++
++#define Lib_IntTypes_Intrinsics_sub_borrow_u64(x1, x2, x3, x4) \
++    (_subborrow_u64(x1, x3, x2, (long long unsigned int *)x4))
++
++#else
++
++#define Lib_IntTypes_Intrinsics_sub_borrow_u32(x1, x2, x3, x4) \
++    (_subborrow_u32(x1, x2, x3, (unsigned int *)x4))
++
++#define Lib_IntTypes_Intrinsics_sub_borrow_u64(x1, x2, x3, x4) \
++    (_subborrow_u64(x1, x2, x3, (long long unsigned int *)x4))
++
++#endif // GCC < 7.2
++
++#endif // !HACL_CAN_COMPILE_INTRINSICS
+diff -up ./lib/freebl/verified/karamel/include/krml/internal/target.h.p256 ./lib/freebl/verified/karamel/include/krml/internal/target.h
+--- ./lib/freebl/verified/karamel/include/krml/internal/target.h.p256	2023-06-04 01:42:53.000000000 -0700
++++ ./lib/freebl/verified/karamel/include/krml/internal/target.h	2024-01-09 11:35:15.323632291 -0800
+@@ -4,11 +4,13 @@
+ #ifndef __KRML_TARGET_H
+ #define __KRML_TARGET_H
+ 
+-#include <stdlib.h>
+-#include <stdio.h>
+-#include <stdbool.h>
++#include <assert.h>
+ #include <inttypes.h>
+ #include <limits.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
+ 
+ #include "krml/internal/callconv.h"
+ 
+@@ -46,6 +48,23 @@
+ #define KRML_HOST_FREE free
+ #endif
+ 
++#ifndef KRML_HOST_IGNORE
++#define KRML_HOST_IGNORE(x) (void)(x)
++#endif
++
++#ifndef KRML_NOINLINE
++#if defined(_MSC_VER)
++#define KRML_NOINLINE __declspec(noinline)
++#elif defined(__GNUC__)
++#define KRML_NOINLINE __attribute__((noinline))
++#else
++#define KRML_NOINLINE
++#warning "The KRML_NOINLINE macro is not defined for this toolchain!"
++#warning "The compiler may defeat side-channel resistance with optimizations."
++#warning "Please locate target.h and try to fill it out with a suitable definition for this compiler."
++#endif
++#endif
++
+ #ifndef KRML_PRE_ALIGN
+ #ifdef _MSC_VER
+ #define KRML_PRE_ALIGN(X) __declspec(align(X))
+@@ -130,7 +149,8 @@ krml_time()
+     } while (0)
+ 
+ #if defined(_MSC_VER) && _MSC_VER < 1900
+-#define KRML_HOST_SNPRINTF(buf, sz, fmt, arg) _snprintf_s(buf, sz, _TRUNCATE, fmt, arg)
++#define KRML_HOST_SNPRINTF(buf, sz, fmt, arg) \
++    _snprintf_s(buf, sz, _TRUNCATE, fmt, arg)
+ #else
+ #define KRML_HOST_SNPRINTF(buf, sz, fmt, arg) snprintf(buf, sz, fmt, arg)
+ #endif
+@@ -149,6 +169,7 @@ krml_time()
+     {                       \
+         x                   \
+             i += n;         \
++        (void)i;            \
+     }
+ 
+ #define KRML_LOOP2(i, n, x) \
+diff -up ./lib/freebl/verified/karamel/krmllib/dist/minimal/FStar_UInt_8_16_32_64.h.p256 ./lib/freebl/verified/karamel/krmllib/dist/minimal/FStar_UInt_8_16_32_64.h
+--- ./lib/freebl/verified/karamel/krmllib/dist/minimal/FStar_UInt_8_16_32_64.h.p256	2023-06-04 01:42:53.000000000 -0700
++++ ./lib/freebl/verified/karamel/krmllib/dist/minimal/FStar_UInt_8_16_32_64.h	2024-01-09 11:41:47.873587264 -0800
+@@ -12,15 +12,26 @@
+ #include "krml/lowstar_endianness.h"
+ #include "krml/internal/types.h"
+ #include "krml/internal/target.h"
+-extern Prims_int FStar_UInt64_n;
++
++#if defined(__clang__)
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wunused-function"
++#endif
++
++#if defined(__GNUC__)
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wunused-function"
++#endif
++
++extern krml_checked_int_t FStar_UInt64_n;
+ 
+ extern bool FStar_UInt64_uu___is_Mk(uint64_t projectee);
+ 
+-extern Prims_int FStar_UInt64___proj__Mk__item__v(uint64_t projectee);
++extern krml_checked_int_t FStar_UInt64___proj__Mk__item__v(uint64_t projectee);
+ 
+-extern Prims_int FStar_UInt64_v(uint64_t x);
++extern krml_checked_int_t FStar_UInt64_v(uint64_t x);
+ 
+-extern uint64_t FStar_UInt64_uint_to_t(Prims_int x);
++extern uint64_t FStar_UInt64_uint_to_t(krml_checked_int_t x);
+ 
+ extern uint64_t FStar_UInt64_zero;
+ 
+@@ -62,15 +73,15 @@ extern Prims_string FStar_UInt64_to_stri
+ 
+ extern uint64_t FStar_UInt64_of_string(Prims_string uu___);
+ 
+-extern Prims_int FStar_UInt32_n;
++extern krml_checked_int_t FStar_UInt32_n;
+ 
+ extern bool FStar_UInt32_uu___is_Mk(uint32_t projectee);
+ 
+-extern Prims_int FStar_UInt32___proj__Mk__item__v(uint32_t projectee);
++extern krml_checked_int_t FStar_UInt32___proj__Mk__item__v(uint32_t projectee);
+ 
+-extern Prims_int FStar_UInt32_v(uint32_t x);
++extern krml_checked_int_t FStar_UInt32_v(uint32_t x);
+ 
+-extern uint32_t FStar_UInt32_uint_to_t(Prims_int x);
++extern uint32_t FStar_UInt32_uint_to_t(krml_checked_int_t x);
+ 
+ extern uint32_t FStar_UInt32_zero;
+ 
+@@ -112,15 +123,15 @@ extern Prims_string FStar_UInt32_to_stri
+ 
+ extern uint32_t FStar_UInt32_of_string(Prims_string uu___);
+ 
+-extern Prims_int FStar_UInt16_n;
++extern krml_checked_int_t FStar_UInt16_n;
+ 
+ extern bool FStar_UInt16_uu___is_Mk(uint16_t projectee);
+ 
+-extern Prims_int FStar_UInt16___proj__Mk__item__v(uint16_t projectee);
++extern krml_checked_int_t FStar_UInt16___proj__Mk__item__v(uint16_t projectee);
+ 
+-extern Prims_int FStar_UInt16_v(uint16_t x);
++extern krml_checked_int_t FStar_UInt16_v(uint16_t x);
+ 
+-extern uint16_t FStar_UInt16_uint_to_t(Prims_int x);
++extern uint16_t FStar_UInt16_uint_to_t(krml_checked_int_t x);
+ 
+ extern uint16_t FStar_UInt16_zero;
+ 
+@@ -162,15 +173,15 @@ extern Prims_string FStar_UInt16_to_stri
+ 
+ extern uint16_t FStar_UInt16_of_string(Prims_string uu___);
+ 
+-extern Prims_int FStar_UInt8_n;
++extern krml_checked_int_t FStar_UInt8_n;
+ 
+ extern bool FStar_UInt8_uu___is_Mk(uint8_t projectee);
+ 
+-extern Prims_int FStar_UInt8___proj__Mk__item__v(uint8_t projectee);
++extern krml_checked_int_t FStar_UInt8___proj__Mk__item__v(uint8_t projectee);
+ 
+-extern Prims_int FStar_UInt8_v(uint8_t x);
++extern krml_checked_int_t FStar_UInt8_v(uint8_t x);
+ 
+-extern uint8_t FStar_UInt8_uint_to_t(Prims_int x);
++extern uint8_t FStar_UInt8_uint_to_t(krml_checked_int_t x);
+ 
+ extern uint8_t FStar_UInt8_zero;
+ 
+@@ -214,5 +225,13 @@ extern uint8_t FStar_UInt8_of_string(Pri
+ 
+ typedef uint8_t FStar_UInt8_byte;
+ 
++#if defined(__clang__)
++#pragma clang diagnostic pop
++#endif
++
++#if defined(__GNUC__)
++#pragma GCC diagnostic pop
++#endif
++
+ #define __FStar_UInt_8_16_32_64_H_DEFINED
+ #endif
