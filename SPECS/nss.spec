@@ -1,6 +1,6 @@
 %global nss_version 3.90.0
 %global nspr_version 4.35.0
-%global baserelease 6
+%global baserelease 7
 %global nss_release %baserelease
 # NOTE: To avoid NVR clashes of nspr* packages:
 # use "%%global nspr_release %%[%%baserelease+n]" to handle offsets when
@@ -194,6 +194,7 @@ Patch91:         nss_p384_scalar_validated.patch
 Patch92:         nss_p384_hacl.patch
 Patch93:         nss_p521_hacl.patch
 Patch94:         nss-3.90-ecc-wrap-fix.patch
+Patch95:         nss-3.90-ecdsa-sign-padding-fix.patch
 
 Patch100:         nspr-config-pc.patch
 Patch101:         nspr-gcc-atomics.patch
@@ -1193,6 +1194,9 @@ update-crypto-policies &> /dev/null || :
 
 
 %changelog
+* Wed Apr 10 2024 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.90.0-7
+- Allow for shorter ecdsa signatures by padding them to full length
+
 * Tue Jan 23 2024 Bob Relyea <rrelyea@redhat.com> - 3.90.0-6
 - Fix ecc DER wrapping.
 
