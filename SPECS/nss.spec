@@ -63,7 +63,7 @@ print(string.sub(hash, 0, 16))
 Summary:          Network Security Services
 Name:             nss
 Version:          %{nss_version}
-Release:          6%{?dist}
+Release:          7%{?dist}
 License:          MPLv2.0
 URL:              http://www.mozilla.org/projects/security/pki/nss/
 Requires:         nspr >= %{nspr_version}%{nspr_release}
@@ -189,6 +189,7 @@ Patch91:         nss_p384_scalar_validated.patch
 Patch92:         nss_p384_hacl.patch
 Patch93:         nss_p521_hacl.patch
 Patch94:         nss-3.90-ecc-wrap-fix.patch
+Patch95:         nss-3.90-ecdsa-sign-padding-fix.patch
 
 %description
 Network Security Services (NSS) is a set of libraries designed to
@@ -980,6 +981,9 @@ update-crypto-policies --no-reload &> /dev/null || :
 
 
 %changelog
+* Wed Apr 10 2024 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.90.0-7
+- Allow for shorter ecdsa signatures by padding them to full length
+
 * Tue Jan 23 2024 Bob Relyea <rrelyea@redhat.com> - 3.90.0-6
 - Fix ecc DER wrapping.
 
