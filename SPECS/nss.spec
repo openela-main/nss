@@ -1,4 +1,4 @@
-%global nss_version 3.90.0
+%global nss_version 3.101.0
 %global nspr_version 4.35.0
 %global baserelease 7
 %global nss_release %baserelease
@@ -7,7 +7,7 @@
 # release number between nss and nspr are different.
 # when a new nspr is released with nss, reset nspr_release to baserelease.
 # for each new nss relase with the same nspr, change increment n by one.
-%global nspr_release %baserelease
+%global nspr_release %[%baserelease+7]
 # only need to update this as we added new
 # algorithms under nss policy control
 %global crypto_policies_version 20210118
@@ -130,7 +130,7 @@ Source28:         nss-p11-kit.config
 # will have their own validation
 Source30:         fips_algorithms.h
 
-Source50:         NameConstraints_Certs.tar
+#Source50:         NameConstraints_Certs.tar
 
 Source100:        nspr-%{nspr_archive_version}.tar.gz
 Source101:        nspr-config.xml
@@ -144,15 +144,16 @@ Source101:        nspr-config.xml
 # case when starting an update with API changes or even private export
 # changes.
 #
-# Once the buildroot aha been bootstrapped the patch may be removed
-# but it doesn't hurt to keep it.
+# Once the buildroot has been bootstrapped the patch may be removed
+# but it doesn't hurt to keep it
 Patch4:           iquote.patch
 Patch12:          nss-signtool-format.patch
-Patch20:          nss-3.90-extend-db-dump-time.patch
+Patch20:          nss-3.101-extend-db-dump-time.patch
+Patch21:          nss-3.101-enable-sdb-tests.patch
 # connect our shared library to the build root loader flags (needed for -relro)
 Patch31:          nss-dso-ldflags.patch
 # keep RHEL 8 semantics of disabling md4 and md5 even if the env variable is set
-Patch32:          nss-disable-md5.patch
+Patch32:          nss-3.101-disable-md5.patch
 # dbm is disabled on RHEL9, make the man pages reflect that
 %if %{with dbm}
 %else
@@ -163,38 +164,41 @@ Patch33:          nss-no-dbm-man-page.patch
 Patch34:          nss-3.71-fix-lto-gtests.patch
 # camellia pkcs12 docs.
 Patch35:          nss-3.71-camellia-pkcs12-doc.patch
-# disable delegated credentials
-Patch36:          nss-disable-dc.patch
 # disable ech
-Patch37:          nss-3.90-disable-ech.patch
+Patch36:          nss-3.101-disable-ech.patch
 
 # patches that expect to be upstreamed
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1774659
-Patch51:          nss-3.79-dbtool.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1767883
-Patch58:          nss-3.79-fips.patch
+Patch50:          nss-3.79-fips.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1836781
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1836925
-Patch60:          nss-3.90-DisablingASM.patch
-Patch61:          nss-3.79-fips-review.patches
-Patch63:          nss-3.90-pbkdf2-indicator.patch
+Patch51:          nss-3.101-fips-review.patches
+Patch52:          nss-3.90-pbkdf2-indicator.patch
+Patch53:          nss-3.101-skip-ocsp-if-not-connected.patch
+# dont upstream, must be after patch53 (sigh)
+Patch54:          nss-3.101-revert-libpkix-default.patch
 
 # ems policy. needs to upstream
-Patch70:          nss-3.90-add-ems-policy.patch
-
-Patch80:         blinding_ct.patch
-Patch81:         nss-3.90-fips-pkcs11-long-hash.patch
-Patch82:         nss-3.90-fips-safe-memset.patch
-Patch83:         nss-3.90-fips-indicators.patch
-Patch84:         nss-3.90-aes-gmc-indicator.patch
-Patch85:         nss-3.90-fips-indicators2.patch
-Patch86:         nss-3.90-dh-test-update.patch
-Patch90:         nss_p256_scalar_validated.patch
-Patch91:         nss_p384_scalar_validated.patch
-Patch92:         nss_p384_hacl.patch
-Patch93:         nss_p521_hacl.patch
-Patch94:         nss-3.90-ecc-wrap-fix.patch
-Patch95:         nss-3.90-ecdsa-sign-padding-fix.patch
+Patch60:          nss-3.101-add-ems-policy.patch
+Patch70:          nss-3.90-fips-safe-memset.patch
+Patch71:          nss-3.101-fips-indicators.patch
+Patch72:          nss-3.90-aes-gmc-indicator.patch
+Patch73:          nss-3.90-fips-indicators2.patch
+Patch74:          nss-3.90-dh-test-update.patch
+Patch75:          nss-3.90-ppc_no_init.patch
+Patch76:          nss-3.101-enable-kyber-policy.patch
+Patch77:          nss-3.101-fix-rsa-policy-test.patch
+Patch78:          nss-3.101-fix-pkcs12-md5-decode.patch
+Patch79:          nss-3.101-el9-restore-old-pkcs12-default.patch
+Patch80:          nss-3.101-no-p12-smime-policy.patch
+Patch81:          nss-3.101-fix-missing-size-checks.patch
+# https://bugzilla.mozilla.org/show_bug.cgi?id=1905691
+Patch82:          nss-3.101-chacha-timing-fix.patch
+Patch83:          nss-3.101-add-certificate-compression-test.patch
+Patch84:          nss-3.101-fix-pkcs12-pbkdf1-encoding.patch
+# https://bugzilla.mozilla.org/show_bug.cgi?id=676100
+Patch85:          nss-3.101-fix-cms-abi-break.patch
+Patch86:          nss-3.101-long-pwd-fix.patch
 
 Patch100:         nspr-config-pc.patch
 Patch101:         nspr-gcc-atomics.patch
@@ -367,14 +371,14 @@ cp ./nspr/config/nspr-config.in ./nspr/config/nspr-config-pc.in
 
 %patch -P 100 -p0 -b .flags
 pushd nspr
-%patch -P 101 -p1 -b .gcc-atomics
-%patch -P 110 -p1 -b .coverity
-%patch -P 120 -p1 -b .server-passive
+%autopatch -p 1 -m 101 -M 299
 popd
 
 
 pushd nss
 %autopatch -p1 -M 99
+#%%patch -P 400 -p1 -b .backup
+# sigh it would be nice if autopatch supported -R
 %patch -P 300 -R -p1
 popd
 
@@ -384,9 +388,9 @@ popd
 cp %{SOURCE30} nss/lib/softoken/
 
 #update expired test certs
-pushd nss
-tar xvf %{SOURCE50}
-popd
+#pushd nss
+#tar xvf %{SOURCE50}
+#popd
 
 # https://bugzilla.redhat.com/show_bug.cgi?id=1247353
 find nss/lib/libpkix -perm /u+x -type f -exec chmod -x {} \;
@@ -1017,7 +1021,6 @@ update-crypto-policies &> /dev/null || :
 %{_includedir}/nss3/crmft.h
 %{_includedir}/nss3/cryptohi.h
 %{_includedir}/nss3/cryptoht.h
-%{_includedir}/nss3/sechash.h
 %{_includedir}/nss3/jar-ds.h
 %{_includedir}/nss3/jar.h
 %{_includedir}/nss3/jarfile.h
@@ -1042,6 +1045,7 @@ update-crypto-policies &> /dev/null || :
 %{_includedir}/nss3/pkcs12t.h
 %{_includedir}/nss3/pkcs7t.h
 %{_includedir}/nss3/preenc.h
+%{_includedir}/nss3/sechash.h
 %{_includedir}/nss3/secmime.h
 %{_includedir}/nss3/secmod.h
 %{_includedir}/nss3/secmodt.h
@@ -1086,15 +1090,16 @@ update-crypto-policies &> /dev/null || :
 %{_includedir}/nss3/ciferfam.h
 %{_includedir}/nss3/eccutil.h
 %{_includedir}/nss3/hasht.h
+%{_includedir}/nss3/kyber.h
 %{_includedir}/nss3/nssb64.h
 %{_includedir}/nss3/nssb64t.h
-%{_includedir}/nss3/nsslocks.h
+%{_includedir}/nss3/nsshash.h
 %{_includedir}/nss3/nssilock.h
 %{_includedir}/nss3/nssilckt.h
+%{_includedir}/nss3/nsslocks.h
 %{_includedir}/nss3/nssrwlk.h
 %{_includedir}/nss3/nssrwlkt.h
 %{_includedir}/nss3/nssutil.h
-%{_includedir}/nss3/pkcs1sig.h
 %{_includedir}/nss3/pkcs11.h
 %{_includedir}/nss3/pkcs11f.h
 %{_includedir}/nss3/pkcs11n.h
@@ -1102,6 +1107,7 @@ update-crypto-policies &> /dev/null || :
 %{_includedir}/nss3/pkcs11t.h
 %{_includedir}/nss3/pkcs11u.h
 %{_includedir}/nss3/pkcs11uri.h
+%{_includedir}/nss3/pkcs1sig.h
 %{_includedir}/nss3/portreg.h
 %{_includedir}/nss3/secasn1.h
 %{_includedir}/nss3/secasn1t.h
@@ -1153,9 +1159,9 @@ update-crypto-policies &> /dev/null || :
 
 %files softokn-freebl-devel
 %{_libdir}/libfreebl.a
+%{_includedir}/nss3/alghmac.h
 %{_includedir}/nss3/blapi.h
 %{_includedir}/nss3/blapit.h
-%{_includedir}/nss3/alghmac.h
 %{_includedir}/nss3/cmac.h
 %{_includedir}/nss3/lowkeyi.h
 %{_includedir}/nss3/lowkeyti.h
@@ -1194,6 +1200,27 @@ update-crypto-policies &> /dev/null || :
 
 
 %changelog
+* Wed Sep 4 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-7
+- fix cms abi breakage
+- fix long password issue on pbmac encodings
+
+* Thu Aug 1 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-6
+- fix param encoding in pkcs12 pbamac encoding
+- add support for certificate compression in selfserv and tstclient
+
+* Wed Jul 24 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-3
+- Fix missing and inaccurate key length checks
+- Fix chacha timing issue
+
+* Tue Jul 16 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-2
+- Fix MD-5 decode issue in pkcs #12
+- turn off policy processing for pkcs12 and smime
+- restore the rhel9 pkcs12 defaults for pk12util
+
+* Tue Jun 11 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-1
+- Rebase to NSS 3.101
+- restore ppc init support
+
 * Wed Apr 10 2024 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.90.0-7
 - Allow for shorter ecdsa signatures by padding them to full length
 
