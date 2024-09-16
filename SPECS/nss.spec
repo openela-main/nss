@@ -1,7 +1,7 @@
 %global nspr_build_version 4.35.0-1
 %global nspr_release -1
 %global nspr_version 4.35.0
-%global nss_version 3.90.0
+%global nss_version 3.101.0
 %global unsupported_tools_directory %{_libdir}/nss/unsupported-tools
 %global saved_files_dir %{_libdir}/nss/saved
 %global dracutlibdir %{_prefix}/lib/dracut
@@ -113,7 +113,7 @@ Source28:         nss-p11-kit.config
 # will have their own validation
 Source30:         fips_algorithms.h
 
-Source50:         NameConstraints_Certs.tar
+#Source50:         NameConstraints_Certs.tar
 
 # To inject hardening flags for DSO
 Patch1:           nss-dso-ldflags.patch
@@ -129,67 +129,82 @@ Patch1:           nss-dso-ldflags.patch
 # Once the buildroot aha been bootstrapped the patch may be removed
 # but it doesn't hurt to keep it.
 Patch4:           iquote.patch
+
+#
+# RHEL-8 specific patches not in RHEL-9
+#
 # To revert the change in:
 # https://bugzilla.mozilla.org/show_bug.cgi?id=818686
-Patch9:		  nss-sysinit-userdb.patch
+Patch10:	  nss-sysinit-userdb.patch
 # Disable nss-sysinit test which is solely to test the above change
-Patch10:          nss-skip-sysinit-gtests.patch
-Patch15:          nss-3.90-extend-db-dump-time.patch
+Patch11:          nss-skip-sysinit-gtests.patch
 # For compatibility reasons, we stick with the old PKCS #11 2.40
 # definition of CK_GCM_PARAMS:
 %if 0%{?fedora} < 34
 %if 0%{?rhel} < 9
-Patch20:          nss-gcm-param-default-pkcs11v2.patch
+Patch12:          nss-gcm-param-default-pkcs11v2.patch
 %endif
 %endif
-# Local patch: disable MD5 (also MD2 and MD4) completely
-# https://bugzilla.redhat.com/show_bug.cgi?id=1849938
-Patch25:          nss-disable-md5.patch
 # Local patch for TLS_ECDHE_{ECDSA|RSA}_WITH_3DES_EDE_CBC_SHA ciphers
-Patch30:          rhbz1185708-enable-ecc-3des-ciphers-by-default.patch
-Patch34:          nss-3.71-fix-lto-gtests.patch
-# Local patch: disable Delegated Credentials
-Patch35:	  nss-disable-dc.patch
+Patch13:          rhbz1185708-enable-ecc-3des-ciphers-by-default.patch
 # Local patch: ignore rsa, rsa-pss, ecdsa policies until crypto-policies
 # is updated.
-Patch40:          nss-3.66-disable-signature-policies.patch
+Patch14:          nss-3.101-disable-signature-policies.patch
+Patch15:          nss-3.101-el8-fix-rsa-policy-test.patch
 # Local patch: disable tests that require external reference so brew completes
-Patch45:          nss-3.66-disable-external-host-test.patch
+Patch16:          nss-3.66-disable-external-host-test.patch
 # Local patch: restore old pkcs 12 defaults on old version of rhel
-Patch50:          nss-3.66-restore-old-pkcs12-default.patch
+Patch17:          nss-3.101-el8-restore-old-pkcs12-default.patch
 # Local Patch: restore expired distrusted certs for now
-Patch51:          nss-3.79-revert-distrusted-certs.patch
+Patch18:          nss-3.79-revert-distrusted-certs.patch
 # Local Patch: update fipsdefaults to AES
-Patch52:          nss-3.79-pkcs12-fips-defaults.patch
-Patch53:          nss-3.71-camellia-pkcs12-doc.patch
-Patch54:          nss-3.90-disable-ech.patch
+Patch19:          nss-3.79-pkcs12-fips-defaults.patch
+# Local Patch: curve25519 keys can't be stored in dbm databases,
+# only rhel-8 has dbm databases left, don't try to store
+# curve25519 keys in the dbm database.
+Patch20:          nss-3.101-ec-dbm-test.patch
+# end of RHEL-8 specific patches
 
-# https://bugzilla.redhat.com/show_bug.cgi?id=1774659
-Patch57:          nss-3.79-dbtool.patch
-Patch58:          nss-3.79-fips.patch
+# RHEL-specific shared with RHEL-9
+Patch30:          nss-3.101-extend-db-dump-time.patch
+# Local patch: disable MD5 (also MD2 and MD4) completely
+# https://bugzilla.redhat.com/show_bug.cgi?id=1849938
+Patch32:          nss-3.101-disable-md5.patch
+Patch34:          nss-3.71-fix-lto-gtests.patch
+Patch35:          nss-3.71-camellia-pkcs12-doc.patch
+Patch36:          nss-3.101-disable-ech.patch
+
+# patches that expect to be upstreamed
+# https://bugzilla.mozilla.org/show_bug.cgi?id=1767883
+Patch50:          nss-3.79-fips.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1836781
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1836925
-Patch60:          nss-3.90-DisablingASM.patch
-Patch61:          nss-3.79-fips-review.patches
-Patch62:          nss-3.90-no-dbm-25519.patch
-Patch63:          nss-3.90-pbkdf2-indicator.patch
+Patch51:          nss-3.101-fips-review.patches
+Patch52:          nss-3.90-pbkdf2-indicator.patch
 
-#ems policy. needs to upstream
-Patch70:          nss-3.90-add-ems-policy.patch
+# ems policy. needs to upstream
+Patch60:          nss-3.101-add-ems-policy.patch
+Patch70:          nss-3.90-fips-safe-memset.patch
+Patch71:          nss-3.101-fips-indicators.patch
+Patch72:          nss-3.90-aes-gmc-indicator.patch
+Patch73:          nss-3.90-fips-indicators2.patch
+Patch74:          nss-3.90-dh-test-update.patch
+Patch75:          nss-3.90-ppc_no_init.patch
+Patch76:          nss-3.101-enable-kyber-policy.patch
+Patch78:          nss-3.101-fix-pkcs12-md5-decode.patch
+Patch80:          nss-3.101-el8-no-p12-smime-policy.patch
+Patch81:          nss-3.101-fix-missing-size-checks.patch
+# https://bugzilla.mozilla.org/show_bug.cgi?id=1905691
+Patch82:          nss-3.101-chacha-timing-fix.patch
+Patch83:          nss-3.101-add-certificate-compression-test.patch
+Patch84:          nss-3.101-fix-pkcs12-pbkdf1-encoding.patch
+# https://bugzilla.mozilla.org/show_bug.cgi?id=676100
+Patch85:          nss-3.101-fix-cms-abi-break.patch
+Patch86:          nss-3.101-long-pwd-fix.patch
 
-Patch80:         blinding_ct.patch
-Patch81:         nss-3.90-fips-pkcs11-long-hash.patch
-Patch82:         nss-3.90-fips-safe-memset.patch
-Patch83:         nss-3.90-fips-indicators.patch
-Patch84:         nss-3.90-aes-gmc-indicator.patch
-Patch85:         nss-3.90-fips-indicators2.patch
-Patch86:         nss-3.90-dh-test-update.patch
-Patch90:         nss_p256_scalar_validated.patch
-Patch91:         nss_p384_scalar_validated.patch
-Patch92:         nss_p384_hacl.patch
-Patch93:         nss_p521_hacl.patch
-Patch94:         nss-3.90-ecc-wrap-fix.patch
-Patch95:         nss-3.90-ecdsa-sign-padding-fix.patch
+#revert patches
+Patch300:         nss-3.101-default-libpkix.patch
+
 
 %description
 Network Security Services (NSS) is a set of libraries designed to
@@ -319,7 +334,8 @@ Header and library files for doing development with Network Security Services.
 %prep
 %autosetup -N -n %{name}-%{nss_archive_version}
 pushd nss
-%autopatch -p1 
+%autopatch -M 299 -p1 
+%patch -P 300 -p1 -R
 popd
 
 # copy the fips_algorithms.h for this release
@@ -328,9 +344,9 @@ popd
 cp %{SOURCE30} nss/lib/softoken/
 
 #update expired test certs
-pushd nss
-tar xvf %{SOURCE50}
-popd
+#pushd nss
+#tar xvf %{SOURCE50}
+#popd
 
 # https://bugzilla.redhat.com/show_bug.cgi?id=1247353
 find nss/lib/libpkix -perm /u+x -type f -exec chmod -x {} \;
@@ -888,11 +904,13 @@ update-crypto-policies --no-reload &> /dev/null || :
 %{_includedir}/nss3/ciferfam.h
 %{_includedir}/nss3/eccutil.h
 %{_includedir}/nss3/hasht.h
+%{_includedir}/nss3/kyber.h
 %{_includedir}/nss3/nssb64.h
 %{_includedir}/nss3/nssb64t.h
-%{_includedir}/nss3/nsslocks.h
+%{_includedir}/nss3/nsshash.h
 %{_includedir}/nss3/nssilock.h
 %{_includedir}/nss3/nssilckt.h
+%{_includedir}/nss3/nsslocks.h
 %{_includedir}/nss3/nssrwlk.h
 %{_includedir}/nss3/nssrwlkt.h
 %{_includedir}/nss3/nssutil.h
@@ -981,6 +999,26 @@ update-crypto-policies --no-reload &> /dev/null || :
 
 
 %changelog
+* Wed Sep 4 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-7
+- fix cms abi breakage
+- fix long password issue on pbmac encodings
+
+* Thu Aug 1 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-6
+- fix param encoding in pkcs12 pbamac encoding
+- add support for certificate compression in selfserv and tstclient
+
+* Wed Jul 24 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-3
+- Fix missing and inaccurate key length checks
+- Fix chacha timing issue
+
+* Wed Jul 17 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-2
+- Fix MD-5 decode issue in pkcs #12
+- turn off policy processing for pkcs12 and smime
+- update the restore defaults for pkcs12
+
+* Tue Jun 18 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-1
+- Rebase to NSS 3.101
+
 * Wed Apr 10 2024 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.90.0-7
 - Allow for shorter ecdsa signatures by padding them to full length
 

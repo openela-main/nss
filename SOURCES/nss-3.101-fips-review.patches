@@ -1,6 +1,6 @@
 diff -up ./lib/freebl/dh.c.fips-review ./lib/freebl/dh.c
---- ./lib/freebl/dh.c.fips-review	2023-06-04 01:42:53.000000000 -0700
-+++ ./lib/freebl/dh.c	2023-06-12 15:30:23.453233170 -0700
+--- ./lib/freebl/dh.c.fips-review	2024-06-07 09:26:03.000000000 -0700
++++ ./lib/freebl/dh.c	2024-06-12 12:04:10.639360404 -0700
 @@ -445,7 +445,7 @@ cleanup:
  PRBool
  KEA_Verify(SECItem *Y, SECItem *prime, SECItem *subPrime)
@@ -50,20 +50,28 @@ diff -up ./lib/freebl/dh.c.fips-review ./lib/freebl/dh.c
          MP_TO_SEC_ERROR(err);
          return PR_FALSE;
 diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
---- ./lib/softoken/pkcs11c.c.fips-review	2023-06-12 15:29:04.096403884 -0700
-+++ ./lib/softoken/pkcs11c.c	2023-06-12 15:30:23.454233181 -0700
-@@ -4785,6 +4785,10 @@ NSC_GenerateKey(CK_SESSION_HANDLE hSessi
+--- ./lib/softoken/pkcs11c.c.fips-review	2024-06-12 12:04:10.638360392 -0700
++++ ./lib/softoken/pkcs11c.c	2024-06-12 13:06:35.410551333 -0700
+@@ -43,6 +43,7 @@
+ 
+ #include "prprf.h"
+ #include "prenv.h"
++#include "prerror.h"
+ 
+ #define __PASTE(x, y) x##y
+ #define BAD_PARAM_CAST(pMech, typeSize) (!pMech->pParameter || pMech->ulParameterLen < typeSize)
+@@ -4882,6 +4883,10 @@ NSC_GenerateKey(CK_SESSION_HANDLE hSessi
       * handle the base object stuff
       */
      crv = sftk_handleObject(key, session);
-+    /* we need to do this check at the end, so we can check the generated 
++    /* we need to do this check at the end, so we can check the generated
 +     * key length against fips requirements */
 +    key->isFIPS = sftk_operationIsFIPS(slot, pMechanism, CKA_NSS_GENERATE, key);
 +    session->lastOpWasFIPS = key->isFIPS;
      sftk_FreeSession(session);
      if (crv == CKR_OK && sftk_isTrue(key, CKA_SENSITIVE)) {
          crv = sftk_forceAttribute(key, CKA_ALWAYS_SENSITIVE, &cktrue, sizeof(CK_BBOOL));
-@@ -4792,9 +4796,6 @@ NSC_GenerateKey(CK_SESSION_HANDLE hSessi
+@@ -4889,9 +4894,6 @@ NSC_GenerateKey(CK_SESSION_HANDLE hSessi
      if (crv == CKR_OK && !sftk_isTrue(key, CKA_EXTRACTABLE)) {
          crv = sftk_forceAttribute(key, CKA_NEVER_EXTRACTABLE, &cktrue, sizeof(CK_BBOOL));
      }
@@ -73,7 +81,7 @@ diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
      if (crv == CKR_OK) {
          *phKey = key->handle;
      }
-@@ -5098,60 +5099,67 @@ sftk_PairwiseConsistencyCheck(CK_SESSION
+@@ -5199,60 +5201,68 @@ sftk_PairwiseConsistencyCheck(CK_SESSION
  
      if (isDerivable) {
          SFTKAttribute *pubAttribute = NULL;
@@ -156,7 +164,7 @@ diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
 +            }
 +            /* make sure it has the same encoding */
 +            if (PR_GetEnvSecure("NSS_USE_DECODED_CKA_EC_POINT") ||
-+                lowPrivKey->u.ec.ecParams.fieldID.type == ec_field_plain) {
++                lowPrivKey->u.ec.ecParams.type != ec_params_named) {
 +              lowPubValue = SECITEM_DupItem(&ecPriv->publicValue);
 +            } else {
 +              lowPubValue = SEC_ASN1EncodeItem(NULL, NULL, &ecPriv->publicValue,
@@ -169,7 +177,7 @@ diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
 +        default:
 +            return CKR_DEVICE_ERROR;
          }
--
+ 
 -        crv = NSC_DeriveKey(hSession, &mech, privateKey->handle, template, templateCount, &newKey);
 -        if (crv != CKR_OK) {
 -            sftk_FreeAttribute(pubAttribute);
@@ -189,7 +197,7 @@ diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
          /* FIPS requires full validation, but in fipx mode NSC_Derive
           * only does partial validation with approved primes, now handle
           * full validation */
-@@ -5159,44 +5167,78 @@ sftk_PairwiseConsistencyCheck(CK_SESSION
+@@ -5260,44 +5270,78 @@ sftk_PairwiseConsistencyCheck(CK_SESSION
              SECItem pubKey;
              SECItem prime;
              SECItem subPrime;
@@ -283,7 +291,7 @@ diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
      }
  
      return CKR_OK;
-@@ -5714,8 +5756,8 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+@@ -5925,8 +5969,8 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
       * created and linked.
       */
      crv = sftk_handleObject(publicKey, session);
@@ -293,7 +301,7 @@ diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
          sftk_FreeObject(publicKey);
          NSC_DestroyObject(hSession, privateKey->handle);
          sftk_FreeObject(privateKey);
-@@ -5757,6 +5799,7 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+@@ -5968,6 +6012,7 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
      }
  
      if (crv != CKR_OK) {
@@ -301,7 +309,7 @@ diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
          NSC_DestroyObject(hSession, publicKey->handle);
          sftk_FreeObject(publicKey);
          NSC_DestroyObject(hSession, privateKey->handle);
-@@ -5766,6 +5809,8 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+@@ -5977,6 +6022,8 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
      /* we need to do this check at the end to make sure the generated key meets the key length requirements */
      privateKey->isFIPS = sftk_operationIsFIPS(slot, pMechanism, CKA_NSS_GENERATE_KEY_PAIR, privateKey);
      publicKey->isFIPS = privateKey->isFIPS;
@@ -310,7 +318,7 @@ diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
  
      *phPrivateKey = privateKey->handle;
      *phPublicKey = publicKey->handle;
-@@ -8386,7 +8431,7 @@ NSC_DeriveKey(CK_SESSION_HANDLE hSession
+@@ -8610,7 +8657,7 @@ NSC_DeriveKey(CK_SESSION_HANDLE hSession
  
              /* if the prime is an approved prime, we can skip all the other
               * checks. */
@@ -319,7 +327,7 @@ diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
              if (subPrime == NULL) {
                  SECItem dhSubPrime;
                  /* If the caller set the subprime value, it means that
-@@ -8568,6 +8613,7 @@ NSC_DeriveKey(CK_SESSION_HANDLE hSession
+@@ -8792,6 +8839,7 @@ NSC_DeriveKey(CK_SESSION_HANDLE hSession
                  secretlen = tmp.len;
              } else {
                  secretlen = keySize;
@@ -327,24 +335,9 @@ diff -up ./lib/softoken/pkcs11c.c.fips-review ./lib/softoken/pkcs11c.c
                  crv = sftk_ANSI_X9_63_kdf(&secret, keySize,
                                            &tmp, mechParams->pSharedData,
                                            mechParams->ulSharedDataLen, mechParams->kdf);
-diff -up ./lib/softoken/pkcs11.c.fips-review ./lib/softoken/pkcs11.c
---- ./lib/softoken/pkcs11.c.fips-review	2023-06-04 01:42:53.000000000 -0700
-+++ ./lib/softoken/pkcs11.c	2023-06-12 15:30:23.454233181 -0700
-@@ -4625,7 +4625,10 @@ NSC_CreateObject(CK_SESSION_HANDLE hSess
-     if (object == NULL) {
-         return CKR_HOST_MEMORY;
-     }
--    object->isFIPS = PR_FALSE; /* if we created the object on the fly,
-+    /* object types that we aren't allowed to create in FIPS mode are
-+     * already rejected explicitly. If we get here, then the object is
-+     * FIPS OK (most notably public key objects )*/
-+    /* object->isFIPS = PR_FALSE;  if we created the object on the fly,
-                                 * it's not a FIPS object */
- 
-     /*
 diff -up ./lib/softoken/pkcs11i.h.fips-review ./lib/softoken/pkcs11i.h
---- ./lib/softoken/pkcs11i.h.fips-review	2023-06-12 15:29:04.097403894 -0700
-+++ ./lib/softoken/pkcs11i.h	2023-06-12 15:30:23.454233181 -0700
+--- ./lib/softoken/pkcs11i.h.fips-review	2024-06-12 12:04:10.638360392 -0700
++++ ./lib/softoken/pkcs11i.h	2024-06-12 12:04:10.640360416 -0700
 @@ -971,7 +971,7 @@ char **NSC_ModuleDBFunc(unsigned long fu
  /* dh verify functions */
  /* verify that dhPrime matches one of our known primes, and if so return
@@ -355,9 +348,9 @@ diff -up ./lib/softoken/pkcs11i.h.fips-review ./lib/softoken/pkcs11i.h
  SECStatus sftk_IsSafePrime(SECItem *dhPrime, SECItem *dhSubPrime, PRBool *isSafe);
  /* map an operation Attribute to a Mechanism flag */
 diff -up ./lib/softoken/pkcs11u.c.fips-review ./lib/softoken/pkcs11u.c
---- ./lib/softoken/pkcs11u.c.fips-review	2023-06-12 15:29:04.097403894 -0700
-+++ ./lib/softoken/pkcs11u.c	2023-06-12 15:30:23.454233181 -0700
-@@ -2403,15 +2403,27 @@ sftk_handleSpecial(SFTKSlot *slot, CK_ME
+--- ./lib/softoken/pkcs11u.c.fips-review	2024-06-12 12:04:10.638360392 -0700
++++ ./lib/softoken/pkcs11u.c	2024-06-12 12:04:10.640360416 -0700
+@@ -2409,15 +2409,27 @@ sftk_handleSpecial(SFTKSlot *slot, CK_ME
      switch (mechInfo->special) {
          case SFTKFIPSDH: {
              SECItem dhPrime;
@@ -388,8 +381,8 @@ diff -up ./lib/softoken/pkcs11u.c.fips-review ./lib/softoken/pkcs11u.c
          case SFTKFIPSNone:
              return PR_FALSE;
 diff -up ./lib/softoken/sftkdhverify.c.fips-review ./lib/softoken/sftkdhverify.c
---- ./lib/softoken/sftkdhverify.c.fips-review	2023-06-04 01:42:53.000000000 -0700
-+++ ./lib/softoken/sftkdhverify.c	2023-06-12 15:30:23.455233191 -0700
+--- ./lib/softoken/sftkdhverify.c.fips-review	2024-06-07 09:26:03.000000000 -0700
++++ ./lib/softoken/sftkdhverify.c	2024-06-12 12:04:10.641360427 -0700
 @@ -6726,11 +6726,20 @@ static const SECItem subprime_tls_8192 =
                                             (unsigned char *)subprime_tls_8192_data,
                                             sizeof(subprime_tls_8192_data) };
@@ -481,8 +474,8 @@ diff -up ./lib/softoken/sftkdhverify.c.fips-review ./lib/softoken/sftkdhverify.c
              }
              break;
 diff -up ./lib/softoken/sftkike.c.fips-review ./lib/softoken/sftkike.c
---- ./lib/softoken/sftkike.c.fips-review	2023-06-04 01:42:53.000000000 -0700
-+++ ./lib/softoken/sftkike.c	2023-06-12 15:30:23.455233191 -0700
+--- ./lib/softoken/sftkike.c.fips-review	2024-06-07 09:26:03.000000000 -0700
++++ ./lib/softoken/sftkike.c	2024-06-12 12:04:10.641360427 -0700
 @@ -516,6 +516,11 @@ sftk_ike_prf(CK_SESSION_HANDLE hSession,
              goto fail;
          }

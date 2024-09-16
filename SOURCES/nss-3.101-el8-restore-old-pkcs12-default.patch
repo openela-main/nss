@@ -26,6 +26,20 @@ diff -up ./cmd/pk12util/pk12util.c.orig ./cmd/pk12util/pk12util.c
      if (pk12util.options[opt_CertCipher].activated) {
          char *cipherString = pk12util.options[opt_CertCipher].arg;
  
+--- ./cmd/pk12util/pk12util.c.no_pkcs12_macpbe_default	2024-07-18 08:26:35.7732
+48450 -0700
++++ ./cmd/pk12util/pk12util.c	2024-07-18 08:27:05.796595554 -0700
+@@ -1165,10 +1165,6 @@ main(int argc, char **argv)
+             }
+         }
+     }
+-    /* in FIPS mode default to encoding with pkcs5v2 for the MAC */
+-    if (PK11_IsFIPS()) {
+-        hash = SEC_OID_HMAC_SHA256;
+-    }
+     if (pk12util.options[opt_Mac].activated) {
+         char *hashString = pk12util.options[opt_Mac].arg;
+ 
 diff -up ./tests/tools/tools.sh.orig ./tests/tools/tools.sh
 --- ./tests/tools/tools.sh.orig	2021-06-15 17:06:27.650564449 -0700
 +++ ./tests/tools/tools.sh	2021-06-15 17:07:59.934117192 -0700
