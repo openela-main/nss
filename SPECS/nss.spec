@@ -63,7 +63,7 @@ print(string.sub(hash, 0, 16))
 Summary:          Network Security Services
 Name:             nss
 Version:          %{nss_version}
-Release:          7%{?dist}
+Release:          11%{?dist}
 License:          MPLv2.0
 URL:              http://www.mozilla.org/projects/security/pki/nss/
 Requires:         nspr >= %{nspr_version}%{nspr_release}
@@ -201,6 +201,9 @@ Patch84:          nss-3.101-fix-pkcs12-pbkdf1-encoding.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=676100
 Patch85:          nss-3.101-fix-cms-abi-break.patch
 Patch86:          nss-3.101-long-pwd-fix.patch
+Patch87:          nss-3.101-fix-shlibsign-fips.patch
+Patch88:          nss-3.101-fips-check-ec25519-size.patch
+Patch89:          nss-3.101-allow-fips-rsa-oaep.patch
 
 #revert patches
 Patch300:         nss-3.101-default-libpkix.patch
@@ -999,6 +1002,19 @@ update-crypto-policies --no-reload &> /dev/null || :
 
 
 %changelog
+* Tue Nov 12 2024 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.101.0-11
+- don't define -DNSS_NO_INIT_SUPPORT for legacydb on pcc systems
+
+* Mon Nov 11 2024 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.101.0-10
+- Allow RSA-OAEP in FIPS mode
+
+* Mon Nov 11 2024 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.101.0-9
+- Add SEC_OID_CURVE25519 to FIPS checks.
+- This will mark algorithm using it as FIPS unapproved.
+
+* Mon Nov 4 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-8
+- fix shlibsign to work when the system is in FIPS mode.
+
 * Wed Sep 4 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-7
 - fix cms abi breakage
 - fix long password issue on pbmac encodings

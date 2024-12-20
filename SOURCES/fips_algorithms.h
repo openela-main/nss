@@ -20,6 +20,7 @@ typedef enum {
     SFTKFIPSChkHash,  /* make sure the base hash of KDF functions is FIPS */
     SFTKFIPSChkHashTls,  /* make sure the base hash of TLS KDF functions is FIPS */
     SFTKFIPSChkHashSp800,  /* make sure the base hash of SP-800-108 KDF functions is FIPS */
+    SFTKFIPSRSAOAEP, /* make sure that both hashes use the same FIPS compliant algorithm */
 } SFTKFIPSSpecialClass;
 
 /* set according to your security policy */
@@ -79,6 +80,7 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
 #define AES_FB_KEY 128, 256
 #define AES_FB_STEP 64
     { CKM_RSA_PKCS_KEY_PAIR_GEN, { RSA_FB_KEY, CKF_KPG }, RSA_FB_STEP, SFTKFIPSNone },
+    { CKM_RSA_PKCS_OAEP, { RSA_FB_KEY, CKF_ENC }, RSA_FB_STEP, SFTKFIPSRSAOAEP },
 
     /* -------------- RSA Multipart Signing Operations -------------------- */
     { CKM_SHA224_RSA_PKCS, { RSA_FB_KEY, CKF_SGN }, RSA_FB_STEP, SFTKFIPSNone },
