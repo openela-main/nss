@@ -1,6 +1,6 @@
 %global nss_version 3.101.0
 %global nspr_version 4.35.0
-%global baserelease 7
+%global baserelease 10
 %global nss_release %baserelease
 # NOTE: To avoid NVR clashes of nspr* packages:
 # use "%%global nspr_release %%[%%baserelease+n]" to handle offsets when
@@ -199,6 +199,9 @@ Patch84:          nss-3.101-fix-pkcs12-pbkdf1-encoding.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=676100
 Patch85:          nss-3.101-fix-cms-abi-break.patch
 Patch86:          nss-3.101-long-pwd-fix.patch
+Patch87:          nss-3.101-fix-shlibsign-fips.patch
+Patch88:          nss-3.101-fips-check-ec25519-size.patch
+Patch89:          nss-3.101-allow-fips-rsa-oaep.patch
 
 Patch100:         nspr-config-pc.patch
 Patch101:         nspr-gcc-atomics.patch
@@ -1200,6 +1203,17 @@ update-crypto-policies &> /dev/null || :
 
 
 %changelog
+* Mon Nov 11 2024 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.101.0-10
+- Allow RSA-OAEP in FIPS mode
+
+* Mon Nov 11 2024 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.101.0-9
+- Add SEC_OID_CURVE25519 to FIPS checks.
+- This will mark algorithms using it as FIPS unapproved.
+
+* Mon Nov 4 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-8
+- fix shlibsign in FIPS mode
+- remove dbm from pkgconfig
+
 * Wed Sep 4 2024 Bob Relyea <rrelyea@redhat.com> - 3.101.0-7
 - fix cms abi breakage
 - fix long password issue on pbmac encodings

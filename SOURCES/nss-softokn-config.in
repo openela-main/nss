@@ -21,7 +21,6 @@ Options:
 Dynamic Libraries:
 	softokn3 - Requires full dynamic linking
 	freebl3  - for internal use only (and glibc for self-integrity check)
-	nssdbm3  - for internal use only
 Dymamically linked
 EOF
 	exit $1
