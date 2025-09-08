@@ -1,13 +1,14 @@
-%global nss_version 3.101.0
-%global nspr_version 4.35.0
-%global baserelease 10
+%global nss_version 3.112.0
+%global nspr_version 4.36.0
+%global baserelease 4
 %global nss_release %baserelease
 # NOTE: To avoid NVR clashes of nspr* packages:
 # use "%%global nspr_release %%[%%baserelease+n]" to handle offsets when
 # release number between nss and nspr are different.
 # when a new nspr is released with nss, reset nspr_release to baserelease.
 # for each new nss relase with the same nspr, change increment n by one.
-%global nspr_release %[%baserelease+7]
+#%%global nspr_release %%[%%baserelease+n]
+%global nspr_release %baserelease
 # only need to update this as we added new
 # algorithms under nss policy control
 %global crypto_policies_version 20210118
@@ -126,6 +127,7 @@ Source22:         pkcs11.txt.xml
 Source24:         cert9.db.xml
 Source26:         key4.db.xml
 Source28:         nss-p11-kit.config
+Source29:         nss_compat_test_pkcs12.tar
 # fips algorithms are tied to the red hat validation, others
 # will have their own validation
 Source30:         fips_algorithms.h
@@ -149,11 +151,10 @@ Source101:        nspr-config.xml
 Patch4:           iquote.patch
 Patch12:          nss-signtool-format.patch
 Patch20:          nss-3.101-extend-db-dump-time.patch
-Patch21:          nss-3.101-enable-sdb-tests.patch
 # connect our shared library to the build root loader flags (needed for -relro)
 Patch31:          nss-dso-ldflags.patch
 # keep RHEL 8 semantics of disabling md4 and md5 even if the env variable is set
-Patch32:          nss-3.101-disable-md5.patch
+Patch32:          nss-3.112-disable-md5.patch
 # dbm is disabled on RHEL9, make the man pages reflect that
 %if %{with dbm}
 %else
@@ -162,52 +163,38 @@ Patch33:          nss-no-dbm-man-page.patch
 # not upstreamable patch...
 # WARNING: Need to make this patch work before checking!!! $$$$@@@
 Patch34:          nss-3.71-fix-lto-gtests.patch
-# camellia pkcs12 docs.
-Patch35:          nss-3.71-camellia-pkcs12-doc.patch
-# disable ech
-Patch36:          nss-3.101-disable-ech.patch
+Patch36:          nss-3.112-disable-ech.patch
 
 # patches that expect to be upstreamed
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1767883
-Patch50:          nss-3.79-fips.patch
+Patch50:          nss-3.112-fips.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1836781
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1836925
-Patch51:          nss-3.101-fips-review.patches
-Patch52:          nss-3.90-pbkdf2-indicator.patch
 Patch53:          nss-3.101-skip-ocsp-if-not-connected.patch
 # dont upstream, must be after patch53 (sigh)
 Patch54:          nss-3.101-revert-libpkix-default.patch
 
-# ems policy. needs to upstream
-Patch60:          nss-3.101-add-ems-policy.patch
-Patch70:          nss-3.90-fips-safe-memset.patch
-Patch71:          nss-3.101-fips-indicators.patch
-Patch72:          nss-3.90-aes-gmc-indicator.patch
-Patch73:          nss-3.90-fips-indicators2.patch
 Patch74:          nss-3.90-dh-test-update.patch
 Patch75:          nss-3.90-ppc_no_init.patch
-Patch76:          nss-3.101-enable-kyber-policy.patch
-Patch77:          nss-3.101-fix-rsa-policy-test.patch
-Patch78:          nss-3.101-fix-pkcs12-md5-decode.patch
 Patch79:          nss-3.101-el9-restore-old-pkcs12-default.patch
-Patch80:          nss-3.101-no-p12-smime-policy.patch
-Patch81:          nss-3.101-fix-missing-size-checks.patch
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1905691
-Patch82:          nss-3.101-chacha-timing-fix.patch
-Patch83:          nss-3.101-add-certificate-compression-test.patch
-Patch84:          nss-3.101-fix-pkcs12-pbkdf1-encoding.patch
+Patch80:          nss-3.112-no-p12-smime-policy.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=676100
 Patch85:          nss-3.101-fix-cms-abi-break.patch
-Patch86:          nss-3.101-long-pwd-fix.patch
 Patch87:          nss-3.101-fix-shlibsign-fips.patch
-Patch88:          nss-3.101-fips-check-ec25519-size.patch
-Patch89:          nss-3.101-allow-fips-rsa-oaep.patch
+# Post Quantum specific
+Patch91:          nss-3.112-replace-xyber-with-mlkem-256.patch
+Patch92:          nss-3.112-add-sec384r1-mlkem-1024.patch
+Patch93:          nss-3.112-add-ml-dsa-base-dsa.patch
+Patch94:          nss-3.112-add-ml-dsa-gtests-dsa.patch
+Patch95:          nss-3.112-add-ml-dsa-ssl-support-dsa.patch
+Patch96:          nss-3.112-fips-and-fixes.patch
+Patch97:          nss-3.112-big-endian-compression-fix.patch
+patch98:          nss-3.112-fix-get-interface.patch
 
 Patch100:         nspr-config-pc.patch
 Patch101:         nspr-gcc-atomics.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=1769293
-Patch110:         nspr-4.34-fix-coverity-loop-issue.patch
-Patch120:         nspr-4.34-server-passive.patch
+Patch110:         nspr-4.36-fix-coverity-loop-issue.patch
 
 
 # NSS reverse patches
@@ -377,6 +364,7 @@ pushd nspr
 %autopatch -p 1 -m 101 -M 299
 popd
 
+tar xvf %{SOURCE29}
 
 pushd nss
 %autopatch -p1 -M 99
@@ -467,6 +455,8 @@ export NSS_FIPS_MODULE_ID="${FIPS_MODULE_OS}\ ${NSS_FIPS_VERSION}"
 # remove when the infrastructure is fixed
 export NSS_FIPS_140_3=1
 export NSS_ENABLE_FIPS_INDICATORS=1
+export NSS_DISABLE_KYBER=1
+export NSS_ENABLE_ML_DSA=1
 
 # Enable compiler optimizations and disable debugging code
 export BUILD_OPT=1
@@ -653,6 +643,8 @@ popd
 export FREEBL_NO_DEPEND=1
 
 export BUILD_OPT=1
+export NSS_DISABLE_KYBER=1
+export NSS_ENABLE_ML_DSA=1
 
 %ifnarch noarch
 %if 0%{__isa_bits} == 64
@@ -1094,6 +1086,7 @@ update-crypto-policies &> /dev/null || :
 %{_includedir}/nss3/eccutil.h
 %{_includedir}/nss3/hasht.h
 %{_includedir}/nss3/kyber.h
+%{_includedir}/nss3/ml_dsat.h
 %{_includedir}/nss3/nssb64.h
 %{_includedir}/nss3/nssb64t.h
 %{_includedir}/nss3/nsshash.h
@@ -1203,6 +1196,22 @@ update-crypto-policies &> /dev/null || :
 
 
 %changelog
+* Thu Aug 7 2025 Bob Relyea <rrelyea@redhat.com> - 3.112.0-4
+- fix interface issue when pulling 3.0 pkcs#11 interfaces explicitly
+
+* Fri Aug 1 2025 Bob Relyea <rrelyea@redhat.com> - 3.112.0-3
+- restore CONCATENATE functions accidentally remvoed in the last patch
+- fix big endian issue in tstclnt and selfserv in certificate compression
+
+* Wed Jul 30 2025 Bob Relyea <rrelyea@redhat.com> - 3.112.0-2
+- add fips required changes.
+- fix bugs found by QE
+
+* Mon Jul 14 2025 Bob Relyea <rrelyea@redhat.com> - 3.112.0-1
+- rebase to NSS 3.112
+- add ml-kem-1024 support
+- add ml-dsa support
+
 * Mon Nov 11 2024 Frantisek Krenzelok <krenzelok.frantisek@gmail.com> - 3.101.0-10
 - Allow RSA-OAEP in FIPS mode
 

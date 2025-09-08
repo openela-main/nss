@@ -1,0 +1,4027 @@
+diff -up ./cmd/lib/secutil.c.mlkem_p256 ./cmd/lib/secutil.c
+--- ./cmd/lib/secutil.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./cmd/lib/secutil.c	2025-06-25 16:47:19.374362915 -0700
+@@ -4198,43 +4198,42 @@ SECU_ParseSSLVersionRangeString(const ch
+     return SECSuccess;
+ }
+ 
++#define NAME_AND_LEN(s) sizeof(s)-1,s
++static const struct SSLNamedGroupString {
++    int len;
++    char *name;
++    SSLNamedGroup grp;
++} sslNamedGroupStringArray[] = {
++    { NAME_AND_LEN("P256"), ssl_grp_ec_secp256r1 },
++    { NAME_AND_LEN("P384"), ssl_grp_ec_secp384r1 },
++    { NAME_AND_LEN("P521"), ssl_grp_ec_secp521r1 },
++    { NAME_AND_LEN("x25519"), ssl_grp_ec_curve25519 },
++    { NAME_AND_LEN("FF2048"), ssl_grp_ffdhe_2048 },
++    { NAME_AND_LEN("FF3072"), ssl_grp_ffdhe_3072 },
++    { NAME_AND_LEN("FF4096"), ssl_grp_ffdhe_4096 },
++    { NAME_AND_LEN("FF6144"), ssl_grp_ffdhe_6144 },
++    { NAME_AND_LEN("FF8192"), ssl_grp_ffdhe_8192 },
++#ifndef NSS_DISABLE_KYBER
++    { NAME_AND_LEN("xyber76800"), ssl_grp_kem_xyber768d00 },
++#endif
++    { NAME_AND_LEN("mlkem768x25519"), ssl_grp_kem_mlkem768x25519 },
++    { NAME_AND_LEN("mlkem768secp256r1"), ssl_grp_kem_secp256r1mlkem768 },
++};
++
++static const size_t sslNamedGroupStringLen=PR_ARRAY_SIZE(sslNamedGroupStringArray);
++
+ static SSLNamedGroup
+ groupNameToNamedGroup(char *name)
+ {
+-    if (PL_strlen(name) == 4) {
+-        if (!strncmp(name, "P256", 4)) {
+-            return ssl_grp_ec_secp256r1;
+-        }
+-        if (!strncmp(name, "P384", 4)) {
+-            return ssl_grp_ec_secp384r1;
+-        }
+-        if (!strncmp(name, "P521", 4)) {
+-            return ssl_grp_ec_secp521r1;
+-        }
+-    }
+-    if (PL_strlen(name) == 6) {
+-        if (!strncmp(name, "x25519", 6)) {
+-            return ssl_grp_ec_curve25519;
+-        }
+-        if (!strncmp(name, "FF2048", 6)) {
+-            return ssl_grp_ffdhe_2048;
+-        }
+-        if (!strncmp(name, "FF3072", 6)) {
+-            return ssl_grp_ffdhe_3072;
+-        }
+-        if (!strncmp(name, "FF4096", 6)) {
+-            return ssl_grp_ffdhe_4096;
+-        }
+-        if (!strncmp(name, "FF6144", 6)) {
+-            return ssl_grp_ffdhe_6144;
+-        }
+-        if (!strncmp(name, "FF8192", 6)) {
+-            return ssl_grp_ffdhe_8192;
+-        }
+-    }
+-    if (PL_strlen(name) == 11) {
+-        if (!strncmp(name, "xyber768d00", 11)) {
+-            return ssl_grp_kem_xyber768d00;
++    int len = PL_strlen(name);
++    int i;
++
++    for (i=0; i < sslNamedGroupStringLen; i++) {
++        const struct SSLNamedGroupString *ngs = &sslNamedGroupStringArray[i];
++        if (len == ngs->len) {
++            if (!strncmp(name, ngs->name, len))  {
++                return ngs->grp;
++            }
+         }
+     }
+     if (PL_strlen(name) == 14) {
+@@ -4309,6 +4308,26 @@ done:
+     return SECSuccess;
+ }
+ 
++const char *
++SECU_NamedGroupToGroupName(SSLNamedGroup grp) {
++    int i;
++    static char unknownBuf[32];
++
++    if (grp == ssl_grp_none) {
++        return "None";
++    }
++
++    for (i=0; i < sslNamedGroupStringLen; i++) {
++        const struct SSLNamedGroupString *ngs = &sslNamedGroupStringArray[i];
++        if (grp == ngs->grp) {
++            return ngs->name;
++        }
++    }
++    snprintf(unknownBuf, sizeof(unknownBuf), "Unknown %d\n", grp);
++
++    return unknownBuf;
++}
++
+ SSLSignatureScheme
+ schemeNameToScheme(const char *name)
+ {
+diff -up ./cmd/lib/secutil.h.mlkem_p256 ./cmd/lib/secutil.h
+--- ./cmd/lib/secutil.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./cmd/lib/secutil.h	2025-06-25 16:47:19.374362915 -0700
+@@ -425,6 +425,8 @@ SECStatus parseGroupList(const char *arg
+ SECStatus parseSigSchemeList(const char *arg,
+                              const SSLSignatureScheme **enabledSigSchemes,
+                              unsigned int *enabledSigSchemeCount);
++const char *SECU_NamedGroupToGroupName(SSLNamedGroup grp);
++
+ typedef struct {
+     SECItem label;
+     PRBool hasContext;
+diff -up ./cmd/selfserv/selfserv.c.mlkem_p256 ./cmd/selfserv/selfserv.c
+--- ./cmd/selfserv/selfserv.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./cmd/selfserv/selfserv.c	2025-06-25 16:47:19.374362915 -0700
+@@ -227,7 +227,11 @@ PrintParameterUsage()
+         "-I comma separated list of enabled groups for TLS key exchange.\n"
+         "   The following values are valid:\n"
+         "   P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192,\n"
+-        "   xyber768d00, mlkem768x25519\n"
++        "   "
++#ifndef NSS_DISABLE_KYBER
++        "xyber768d00, "
++#endif
++        "mlkem768x25519, mlkem768secp256r1\n"
+         "-J comma separated list of enabled signature schemes in preference order.\n"
+         "   The following values are valid:\n"
+         "     rsa_pkcs1_sha1, rsa_pkcs1_sha256, rsa_pkcs1_sha384, rsa_pkcs1_sha512,\n"
+@@ -410,9 +414,11 @@ printSecurityInfo(PRFileDesc *fd)
+                     channel.isFIPS ? " FIPS" : "");
+             FPRINTF(stderr,
+                     "selfserv: Server Auth: %d-bit %s, Key Exchange: %d-bit %s\n"
++                    "          Key Exchange Group:%s\n"
+                     "          Compression: %s, Extended Master Secret: %s\n",
+                     channel.authKeyBits, suite.authAlgorithmName,
+                     channel.keaKeyBits, suite.keaTypeName,
++                    SECU_NamedGroupToGroupName(channel.keaGroup),
+                     channel.compressionMethodName,
+                     channel.extendedMasterSecretUsed ? "Yes" : "No");
+         }
+diff -up ./cmd/strsclnt/strsclnt.c.mlkem_p256 ./cmd/strsclnt/strsclnt.c
+--- ./cmd/strsclnt/strsclnt.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./cmd/strsclnt/strsclnt.c	2025-06-25 16:47:19.374362915 -0700
+@@ -298,9 +298,11 @@ printSecurityInfo(PRFileDesc *fd)
+                     channel.isFIPS ? " FIPS" : "");
+             FPRINTF(stderr,
+                     "strsclnt: Server Auth: %d-bit %s, Key Exchange: %d-bit %s\n"
++                    "          Key Exchange Group:%s\n"
+                     "          Compression: %s\n",
+                     channel.authKeyBits, suite.authAlgorithmName,
+                     channel.keaKeyBits, suite.keaTypeName,
++                    SECU_NamedGroupToGroupName(channel.keaGroup),
+                     channel.compressionMethodName);
+         }
+     }
+diff -up ./cmd/tstclnt/tstclnt.c.mlkem_p256 ./cmd/tstclnt/tstclnt.c
+--- ./cmd/tstclnt/tstclnt.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./cmd/tstclnt/tstclnt.c	2025-06-25 16:47:19.374362915 -0700
+@@ -176,10 +176,12 @@ printSecurityInfo(PRFileDesc *fd)
+                     channel.isFIPS ? " FIPS" : "");
+             FPRINTF(stderr,
+                     "tstclnt: Server Auth: %d-bit %s, Key Exchange: %d-bit %s\n"
++                    "         Key Exchange Group:%s\n"
+                     "         Compression: %s, Extended Master Secret: %s\n"
+                     "         Signature Scheme: %s\n",
+                     channel.authKeyBits, suite.authAlgorithmName,
+                     channel.keaKeyBits, suite.keaTypeName,
++                    SECU_NamedGroupToGroupName(channel.keaGroup),
+                     channel.compressionMethodName,
+                     channel.extendedMasterSecretUsed ? "Yes" : "No",
+                     signatureSchemeName(channel.signatureScheme));
+@@ -308,7 +310,11 @@ PrintParameterUsage()
+     fprintf(stderr, "%-20s Comma separated list of enabled groups for TLS key exchange.\n"
+                     "%-20s The following values are valid:\n"
+                     "%-20s P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n"
+-                    "%-20s xyber768d00, mlkem768x25519\n",
++                    "%-20s "
++#ifndef NSS_DISABLE_KYBER
++                    "xyber768d00,  "
++#endif
++                    "mlkem768x25519, mlkem768secp256r1\n",
+             "-I", "", "", "");
+     fprintf(stderr, "%-20s Comma separated list of signature schemes in preference order.\n"
+                     "%-20s The following values are valid:\n"
+diff -up ./coreconf/config.mk.mlkem_p256 ./coreconf/config.mk
+--- ./coreconf/config.mk.mlkem_p256	2025-06-25 16:47:19.375362928 -0700
++++ ./coreconf/config.mk	2025-06-25 16:51:23.790507978 -0700
+@@ -179,6 +179,10 @@ ifdef NSS_DISABLE_LIBPKIX
+ DEFINES += -DNSS_DISABLE_LIBPKIX
+ endif
+ 
++ifdef NSS_DISABLE_KYBER
++DEFINES += -DNSS_DISABLE_KYBER
++endif
++
+ ifdef NSS_DISABLE_DBM
+ DEFINES += -DNSS_DISABLE_DBM
+ endif
+diff -up ./gtests/nss_bogo_shim/nss_bogo_shim.cc.mlkem_p256 ./gtests/nss_bogo_shim/nss_bogo_shim.cc
+--- ./gtests/nss_bogo_shim/nss_bogo_shim.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/nss_bogo_shim/nss_bogo_shim.cc	2025-06-25 16:47:19.375362928 -0700
+@@ -435,6 +435,7 @@ class TestAgent {
+       if (rv != SECSuccess) {
+         return false;
+       }
++#ifndef NSS_DISABLE_KYBER
+       // Xyber768 is disabled by policy by default, so if it's requested
+       // we need to update the policy flags as well.
+       for (auto group : groups) {
+@@ -442,6 +443,7 @@ class TestAgent {
+           NSS_SetAlgorithmPolicy(SEC_OID_XYBER768D00, NSS_USE_ALG_IN_SSL_KX, 0);
+         }
+       }
++#endif
+     }
+ 
+     return true;
+diff -up ./gtests/pk11_gtest/pk11_kem_unittest.cc.mlkem_p256 ./gtests/pk11_gtest/pk11_kem_unittest.cc
+--- ./gtests/pk11_gtest/pk11_kem_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/pk11_gtest/pk11_kem_unittest.cc	2025-06-25 16:47:19.375362928 -0700
+@@ -140,7 +140,10 @@ TEST_P(Pkcs11KEMTest, KemConsistencyTest
+ }
+ 
+ INSTANTIATE_TEST_SUITE_P(Pkcs11KEMTest, Pkcs11KEMTest,
+-                         ::testing::Values(CKP_NSS_KYBER_768_ROUND3,
+-                                           CKP_NSS_ML_KEM_768));
++                         ::testing::Values(
++#ifndef NSS_DISABLE_KYBER
++                             CKP_NSS_KYBER_768_ROUND3,
++#endif
++                             CKP_NSS_ML_KEM_768));
+ 
+ }  // namespace nss_test
+diff -up ./gtests/ssl_gtest/Makefile.mlkem_p256 ./gtests/ssl_gtest/Makefile
+--- ./gtests/ssl_gtest/Makefile.mlkem_p256	2025-06-26 08:11:04.554368549 -0700
++++ ./gtests/ssl_gtest/Makefile	2025-06-26 08:12:08.993988976 -0700
+@@ -42,6 +42,13 @@ else
+ SSLKEYLOGFILE_FILES = $(NULL)
+ endif
+ 
++ifndef NSS_DISABLE_KYBER
++XYBER_FILES = tls_xyber_unittest.cc
++else
++XYBER_FILES = $(NULL)
++endif
++
++
+ #######################################################################
+ # (5) Execute "global" rules. (OPTIONAL)                              #
+ #######################################################################
+diff -up ./gtests/ssl_gtest/manifest.mn.mlkem_p256 ./gtests/ssl_gtest/manifest.mn
+--- ./gtests/ssl_gtest/manifest.mn.mlkem_p256	2025-06-25 16:47:19.358362709 -0700
++++ ./gtests/ssl_gtest/manifest.mn	2025-06-25 16:53:27.033093823 -0700
+@@ -62,6 +62,6 @@ CPPSRCS = \
+       tls_psk_unittest.cc \
+       tls_subcerts_unittest.cc \
+-      tls_xyber_unittest.cc \
++      $(XYBER_FILES) \
+       $(SSLKEYLOGFILE_FILES) \
+       $(NULL)
+ 
+diff -up ./gtests/ssl_gtest/ssl_0rtt_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_0rtt_unittest.cc
+--- ./gtests/ssl_gtest/ssl_0rtt_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_0rtt_unittest.cc	2025-06-25 16:47:19.375362928 -0700
+@@ -197,8 +197,9 @@ TEST_P(TlsZeroRttReplayTest, ZeroRttRepl
+ TEST_P(TlsConnectTls13, ZeroRttOptionsSetLate) {
+   ConfigureSessionCache(RESUME_BOTH, RESUME_TICKET);
+   Connect();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   SendReceive();  // Need to read so that we absorb the session ticket.
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++  CheckKeys();
+   Reset();
+   StartConnect();
+   // Now turn on 0-RTT but too late for the ticket.
+diff -up ./gtests/ssl_gtest/ssl_auth_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_auth_unittest.cc
+--- ./gtests/ssl_gtest/ssl_auth_unittest.cc.mlkem_p256	2025-06-25 16:47:19.368362838 -0700
++++ ./gtests/ssl_gtest/ssl_auth_unittest.cc	2025-06-25 16:47:19.375362928 -0700
+@@ -54,6 +54,7 @@ TEST_P(TlsConnectTls12Plus, ServerAuthRs
+                                PR_ARRAY_SIZE(kSignatureSchemePss));
+   server_->SetSignatureSchemes(kSignatureSchemePss,
+                                PR_ARRAY_SIZE(kSignatureSchemePss));
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   Connect();
+   CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_pss,
+             ssl_sig_rsa_pss_pss_sha256);
+@@ -84,6 +85,7 @@ TEST_P(TlsConnectTls12Plus, ServerAuthRs
+                                PR_ARRAY_SIZE(kSignatureSchemePss));
+   server_->SetSignatureSchemes(kSignatureSchemePss,
+                                PR_ARRAY_SIZE(kSignatureSchemePss));
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   Connect();
+   CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_pss,
+             ssl_sig_rsa_pss_pss_sha256);
+@@ -947,7 +949,7 @@ TEST_P(TlsConnectClientAuth, ClientAuthE
+   client_->SetupClientAuth(std::get<2>(GetParam()), true);
+   server_->RequestClientAuth(true);
+   Connect();
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_ecdsa);
++  CheckKeys(ssl_auth_ecdsa);
+ }
+ 
+ TEST_P(TlsConnectClientAuth, ClientAuthWithEch) {
+@@ -960,7 +962,7 @@ TEST_P(TlsConnectClientAuth, ClientAuthW
+   client_->SetupClientAuth(std::get<2>(GetParam()), true);
+   server_->RequestClientAuth(true);
+   Connect();
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_ecdsa);
++  CheckKeys(ssl_auth_ecdsa);
+ }
+ 
+ TEST_P(TlsConnectClientAuth, ClientAuthBigRsa) {
+@@ -1304,14 +1306,14 @@ static const SSLSignatureScheme kSignatu
+ static const SSLSignatureScheme kSignatureSchemeRsaSha256[] = {
+     ssl_sig_rsa_pkcs1_sha256};
+ 
+-static SSLNamedGroup NamedGroupForEcdsa384(uint16_t version) {
++static SSLNamedGroup NamedGroupForEcdsa384(const TlsConnectTestBase *ctbase) {
+   // NSS tries to match the group size to the symmetric cipher. In TLS 1.1 and
+   // 1.0, TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA is the highest priority suite, so
+   // we use P-384. With TLS 1.2 on we pick AES-128 GCM so use x25519.
+-  if (version <= SSL_LIBRARY_VERSION_TLS_1_1) {
++  if (ctbase->GetVersion() <= SSL_LIBRARY_VERSION_TLS_1_1) {
+     return ssl_grp_ec_secp384r1;
+   }
+-  return ssl_grp_ec_curve25519;
++  return ctbase->GetDefaultGroupFromKEA(ctbase->GetDefaultKEA());
+ }
+ 
+ // When signature algorithms match up, this should connect successfully; even
+@@ -1323,7 +1325,7 @@ TEST_P(TlsConnectGeneric, SignatureAlgor
+   server_->SetSignatureSchemes(kSignatureSchemeEcdsaSha384,
+                                PR_ARRAY_SIZE(kSignatureSchemeEcdsaSha384));
+   Connect();
+-  CheckKeys(ssl_kea_ecdh, NamedGroupForEcdsa384(version_), ssl_auth_ecdsa,
++  CheckKeys(GetDefaultKEA(), NamedGroupForEcdsa384(this), ssl_auth_ecdsa,
+             ssl_sig_ecdsa_secp384r1_sha384);
+ }
+ 
+@@ -1342,7 +1344,7 @@ TEST_P(TlsConnectGeneric, SignatureAlgor
+             SSL_SignaturePrefSet(client_->ssl_fd(), clientAlgorithms,
+                                  PR_ARRAY_SIZE(clientAlgorithms)));
+   Connect();
+-  CheckKeys(ssl_kea_ecdh, NamedGroupForEcdsa384(version_), ssl_auth_ecdsa,
++  CheckKeys(GetDefaultKEA(), NamedGroupForEcdsa384(this), ssl_auth_ecdsa,
+             ssl_sig_ecdsa_secp384r1_sha384);
+ }
+ 
+@@ -1353,7 +1355,7 @@ TEST_P(TlsConnectGeneric, SignatureAlgor
+   server_->SetSignatureSchemes(kSignatureSchemeEcdsaSha384,
+                                PR_ARRAY_SIZE(kSignatureSchemeEcdsaSha384));
+   Connect();
+-  CheckKeys(ssl_kea_ecdh, NamedGroupForEcdsa384(version_), ssl_auth_ecdsa,
++  CheckKeys(GetDefaultKEA(), NamedGroupForEcdsa384(this), ssl_auth_ecdsa,
+             ssl_sig_ecdsa_secp384r1_sha384);
+ }
+ 
+@@ -1445,6 +1447,7 @@ TEST_P(TlsConnectTls12, SignatureAlgorit
+ 
+ TEST_P(TlsConnectTls13, UnsupportedSignatureSchemeAlert) {
+   EnsureTlsSetup();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   auto filter =
+       MakeTlsFilter<TlsReplaceSignatureSchemeFilter>(server_, ssl_sig_none);
+   filter->EnableDecryption();
+@@ -1456,6 +1459,8 @@ TEST_P(TlsConnectTls13, UnsupportedSigna
+ 
+ TEST_P(TlsConnectTls13, InconsistentSignatureSchemeAlert) {
+   EnsureTlsSetup();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+ 
+   // This won't work because we use an RSA cert by default.
+   auto filter = MakeTlsFilter<TlsReplaceSignatureSchemeFilter>(
+@@ -1603,6 +1608,7 @@ static SECStatus AuthCompleteBlock(TlsAg
+ // processed by the client, SSL_AuthCertificateComplete() is called.
+ TEST_F(TlsConnectDatagram13, AuthCompleteBeforeFinished) {
+   client_->SetAuthCertificateCallback(AuthCompleteBlock);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   MakeTlsFilter<BeforeFinished13>(server_, client_, [this]() {
+     EXPECT_EQ(SECSuccess, SSL_AuthCertificateComplete(client_->ssl_fd(), 0));
+   });
+@@ -2036,8 +2042,7 @@ class TlsSignatureSchemeConfiguration
+     EnsureTlsSetup();
+     configPeer->SetSignatureSchemes(&signature_scheme_, 1);
+     Connect();
+-    CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, auth_type_,
+-              signature_scheme_);
++    CheckKeys(auth_type_, signature_scheme_);
+   }
+ 
+   std::string certificate_;
+@@ -2071,7 +2076,7 @@ TEST_P(TlsSignatureSchemeConfiguration,
+   client_->SetSignatureSchemes(&signature_scheme_, 1);
+   server_->SetSignatureSchemes(&signature_scheme_, 1);
+   Connect();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, auth_type_, signature_scheme_);
++  CheckKeys(auth_type_, signature_scheme_);
+ }
+ 
+ class Tls12CertificateRequestReplacer : public TlsHandshakeFilter {
+diff -up ./gtests/ssl_gtest/ssl_ciphersuite_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_ciphersuite_unittest.cc
+--- ./gtests/ssl_gtest/ssl_ciphersuite_unittest.cc.mlkem_p256	2025-06-25 16:47:19.368362838 -0700
++++ ./gtests/ssl_gtest/ssl_ciphersuite_unittest.cc	2025-06-25 16:47:19.375362928 -0700
+@@ -42,6 +42,7 @@ class TlsCipherSuiteTestBase : public Tl
+     EXPECT_EQ(SECSuccess, rv);
+     if (rv == SECSuccess) {
+       std::cerr << "Cipher suite: " << csinfo_.cipherSuiteName << std::endl;
++      std::cerr << "KEA: " << csinfo_.keaType << std::endl;
+     }
+     auth_type_ = csinfo_.authType;
+     kea_type_ = csinfo_.keaType;
+diff -up ./gtests/ssl_gtest/ssl_damage_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_damage_unittest.cc
+--- ./gtests/ssl_gtest/ssl_damage_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_damage_unittest.cc	2025-06-25 16:47:19.375362928 -0700
+@@ -60,6 +60,8 @@ TEST_F(TlsConnectTest, DamageSecretHandl
+ 
+ TEST_P(TlsConnectGenericPre13, DamageServerSignature) {
+   EnsureTlsSetup();
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   auto filter = MakeTlsFilter<TlsLastByteDamager>(
+       server_, kTlsHandshakeServerKeyExchange);
+   ExpectAlert(client_, kTlsAlertDecryptError);
+@@ -70,6 +72,8 @@ TEST_P(TlsConnectGenericPre13, DamageSer
+ 
+ TEST_P(TlsConnectTls13, DamageServerSignature) {
+   EnsureTlsSetup();
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   auto filter = MakeTlsFilter<TlsLastByteDamager>(
+       server_, kTlsHandshakeCertificateVerify);
+   filter->EnableDecryption();
+diff -up ./gtests/ssl_gtest/ssl_dhe_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_dhe_unittest.cc
+--- ./gtests/ssl_gtest/ssl_dhe_unittest.cc.mlkem_p256	2025-06-25 16:47:19.368362838 -0700
++++ ./gtests/ssl_gtest/ssl_dhe_unittest.cc	2025-06-25 16:47:19.375362928 -0700
+@@ -29,7 +29,7 @@ TEST_P(TlsConnectGeneric, ConnectDhe) {
+ 
+ TEST_P(TlsConnectTls13, SharesForBothEcdheAndDhe) {
+   EnsureTlsSetup();
+-  client_->ConfigNamedGroups(kAllDHEGroups);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+ 
+   auto groups_capture =
+       std::make_shared<TlsExtensionCapture>(client_, ssl_supported_groups_xtn);
+@@ -41,7 +41,7 @@ TEST_P(TlsConnectTls13, SharesForBothEcd
+ 
+   Connect();
+ 
+-  CheckKeys();
++  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
+ 
+   bool ec, dh;
+   auto track_group_type = [&ec, &dh](SSLNamedGroup group) {
+diff -up ./gtests/ssl_gtest/ssl_drop_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_drop_unittest.cc
+--- ./gtests/ssl_gtest/ssl_drop_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_drop_unittest.cc	2025-06-25 16:47:19.375362928 -0700
+@@ -201,6 +201,8 @@ class TlsDropDatagram13 : public TlsConn
+ // ACKs
+ TEST_P(TlsDropDatagram13, DropClientFirstFlightOnce) {
+   client_filters_.drop_->Reset({0});
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   StartConnect();
+   client_->Handshake();
+   server_->Handshake();
+@@ -210,6 +212,8 @@ TEST_P(TlsDropDatagram13, DropClientFirs
+ 
+ TEST_P(TlsDropDatagram13, DropServerFirstFlightOnce) {
+   server_filters_.drop_->Reset(0xff);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   StartConnect();
+   client_->Handshake();
+   // Send the first flight, all dropped.
+@@ -224,6 +228,8 @@ TEST_P(TlsDropDatagram13, DropServerFirs
+ // TODO(ekr@rtfm.com): We should generate an empty ACK.
+ TEST_P(TlsDropDatagram13, DropServerFirstRecordOnce) {
+   server_filters_.drop_->Reset({0});
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   StartConnect();
+   client_->Handshake();
+   server_->Handshake();
+@@ -236,6 +242,8 @@ TEST_P(TlsDropDatagram13, DropServerFirs
+ // produce an ACK.
+ TEST_P(TlsDropDatagram13, DropServerSecondRecordOnce) {
+   server_filters_.drop_->Reset({1});
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   StartConnect();
+   client_->Handshake();
+   server_->Handshake();
+@@ -299,6 +307,8 @@ TEST_P(TlsDropDatagram13, DropClientCert
+ // Shrink the MTU down so that certs get split and drop the first piece.
+ TEST_P(TlsDropDatagram13, DropFirstHalfOfServerCertificate) {
+   server_filters_.drop_->Reset({2});
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   StartConnect();
+   ShrinkPostServerHelloMtu();
+   client_->Handshake();
+@@ -326,6 +336,8 @@ TEST_P(TlsDropDatagram13, DropFirstHalfO
+ // Shrink the MTU down so that certs get split and drop the second piece.
+ TEST_P(TlsDropDatagram13, DropSecondHalfOfServerCertificate) {
+   server_filters_.drop_->Reset({3});
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   StartConnect();
+   ShrinkPostServerHelloMtu();
+   client_->Handshake();
+@@ -414,6 +426,8 @@ class TlsFragmentationAndRecoveryTest :
+ 
+  private:
+   void FirstFlightDropCertificate() {
++    client_->ConfigNamedGroups(kNonPQDHEGroups);
++    server_->ConfigNamedGroups(kNonPQDHEGroups);
+     StartConnect();
+     client_->Handshake();
+ 
+@@ -561,6 +575,8 @@ TEST_P(TlsDropDatagram13, NoDropsDuringZ
+ 
+ TEST_P(TlsDropDatagram13, DropEEDuringZeroRtt) {
+   SetupForZeroRtt();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   SetFilters();
+   std::cerr << "Starting second handshake" << std::endl;
+   client_->Set0RttEnabled(true);
+@@ -606,6 +622,8 @@ class TlsReorderDatagram13 : public TlsD
+ // of the flight and will still produce an ACK.
+ TEST_P(TlsDropDatagram13, ReorderServerEE) {
+   server_filters_.drop_->Reset({1});
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   StartConnect();
+   client_->Handshake();
+   server_->Handshake();
+@@ -684,6 +702,8 @@ TEST_F(TlsConnectDatagram13, SendOutOfOr
+ // Shrink the MTU down so that certs get split and then swap the first and
+ // second pieces of the server certificate.
+ TEST_P(TlsReorderDatagram13, ReorderServerCertificate) {
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   StartConnect();
+   ShrinkPostServerHelloMtu();
+   client_->Handshake();
+diff -up ./gtests/ssl_gtest/ssl_ecdh_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_ecdh_unittest.cc
+--- ./gtests/ssl_gtest/ssl_ecdh_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_ecdh_unittest.cc	2025-06-25 16:47:19.376362941 -0700
+@@ -490,7 +490,7 @@ TEST_P(TlsKeyExchangeTest13, EqualPriori
+ 
+   Connect();
+ 
+-  CheckKeys();
++  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
+   const std::vector<SSLNamedGroup> shares = {ssl_grp_ec_curve25519};
+   CheckKEXDetails(client_groups, shares);
+ }
+diff -up ./gtests/ssl_gtest/ssl_exporter_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_exporter_unittest.cc
+--- ./gtests/ssl_gtest/ssl_exporter_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_exporter_unittest.cc	2025-06-25 16:47:19.376362941 -0700
+@@ -82,8 +82,11 @@ TEST_P(TlsConnectGenericPre13, ExporterC
+       0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xFF};
+ 
+   EnsureTlsSetup();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   Connect();
+-  CheckKeys();
++  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++
+ 
+   static const size_t exporter_len = 10;
+   uint8_t client_value[exporter_len] = {0};
+diff -up ./gtests/ssl_gtest/ssl_extension_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_extension_unittest.cc
+--- ./gtests/ssl_gtest/ssl_extension_unittest.cc.mlkem_p256	2025-06-25 16:47:19.368362838 -0700
++++ ./gtests/ssl_gtest/ssl_extension_unittest.cc	2025-06-25 16:47:19.376362941 -0700
+@@ -1314,6 +1314,9 @@ TEST_P(TlsDisallowedUnadvertisedExtensio
+ 
+ TEST_P(TlsConnectStream, IncludePadding) {
+   EnsureTlsSetup();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
++
+   SSL_EnableTls13GreaseEch(client_->ssl_fd(), PR_FALSE);  // Don't GREASE
+ 
+   // This needs to be long enough to push a TLS 1.0 ClientHello over 255, but
+@@ -1372,7 +1375,7 @@ TEST_F(TlsConnectStreamTls13, ClientHell
+                             PR_TRUE) == SECSuccess);
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
++  CheckKeys(ssl_kea_ecdh_hybrid, ssl_grp_kem_mlkem768x25519, ssl_auth_psk, ssl_sig_none);
+ }
+ 
+ /* This test checks that the ClientHello extension order is actually permuted
+diff -up ./gtests/ssl_gtest/ssl_gtest.gyp.mlkem_p256 ./gtests/ssl_gtest/ssl_gtest.gyp
+--- ./gtests/ssl_gtest/ssl_gtest.gyp.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_gtest.gyp	2025-06-25 16:47:19.376362941 -0700
+@@ -63,7 +63,6 @@
+         'tls_protect.cc',
+         'tls_psk_unittest.cc',
+         'tls_subcerts_unittest.cc',
+-        'tls_xyber_unittest.cc',
+       ],
+       'dependencies': [
+         '<(DEPTH)/exports.gyp:nss_exports',
+diff -up ./gtests/ssl_gtest/ssl_hrr_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_hrr_unittest.cc
+--- ./gtests/ssl_gtest/ssl_hrr_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_hrr_unittest.cc	2025-06-25 16:47:19.376362941 -0700
+@@ -22,6 +22,7 @@ TEST_P(TlsConnectTls13, HelloRetryReques
+   const PRInt32 k0RttDataLen = static_cast<PRInt32>(strlen(k0RttData));
+ 
+   SetupForZeroRtt();  // initial handshake as normal
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+ 
+   static const std::vector<SSLNamedGroup> groups = {ssl_grp_ec_secp384r1,
+                                                     ssl_grp_ec_secp521r1};
+@@ -107,6 +108,7 @@ TEST_P(TlsConnectTls13, SecondClientHell
+   auto orig_client =
+       std::make_shared<TlsAgent>(client_->name(), TlsAgent::CLIENT, variant_);
+   client_.swap(orig_client);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   client_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_1,
+                            SSL_LIBRARY_VERSION_TLS_1_3);
+   client_->ConfigureSessionCache(RESUME_BOTH);
+@@ -370,6 +372,7 @@ TEST_P(TlsConnectTls13, RetryCallbackRet
+   size_t cb_called = 0;
+   EXPECT_EQ(SECSuccess, SSL_HelloRetryRequestCallback(server_->ssl_fd(),
+                                                       RetryHello, &cb_called));
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+ 
+   // Do the first message exchange.
+   StartConnect();
+@@ -417,6 +420,7 @@ TEST_P(TlsConnectTls13, RetryCallbackRet
+   size_t cb_called = 0;
+   EXPECT_EQ(SECSuccess, SSL_HelloRetryRequestCallback(server_->ssl_fd(),
+                                                       RetryHello, &cb_called));
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+ 
+   // Do the first message exchange.
+   StartConnect();
+@@ -950,7 +954,7 @@ TEST_P(TlsKeyExchange13, ConnectEcdhePre
+   client_->ConfigNamedGroups(client_groups);
+   server_->ConfigNamedGroups(server_groups);
+   Connect();
+-  CheckKeys();
++  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519);
+   static const std::vector<SSLNamedGroup> expectedShares = {
+       ssl_grp_ec_secp384r1};
+   CheckKEXDetails(client_groups, expectedShares, ssl_grp_ec_curve25519);
+@@ -997,7 +1001,7 @@ TEST_P(TlsKeyExchange13, ConnectEcdhePre
+   EXPECT_EQ(SECSuccess, SSL_SendAdditionalKeyShares(client_->ssl_fd(), 1));
+ 
+   Connect();
+-  CheckKeys();
++  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519);
+   CheckKEXDetails(client_groups, client_groups);
+ }
+ 
+@@ -1043,7 +1047,7 @@ TEST_P(TlsKeyExchange13,
+   EXPECT_EQ(2U, cb_called);
+   EXPECT_TRUE(shares_capture2_->captured()) << "client should send shares";
+ 
+-  CheckKeys();
++  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519);
+   static const std::vector<SSLNamedGroup> client_shares(
+       client_groups.begin(), client_groups.begin() + 2);
+   CheckKEXDetails(client_groups, client_shares, server_groups[0]);
+diff -up ./gtests/ssl_gtest/ssl_keyupdate_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_keyupdate_unittest.cc
+--- ./gtests/ssl_gtest/ssl_keyupdate_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_keyupdate_unittest.cc	2025-06-25 16:47:19.376362941 -0700
+@@ -1180,6 +1180,8 @@ TEST_F(TlsConnectDatagram13, DTLSKU_Wron
+ 
+ TEST_F(TlsConnectDatagram13, DTLSKU_DamagedLength) {
+   EnsureTlsSetup();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   // Filter replacing the length value with 0.
+   auto filter = MakeTlsFilter<TLSKeyUpdateDamager>(client_, 3, 0);
+   filter->EnableDecryption();
+@@ -1217,6 +1219,8 @@ TEST_F(TlsConnectDatagram13, DTLSKU_Dama
+ 
+ TEST_F(TlsConnectDatagram13, DTLSKU_DamagedFragmentLength) {
+   EnsureTlsSetup();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   // Filter replacing the fragment length with 1.
+   auto filter = MakeTlsFilter<TLSKeyUpdateDamager>(client_, 10, 1);
+   filter->EnableDecryption();
+@@ -1498,4 +1502,4 @@ TEST_F(TlsConnectDatagram13, DTLSKU_TooE
+   client_->CheckErrorCode(SSL_ERROR_HANDSHAKE_UNEXPECTED_ALERT);
+ }
+ 
+-}  // namespace nss_test
+\ No newline at end of file
++}  // namespace nss_test
+diff -up ./gtests/ssl_gtest/ssl_loopback_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_loopback_unittest.cc
+--- ./gtests/ssl_gtest/ssl_loopback_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_loopback_unittest.cc	2025-06-25 16:47:19.376362941 -0700
+@@ -37,7 +37,7 @@ TEST_P(TlsConnectGeneric, ConnectEcdsa)
+   SetExpectedVersion(std::get<1>(GetParam()));
+   Reset(TlsAgent::kServerEcdsa256);
+   Connect();
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_ecdsa);
++  CheckKeys(ssl_auth_ecdsa);
+ }
+ 
+ TEST_P(TlsConnectGeneric, CipherSuiteMismatch) {
+diff -up ./gtests/ssl_gtest/ssl_recordsep_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_recordsep_unittest.cc
+--- ./gtests/ssl_gtest/ssl_recordsep_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_recordsep_unittest.cc	2025-06-25 16:47:19.376362941 -0700
+@@ -344,6 +344,8 @@ static void SendForwardReceive(std::shar
+ }
+ 
+ TEST_P(TlsConnectStream, ReplaceRecordLayer) {
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   StartConnect();
+   client_->SetServerKeyBits(server_->server_key_bits());
+ 
+@@ -387,7 +389,7 @@ TEST_P(TlsConnectStream, ReplaceRecordLa
+     client_stage.ForwardAll(server_, TlsAgent::STATE_CONNECTED);
+     server_stage.ForwardAll(client_, TlsAgent::STATE_CONNECTED);
+   }
+-  CheckKeys();
++  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign); // why?
+ 
+   // Reading and writing application data should work.
+   SendForwardReceive(client_, client_stage, server_);
+@@ -445,6 +447,8 @@ static SECStatus AuthCompleteBlock(TlsAg
+ }
+ 
+ TEST_P(TlsConnectStream, ReplaceRecordLayerAsyncLateAuth) {
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   StartConnect();
+   client_->SetServerKeyBits(server_->server_key_bits());
+ 
+@@ -494,7 +498,7 @@ TEST_P(TlsConnectStream, ReplaceRecordLa
+     client_stage.ForwardAll(server_, TlsAgent::STATE_CONNECTED);
+     server_stage.ForwardAll(client_, TlsAgent::STATE_CONNECTED);
+   }
+-  CheckKeys();
++  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign); // why?
+ 
+   // Reading and writing application data should work.
+   SendForwardReceive(client_, client_stage, server_);
+diff -up ./gtests/ssl_gtest/ssl_recordsize_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_recordsize_unittest.cc
+--- ./gtests/ssl_gtest/ssl_recordsize_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_recordsize_unittest.cc	2025-06-25 16:47:19.376362941 -0700
+@@ -275,6 +275,7 @@ TEST_F(TlsConnectStreamTls13, ClientHell
+   auto filter =
+       MakeTlsFilter<TlsHandshakeRecorder>(client_, kTlsHandshakeClientHello);
+ 
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   // Add PSK with label long enough to push CH length into [256, 511].
+   std::vector<uint8_t> label(100);
+   EXPECT_EQ(SECSuccess,
+@@ -723,4 +724,4 @@ TEST_P(TlsConnectGeneric, RecordSizeLimi
+   }
+ }
+ 
+-}  // namespace nss_test
+\ No newline at end of file
++}  // namespace nss_test
+diff -up ./gtests/ssl_gtest/ssl_resumption_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_resumption_unittest.cc
+--- ./gtests/ssl_gtest/ssl_resumption_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_resumption_unittest.cc	2025-06-25 16:47:19.376362941 -0700
+@@ -175,11 +175,15 @@ TEST_P(TlsConnectGenericResumption, Conn
+ TEST_P(TlsConnectGenericPre13, ResumeWithHigherVersionTls13) {
+   uint16_t lower_version = version_;
+   ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   Connect();
+   SendReceive();
+   CheckKeys();
+ 
+   Reset();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+   EnsureTlsSetup();
+   auto psk_ext = std::make_shared<TlsExtensionCapture>(
+@@ -244,6 +248,8 @@ TEST_P(TlsConnectGenericPre13, ResumeWit
+   // connection.  This looks like compatibility mode, we just want to ensure
+   // that we get TLS 1.3 rather than 1.2 (and no resumption).
+   Reset();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   auto client_sid = MakeTlsFilter<CaptureSessionId>(client_);
+   auto server_sid = MakeTlsFilter<CaptureSessionId>(server_);
+   ConfigureSessionCache(RESUME_SESSIONID, RESUME_SESSIONID);
+@@ -359,12 +365,14 @@ TEST_P(TlsConnectGenericResumption, Conn
+ TEST_P(TlsConnectGeneric, ConnectWithExpiredTicketAtServer) {
+   // This causes a ticket resumption.
+   ConfigureSessionCache(RESUME_BOTH, RESUME_TICKET);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   Connect();
+   SendReceive();
+ 
+   Reset();
+   ConfigureSessionCache(RESUME_BOTH, RESUME_TICKET);
+   ExpectResumption(RESUME_NONE);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+ 
+   SSLExtensionType xtn = (version_ >= SSL_LIBRARY_VERSION_TLS_1_3)
+                              ? ssl_tls13_pre_shared_key_xtn
+@@ -453,7 +461,7 @@ TEST_P(TlsConnectGeneric, ServerSNICertT
+   Connect();
+   ScopedCERTCertificate cert2(SSL_PeerCertificate(client_->ssl_fd()));
+   ASSERT_NE(nullptr, cert2.get());
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_ecdsa);
++  CheckKeys(ssl_auth_ecdsa);
+   EXPECT_TRUE(SECITEM_ItemsAreEqual(&cert1->derCert, &cert2->derCert));
+ }
+ 
+@@ -613,7 +621,7 @@ TEST_P(TlsConnectGenericResumption, Resu
+   client_->EnableSingleCipher(ChooseOneCipher(version_));
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++  CheckKeys(ssl_auth_rsa_sign);
+ 
+   Reset();
+   ConfigureSessionCache(RESUME_BOTH, RESUME_TICKET);
+@@ -628,7 +636,7 @@ TEST_P(TlsConnectGenericResumption, Resu
+   auto ticket_capture =
+       MakeTlsFilter<TlsExtensionCapture>(client_, ticket_extension);
+   Connect();
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++  CheckKeys(ssl_auth_rsa_sign);
+   EXPECT_EQ(0U, ticket_capture->extension().len());
+ }
+ 
+@@ -655,7 +663,7 @@ TEST_P(TlsConnectStream, ResumptionOverr
+   server_->EnableSingleCipher(ChooseOneCipher(version_));
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++  CheckKeys();
+ 
+   Reset();
+   ConfigureSessionCache(RESUME_BOTH, RESUME_TICKET);
+@@ -793,8 +801,7 @@ TEST_F(TlsConnectTest, TestTls13Resumpti
+       MakeTlsFilter<TlsExtensionCapture>(client_, ssl_tls13_pre_shared_key_xtn);
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_sign,
+-            ssl_sig_rsa_pss_rsae_sha256);
++  CheckKeys(ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
+   // The filter will go away when we reset, so save the captured extension.
+   DataBuffer initialTicket(c1->extension());
+   ASSERT_LT(0U, initialTicket.len());
+@@ -811,8 +818,7 @@ TEST_F(TlsConnectTest, TestTls13Resumpti
+   ExpectResumption(RESUME_TICKET);
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_sign,
+-            ssl_sig_rsa_pss_rsae_sha256);
++  CheckKeys(ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
+   ASSERT_LT(0U, c2->extension().len());
+ 
+   ScopedCERTCertificate cert2(SSL_PeerCertificate(client_->ssl_fd()));
+@@ -1089,7 +1095,7 @@ TEST_F(TlsConnectTest, TestTls13Resumpti
+   Handshake();
+ 
+   SendReceive();
+-  CheckKeys();
++  CheckKeys(ssl_kea_ecdh);
+ }
+ 
+ TEST_F(TlsConnectTest, TestTls13ResumptionForcedDowngrade) {
+@@ -1144,15 +1150,15 @@ TEST_P(TlsConnectGenericResumption, ReCo
+   server_->EnableSingleCipher(ChooseOneCipher(version_));
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_sign,
+-            ssl_sig_rsa_pss_rsae_sha256);
++  CheckKeys(ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
+   // Resume
+   Reset();
+   ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+   ExpectResumption(RESUME_TICKET);
+   Connect();
+   // Only the client knows this.
+-  CheckKeysResumption(ssl_kea_ecdh, ssl_grp_none, ssl_grp_ec_curve25519,
++  CheckKeysResumption(GetDefaultKEA(), ssl_grp_none,
++                      GetDefaultGroupFromKEA(GetDefaultKEA()),
+                       ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
+ }
+ 
+@@ -1161,13 +1167,13 @@ TEST_P(TlsConnectGenericPre13, ReConnect
+   server_->EnableSingleCipher(ChooseOneCipher(version_));
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_sign,
+-            ssl_sig_rsa_pss_rsae_sha256);
++  CheckKeys(ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
+   // Resume
+   Reset();
+   ExpectResumption(RESUME_SESSIONID);
+   Connect();
+-  CheckKeysResumption(ssl_kea_ecdh, ssl_grp_none, ssl_grp_ec_curve25519,
++  CheckKeysResumption(GetDefaultKEA(), ssl_grp_none,
++                      GetDefaultGroupFromKEA(GetDefaultKEA()),
+                       ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
+ }
+ 
+@@ -1176,15 +1182,15 @@ TEST_P(TlsConnectGenericResumption, ReCo
+   server_->EnableSingleCipher(ChooseOneCipher(version_));
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_rsa_sign,
+-            ssl_sig_rsa_pss_rsae_sha256);
++  CheckKeys(ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
+   // Resume
+   Reset();
+   ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+   ExpectResumption(RESUME_TICKET);
+   Connect();
+   // Only the client knows this.
+-  CheckKeysResumption(ssl_kea_ecdh, ssl_grp_none, ssl_grp_ec_curve25519,
++  CheckKeysResumption(GetDefaultKEA(), ssl_grp_none,
++                      GetDefaultGroupFromKEA(GetDefaultKEA()),
+                       ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
+   // Resume connection again
+   Reset();
+@@ -1192,7 +1198,8 @@ TEST_P(TlsConnectGenericResumption, ReCo
+   ExpectResumption(RESUME_TICKET, 2);
+   Connect();
+   // Only the client knows this.
+-  CheckKeysResumption(ssl_kea_ecdh, ssl_grp_none, ssl_grp_ec_curve25519,
++  CheckKeysResumption(GetDefaultKEA(), ssl_grp_none,
++                      GetDefaultGroupFromKEA(GetDefaultKEA()),
+                       ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
+ }
+ 
+@@ -1219,11 +1226,15 @@ void CheckGetInfoResult(PRTime now, uint
+ // when resuming using an external token.
+ TEST_P(TlsConnectGenericResumptionToken, CheckSessionId) {
+   ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   auto original_sid = MakeTlsFilter<CaptureSessionId>(client_);
+   Connect();
+   SendReceive();
+ 
+   Reset();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
++  server_->ConfigNamedGroups(kNonPQDHEGroups);
+   ConfigureSessionCache(RESUME_BOTH, RESUME_BOTH);
+   ExpectResumption(RESUME_TICKET);
+ 
+diff -up ./gtests/ssl_gtest/ssl_skip_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_skip_unittest.cc
+--- ./gtests/ssl_gtest/ssl_skip_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_skip_unittest.cc	2025-06-25 16:47:19.376362941 -0700
+@@ -114,6 +114,9 @@ class Tls13SkipTest : public TlsConnectT
+   void SetUp() override {
+     TlsConnectTestBase::SetUp();
+     EnsureTlsSetup();
++    // until we can fix filters to work with MLKEM
++    client_->ConfigNamedGroups(kNonPQDHEGroups);
++    server_->ConfigNamedGroups(kNonPQDHEGroups);
+   }
+ 
+   void ServerSkipTest(std::shared_ptr<TlsRecordFilter> filter, int32_t error) {
+diff -up ./gtests/ssl_gtest/ssl_tls13compat_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_tls13compat_unittest.cc
+--- ./gtests/ssl_gtest/ssl_tls13compat_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_tls13compat_unittest.cc	2025-06-25 16:47:19.377362953 -0700
+@@ -482,6 +482,7 @@ TEST_F(TlsConnectDatagram13, CompatModeD
+   client_->SetOption(SSL_ENABLE_TLS13_COMPAT_MODE, PR_TRUE);
+   auto client_records = MakeTlsFilter<TlsRecordRecorder>(client_);
+   auto server_records = MakeTlsFilter<TlsRecordRecorder>(server_);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   Connect();
+ 
+   ASSERT_EQ(2U, client_records->count());  // CH, Fin
+@@ -522,6 +523,7 @@ class AddSessionIdFilter : public TlsHan
+ // mode.  It should be ignored instead.
+ TEST_F(TlsConnectDatagram13, CompatModeDtlsServer) {
+   EnsureTlsSetup();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   auto client_records = std::make_shared<TlsRecordRecorder>(client_);
+   client_->SetFilter(
+       std::make_shared<ChainedPacketFilter>(ChainedPacketFilterInit(
+diff -up ./gtests/ssl_gtest/ssl_version_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/ssl_version_unittest.cc
+--- ./gtests/ssl_gtest/ssl_version_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/ssl_version_unittest.cc	2025-06-25 16:47:19.377362953 -0700
+@@ -370,6 +370,7 @@ TEST_F(DtlsConnectTest, DtlsSupportedVer
+                            SSL_LIBRARY_VERSION_TLS_1_3);
+   auto capture = MakeTlsFilter<TlsExtensionCapture>(
+       client_, ssl_tls13_supported_versions_xtn);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   Connect();
+ 
+   ASSERT_EQ(7U, capture->extension().len());
+@@ -393,6 +394,7 @@ TEST_F(DtlsConnectTest, Dtls13VersionWor
+ 
+   // Toggle the workaround, then verify both encodings are present.
+   EnsureTlsSetup();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   SSL_SetDtls13VersionWorkaround(client_->ssl_fd(), PR_TRUE);
+   SSL_SetDtls13VersionWorkaround(client_->ssl_fd(), PR_FALSE);
+   SSL_SetDtls13VersionWorkaround(client_->ssl_fd(), PR_TRUE);
+diff -up ./gtests/ssl_gtest/tls_agent.cc.mlkem_p256 ./gtests/ssl_gtest/tls_agent.cc
+--- ./gtests/ssl_gtest/tls_agent.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/tls_agent.cc	2025-06-25 16:47:19.377362953 -0700
+@@ -522,12 +522,25 @@ const std::vector<SSLNamedGroup> kAllDHE
+     ssl_grp_ec_curve25519,   ssl_grp_ec_secp256r1,       ssl_grp_ec_secp384r1,
+     ssl_grp_ec_secp521r1,    ssl_grp_ffdhe_2048,         ssl_grp_ffdhe_3072,
+     ssl_grp_ffdhe_4096,      ssl_grp_ffdhe_6144,         ssl_grp_ffdhe_8192,
+-    ssl_grp_kem_xyber768d00, ssl_grp_kem_mlkem768x25519,
++#ifndef NSS_DISABLE_KYBER
++    ssl_grp_kem_xyber768d00,
++#endif
++    ssl_grp_kem_mlkem768x25519, ssl_grp_kem_secp256r1mlkem768,
++};
++
++const std::vector<SSLNamedGroup> kNonPQDHEGroups = {
++    ssl_grp_ec_curve25519,   ssl_grp_ec_secp256r1,       ssl_grp_ec_secp384r1,
++    ssl_grp_ec_secp521r1,    ssl_grp_ffdhe_2048,         ssl_grp_ffdhe_3072,
++    ssl_grp_ffdhe_4096,      ssl_grp_ffdhe_6144,         ssl_grp_ffdhe_8192,
+ };
+ 
+ const std::vector<SSLNamedGroup> kECDHEGroups = {
+     ssl_grp_ec_curve25519, ssl_grp_ec_secp256r1,    ssl_grp_ec_secp384r1,
+-    ssl_grp_ec_secp521r1,  ssl_grp_kem_xyber768d00, ssl_grp_kem_mlkem768x25519,
++    ssl_grp_ec_secp521r1,
++#ifndef NSS_DISABLE_KYBER
++    ssl_grp_kem_xyber768d00,
++#endif
++    ssl_grp_kem_mlkem768x25519, ssl_grp_kem_secp256r1mlkem768
+ };
+ 
+ const std::vector<SSLNamedGroup> kFFDHEGroups = {
+@@ -537,13 +550,19 @@ const std::vector<SSLNamedGroup> kFFDHEG
+ // Defined because the big DHE groups are ridiculously slow.
+ const std::vector<SSLNamedGroup> kFasterDHEGroups = {
+     ssl_grp_ec_curve25519,      ssl_grp_ec_secp256r1, ssl_grp_ec_secp384r1,
+-    ssl_grp_ffdhe_2048,         ssl_grp_ffdhe_3072,   ssl_grp_kem_xyber768d00,
+-    ssl_grp_kem_mlkem768x25519,
++    ssl_grp_ffdhe_2048,         ssl_grp_ffdhe_3072,
++#ifndef NSS_DISABLE_KYBER
++    ssl_grp_kem_xyber768d00,
++#endif
++    ssl_grp_kem_mlkem768x25519, ssl_grp_kem_secp256r1mlkem768,
+ };
+ 
+ const std::vector<SSLNamedGroup> kEcdhHybridGroups = {
++#ifndef NSS_DISABLE_KYBER
+     ssl_grp_kem_xyber768d00,
++#endif
+     ssl_grp_kem_mlkem768x25519,
++    ssl_grp_kem_secp256r1mlkem768,
+ };
+ 
+ void TlsAgent::EnableCiphersByKeyExchange(SSLKEAType kea) {
+@@ -711,11 +730,14 @@ void TlsAgent::CheckKEA(SSLKEAType kea,
+   if (kea_size == 0) {
+     switch (kea_group) {
+       case ssl_grp_ec_curve25519:
++#ifndef NSS_DISABLE_KYBER
+       case ssl_grp_kem_xyber768d00:
++#endif
+       case ssl_grp_kem_mlkem768x25519:
+         kea_size = 255;
+         break;
+       case ssl_grp_ec_secp256r1:
++      case ssl_grp_kem_secp256r1mlkem768:
+         kea_size = 256;
+         break;
+       case ssl_grp_ec_secp384r1:
+@@ -1344,6 +1366,10 @@ void TlsAgentTestBase::Reset(const std::
+   if (version_) {
+     agent_->SetVersionRange(version_, version_);
+   }
++  const std::vector<SSLNamedGroup> groups = {
++      ssl_grp_ec_curve25519, ssl_grp_ec_secp256r1, ssl_grp_ec_secp384r1,
++      ssl_grp_ffdhe_2048};
++  agent_->ConfigNamedGroups(groups);
+   agent_->adapter()->SetPeer(sink_adapter_);
+   agent_->StartConnect();
+ }
+diff -up ./gtests/ssl_gtest/tls_agent.h.mlkem_p256 ./gtests/ssl_gtest/tls_agent.h
+--- ./gtests/ssl_gtest/tls_agent.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/tls_agent.h	2025-06-25 16:47:19.377362953 -0700
+@@ -52,6 +52,7 @@ class TlsCipherSpec;
+ struct TlsRecord;
+ 
+ const extern std::vector<SSLNamedGroup> kAllDHEGroups;
++const extern std::vector<SSLNamedGroup> kNonPQDHEGroups;
+ const extern std::vector<SSLNamedGroup> kECDHEGroups;
+ const extern std::vector<SSLNamedGroup> kFFDHEGroups;
+ const extern std::vector<SSLNamedGroup> kFasterDHEGroups;
+diff -up ./gtests/ssl_gtest/tls_connect.cc.mlkem_p256 ./gtests/ssl_gtest/tls_connect.cc
+--- ./gtests/ssl_gtest/tls_connect.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/tls_connect.cc	2025-06-25 16:47:19.377362953 -0700
+@@ -505,21 +505,23 @@ void TlsConnectTestBase::CheckEarlyDataL
+   EXPECT_EQ(expected_size, static_cast<size_t>(preinfo.maxEarlyDataSize));
+ }
+ 
+-void TlsConnectTestBase::CheckKeys(SSLKEAType kea_type, SSLNamedGroup kea_group,
+-                                   SSLAuthType auth_type,
+-                                   SSLSignatureScheme sig_scheme) const {
+-  if (kea_group != ssl_grp_none) {
+-    client_->CheckKEA(kea_type, kea_group);
+-    server_->CheckKEA(kea_type, kea_group);
++SSLKEAType TlsConnectTestBase::GetDefaultKEA(void) const {
++  if (version_ >= SSL_LIBRARY_VERSION_TLS_1_3) {
++    return ssl_kea_ecdh_hybrid;
+   }
+-  server_->CheckAuthType(auth_type, sig_scheme);
+-  client_->CheckAuthType(auth_type, sig_scheme);
++  return ssl_kea_ecdh;
+ }
+ 
+-void TlsConnectTestBase::CheckKeys(SSLKEAType kea_type,
+-                                   SSLAuthType auth_type) const {
++SSLAuthType TlsConnectTestBase::GetDefaultAuth(void) const {
++  return ssl_auth_rsa_sign;
++}
++
++SSLNamedGroup TlsConnectTestBase::GetDefaultGroupFromKEA(SSLKEAType kea_type) const {
+   SSLNamedGroup group;
+   switch (kea_type) {
++    case ssl_kea_ecdh_hybrid:
++      group = ssl_grp_kem_mlkem768x25519;
++      break;
+     case ssl_kea_ecdh:
+       group = ssl_grp_ec_curve25519;
+       break;
+@@ -534,7 +536,10 @@ void TlsConnectTestBase::CheckKeys(SSLKE
+       group = ssl_grp_none;
+       break;
+   }
++  return group;
++}
+ 
++SSLSignatureScheme TlsConnectTestBase::GetDefaultSchemeFromAuth(SSLAuthType auth_type) const {
+   SSLSignatureScheme scheme;
+   switch (auth_type) {
+     case ssl_auth_rsa_decrypt:
+@@ -561,11 +566,54 @@ void TlsConnectTestBase::CheckKeys(SSLKE
+       scheme = static_cast<SSLSignatureScheme>(0x0100);
+       break;
+   }
++  return scheme;
++}
++void TlsConnectTestBase::CheckKeys(SSLKEAType kea_type, SSLNamedGroup kea_group,
++                                   SSLAuthType auth_type,
++                                   SSLSignatureScheme sig_scheme) const {
++  if (kea_group != ssl_grp_none) {
++    client_->CheckKEA(kea_type, kea_group);
++    server_->CheckKEA(kea_type, kea_group);
++  }
++  server_->CheckAuthType(auth_type, sig_scheme);
++  client_->CheckAuthType(auth_type, sig_scheme);
++}
++
++void TlsConnectTestBase::CheckKeys(SSLKEAType kea_type,
++                                   SSLNamedGroup kea_group) const {
++  SSLAuthType auth_type = GetDefaultAuth();
++  SSLSignatureScheme scheme = GetDefaultSchemeFromAuth(auth_type);
++  CheckKeys(kea_type, kea_group, auth_type, scheme);
++}
++
++void TlsConnectTestBase::CheckKeys( SSLAuthType auth_type,
++                                    SSLSignatureScheme sig_scheme) const {
++  SSLKEAType kea_type = GetDefaultKEA();
++  SSLNamedGroup group = GetDefaultGroupFromKEA(kea_type);
++  CheckKeys(kea_type, group, auth_type, sig_scheme);
++}
++
++void TlsConnectTestBase::CheckKeys(SSLKEAType kea_type,
++                                   SSLAuthType auth_type) const {
++  SSLNamedGroup group = GetDefaultGroupFromKEA(kea_type);
++  SSLSignatureScheme scheme = GetDefaultSchemeFromAuth(auth_type);
+   CheckKeys(kea_type, group, auth_type, scheme);
+ }
+ 
++void TlsConnectTestBase::CheckKeys(SSLKEAType kea_type) const {
++  SSLAuthType auth_type = GetDefaultAuth();
++  CheckKeys(kea_type, auth_type);
++}
++
++void TlsConnectTestBase::CheckKeys(SSLAuthType auth_type) const {
++  SSLKEAType kea_type = GetDefaultKEA();
++  CheckKeys(kea_type, auth_type);
++}
++
+ void TlsConnectTestBase::CheckKeys() const {
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++  SSLKEAType kea_type = GetDefaultKEA();
++  SSLAuthType auth_type = GetDefaultAuth();
++  CheckKeys(kea_type, auth_type);
+ }
+ 
+ void TlsConnectTestBase::CheckKeysResumption(SSLKEAType kea_type,
+diff -up ./gtests/ssl_gtest/tls_connect.h.mlkem_p256 ./gtests/ssl_gtest/tls_connect.h
+--- ./gtests/ssl_gtest/tls_connect.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/tls_connect.h	2025-06-25 16:47:19.377362953 -0700
+@@ -83,11 +83,23 @@ class TlsConnectTestBase : public ::test
+   void ConnectWithCipherSuite(uint16_t cipher_suite);
+   void CheckEarlyDataLimit(const std::shared_ptr<TlsAgent>& agent,
+                            size_t expected_size);
++  // Get the default KEA for our tls version
++  SSLKEAType GetDefaultKEA(void) const;
++  // Get the default auth for our tls version
++  SSLAuthType GetDefaultAuth(void) const;
++  // Find the default group for a given KEA
++  SSLNamedGroup GetDefaultGroupFromKEA(SSLKEAType kea_type) const;
++  // Find the default scheam for a given auth
++  SSLSignatureScheme GetDefaultSchemeFromAuth(SSLAuthType auth_type) const;
+   // Check that the keys used in the handshake match expectations.
+   void CheckKeys(SSLKEAType kea_type, SSLNamedGroup kea_group,
+                  SSLAuthType auth_type, SSLSignatureScheme sig_scheme) const;
+-  // This version guesses some of the values.
++  // These version guesses some of the values.
++  void CheckKeys(SSLKEAType kea_type, SSLNamedGroup kea_group) const;
++  void CheckKeys(SSLAuthType auth_type, SSLSignatureScheme sig_scheme) const;
+   void CheckKeys(SSLKEAType kea_type, SSLAuthType auth_type) const;
++  void CheckKeys(SSLKEAType kea_type) const;
++  void CheckKeys(SSLAuthType auth_type) const;
+   // This version assumes defaults.
+   void CheckKeys() const;
+   // Check that keys on resumed sessions.
+@@ -103,6 +115,7 @@ class TlsConnectTestBase : public ::test
+ 
+   void ConfigureVersion(uint16_t version);
+   void SetExpectedVersion(uint16_t version);
++  uint16_t GetVersion(void) const { return version_; };
+   // Expect resumption of a particular type.
+   void ExpectResumption(SessionResumptionMode expected,
+                         uint8_t num_resumed = 1);
+diff -up ./gtests/ssl_gtest/tls_ech_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/tls_ech_unittest.cc
+--- ./gtests/ssl_gtest/tls_ech_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/tls_ech_unittest.cc	2025-06-25 16:47:19.377362953 -0700
+@@ -1106,7 +1106,7 @@ TEST_F(TlsConnectStreamTls13, EchAcceptW
+   Handshake();
+   CheckConnected();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
++  CheckKeys(ssl_auth_psk, ssl_sig_none);
+   // The PSK extension is present in CHOuter.
+   ASSERT_TRUE(filter->captured());
+ 
+diff -up ./gtests/ssl_gtest/tls_mlkem_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/tls_mlkem_unittest.cc
+--- ./gtests/ssl_gtest/tls_mlkem_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/tls_mlkem_unittest.cc	2025-06-25 16:47:19.377362953 -0700
+@@ -7,6 +7,7 @@
+ #include "ssl.h"
+ #include "sslerr.h"
+ #include "sslproto.h"
++#include "secmodti.h"  /* for SEC_OID_SECP256R1MLKEM768, remove when shipped upstream */
+ 
+ extern "C" {
+ // This is not something that should make you happy.
+@@ -30,7 +31,16 @@ TEST_P(TlsKeyExchangeTest13, Mlkem768x25
+             ssl_sig_rsa_pss_rsae_sha256);
+ }
+ 
+-TEST_P(TlsKeyExchangeTest, Tls12ClientMlkem768x25519NotSupported) {
++TEST_P(TlsKeyExchangeTest13, Mlkem768Secp256r1Supported) {
++  EnsureKeyShareSetup();
++  ConfigNamedGroups({ssl_grp_kem_secp256r1mlkem768});
++
++  Connect();
++  CheckKeys(ssl_kea_ecdh_hybrid, ssl_grp_kem_secp256r1mlkem768,
++            ssl_auth_rsa_sign, ssl_sig_rsa_pss_rsae_sha256);
++}
++
++TEST_P(TlsKeyExchangeTest, Tls12ClientMlkem768StartNotSupported) {
+   EnsureKeyShareSetup();
+   client_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_2,
+                            SSL_LIBRARY_VERSION_TLS_1_2);
+@@ -47,6 +57,7 @@ TEST_P(TlsKeyExchangeTest, Tls12ClientMl
+   std::vector<SSLNamedGroup> groups = GetGroupDetails(groups_capture_);
+   for (auto group : groups) {
+     EXPECT_NE(group, ssl_grp_kem_mlkem768x25519);
++    EXPECT_NE(group, ssl_grp_kem_secp256r1mlkem768);
+   }
+ }
+ 
+@@ -75,6 +86,31 @@ TEST_P(TlsKeyExchangeTest13, Tls12Server
+             ssl_sig_rsa_pss_rsae_sha256);
+ }
+ 
++TEST_P(TlsKeyExchangeTest13, Tls12ServerMlkem768Secp256r1NotSupported) {
++  EnsureKeyShareSetup();
++
++  client_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_2,
++                           SSL_LIBRARY_VERSION_TLS_1_3);
++  server_->SetVersionRange(SSL_LIBRARY_VERSION_TLS_1_2,
++                           SSL_LIBRARY_VERSION_TLS_1_2);
++
++  client_->DisableAllCiphers();
++  client_->EnableCiphersByKeyExchange(ssl_kea_ecdh);
++  client_->EnableCiphersByKeyExchange(ssl_kea_ecdh_hybrid);
++  client_->ConfigNamedGroups(
++      {ssl_grp_kem_secp256r1mlkem768, ssl_grp_ec_secp256r1});
++  EXPECT_EQ(SECSuccess, SSL_SendAdditionalKeyShares(client_->ssl_fd(), 1));
++
++  server_->EnableCiphersByKeyExchange(ssl_kea_ecdh);
++  server_->EnableCiphersByKeyExchange(ssl_kea_ecdh_hybrid);
++  server_->ConfigNamedGroups(
++      {ssl_grp_kem_secp256r1mlkem768, ssl_grp_ec_secp256r1});
++
++  Connect();
++  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_secp256r1, ssl_auth_rsa_sign,
++            ssl_sig_rsa_pss_rsae_sha256);
++}
++
+ TEST_P(TlsKeyExchangeTest13, Mlkem768x25519ClientDisabledByPolicy) {
+   EnsureKeyShareSetup();
+   client_->SetPolicy(SEC_OID_MLKEM768X25519, 0, NSS_USE_ALG_IN_SSL_KX);
+@@ -94,12 +130,37 @@ TEST_P(TlsKeyExchangeTest13, Mlkem768x25
+                   {ssl_grp_kem_mlkem768x25519}, ssl_grp_ec_secp256r1);
+ }
+ 
++TEST_P(TlsKeyExchangeTest13, Mlkem768Secp256r1ClientDisabledByPolicy) {
++  EnsureKeyShareSetup();
++  client_->SetPolicy(SEC_OID_SECP256R1MLKEM768, 0, NSS_USE_ALG_IN_SSL_KX);
++  ConfigNamedGroups({ssl_grp_kem_secp256r1mlkem768, ssl_grp_ec_secp256r1});
++
++  Connect();
++  CheckKEXDetails({ssl_grp_ec_secp256r1}, {ssl_grp_ec_secp256r1});
++}
++
++TEST_P(TlsKeyExchangeTest13, Mlkem768Secp256r1ServerDisabledByPolicy) {
++  EnsureKeyShareSetup();
++  server_->SetPolicy(SEC_OID_SECP256R1MLKEM768, 0, NSS_USE_ALG_IN_SSL_KX);
++  ConfigNamedGroups({ssl_grp_kem_secp256r1mlkem768, ssl_grp_ec_secp256r1});
++
++  Connect();
++  CheckKEXDetails({ssl_grp_kem_secp256r1mlkem768, ssl_grp_ec_secp256r1},
++                  {ssl_grp_kem_secp256r1mlkem768}, ssl_grp_ec_secp256r1);
++}
++
+ static void CheckECDHShareReuse(
+     const std::shared_ptr<TlsExtensionCapture>& capture) {
+   EXPECT_TRUE(capture->captured());
+   const DataBuffer& ext = capture->extension();
+-  DataBuffer hybrid_share;
+-  DataBuffer x25519_share;
++  DataBuffer hybrid_share[4];
++  DataBuffer ecdh_share[4];
++  int hybrid_offset[4];
++  SSLNamedGroup hybrid_ec_type[4];
++  SSLNamedGroup ec_type[4];
++  int ecdh_index[4];
++  int nextHybrid = 0;
++  int nextECDH = 0;
+ 
+   size_t offset = 0;
+   uint32_t ext_len;
+@@ -112,11 +173,23 @@ static void CheckECDHShareReuse(
+   ext.Read(offset, 2, &named_group);
+   ext.Read(offset + 2, 2, &named_group_len);
+   while (offset < ext.len()) {
+-    if (named_group == ssl_grp_kem_mlkem768x25519) {
+-      hybrid_share = DataBuffer(ext.data() + offset + 2 + 2, named_group_len);
+-    }
+-    if (named_group == ssl_grp_ec_curve25519) {
+-      x25519_share = DataBuffer(ext.data() + offset + 2 + 2, named_group_len);
++    switch (named_group) {
++    case ssl_grp_kem_mlkem768x25519:
++      hybrid_share[nextHybrid] = DataBuffer(ext.data() + offset + 2 + 2, named_group_len);
++      hybrid_offset[nextHybrid] = KYBER768_PUBLIC_KEY_BYTES;
++      hybrid_ec_type[nextHybrid] = ssl_grp_ec_curve25519;
++      nextHybrid++;
++      break;
++    case ssl_grp_kem_secp256r1mlkem768:
++      hybrid_share[nextHybrid] = DataBuffer(ext.data() + offset + 2 + 2, named_group_len);
++      hybrid_offset[nextHybrid] = 0;
++      hybrid_ec_type[nextHybrid] = ssl_grp_ec_secp256r1;
++      nextHybrid++;
++    case ssl_grp_ec_curve25519:
++    case ssl_grp_ec_secp256r1:
++      ecdh_share[nextECDH] = DataBuffer(ext.data() + offset + 2 + 2, named_group_len);
++      ec_type[nextECDH] = (SSLNamedGroup) named_group;
++      nextECDH++;
+     }
+     offset += 2 + 2 + named_group_len;
+     ext.Read(offset, 2, &named_group);
+@@ -124,11 +197,29 @@ static void CheckECDHShareReuse(
+   }
+   EXPECT_EQ(offset, ext.len());
+ 
+-  ASSERT_TRUE(hybrid_share.data());
+-  ASSERT_TRUE(x25519_share.data());
+-  ASSERT_GT(hybrid_share.len(), x25519_share.len());
+-  EXPECT_EQ(0, memcmp(hybrid_share.data() + KYBER768_PUBLIC_KEY_BYTES,
+-                      x25519_share.data(), x25519_share.len()));
++  ASSERT_TRUE(nextECDH > 0);
++  ASSERT_TRUE(nextHybrid > 0);
++  /* setup the hybrid ecdh indeces */
++  for (int i=0; i < nextHybrid; i++) {
++    ecdh_index[i] = -1;
++    for (int j=0; j < nextECDH; j++) {
++      if (hybrid_ec_type[i] == ec_type[j]) {
++        ecdh_index[i] = j;
++        break;
++      }
++    }
++    ASSERT_TRUE(ecdh_index[i] != -1);
++  }
++  for (int i=0; i < nextECDH; i++) {
++      ASSERT_TRUE(ecdh_share[i].data());
++  }
++  for (int i=0; i < nextHybrid; i++) {
++      int j = ecdh_index[i];
++      ASSERT_TRUE(hybrid_share[i].data());
++      ASSERT_GT(hybrid_share[i].len(), ecdh_share[j].len());
++      EXPECT_EQ(0, memcmp(hybrid_share[i].data() + hybrid_offset[i],
++                   ecdh_share[j].data(), ecdh_share[j].len()));
++  }
+ }
+ 
+ TEST_P(TlsKeyExchangeTest13, Mlkem768x25519ShareReuseFirst) {
+@@ -155,6 +246,30 @@ TEST_P(TlsKeyExchangeTest13, Mlkem768x25
+   CheckECDHShareReuse(shares_capture_);
+ }
+ 
++TEST_P(TlsKeyExchangeTest13, Mlkem768Secp256r1ShareReuseFirst) {
++  EnsureKeyShareSetup();
++  ConfigNamedGroups({ssl_grp_kem_secp256r1mlkem768, ssl_grp_ec_secp256r1});
++  EXPECT_EQ(SECSuccess, SSL_SendAdditionalKeyShares(client_->ssl_fd(), 1));
++
++  Connect();
++
++  CheckKEXDetails({ssl_grp_kem_secp256r1mlkem768, ssl_grp_ec_secp256r1},
++                  {ssl_grp_kem_secp256r1mlkem768, ssl_grp_ec_secp256r1});
++  CheckECDHShareReuse(shares_capture_);
++}
++
++TEST_P(TlsKeyExchangeTest13, Mlkem768Secp256r1ShareReuseSecond) {
++  EnsureKeyShareSetup();
++  ConfigNamedGroups({ssl_grp_ec_secp256r1, ssl_grp_kem_secp256r1mlkem768});
++  EXPECT_EQ(SECSuccess, SSL_SendAdditionalKeyShares(client_->ssl_fd(), 1));
++
++  Connect();
++
++  CheckKEXDetails({ssl_grp_ec_secp256r1, ssl_grp_kem_secp256r1mlkem768},
++                  {ssl_grp_ec_secp256r1, ssl_grp_kem_secp256r1mlkem768});
++  CheckECDHShareReuse(shares_capture_);
++}
++
+ class Mlkem768x25519ShareDamager : public TlsExtensionFilter {
+  public:
+   typedef enum {
+diff -up ./gtests/ssl_gtest/tls_psk_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/tls_psk_unittest.cc
+--- ./gtests/ssl_gtest/tls_psk_unittest.cc.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./gtests/ssl_gtest/tls_psk_unittest.cc	2025-06-25 16:47:19.377362953 -0700
+@@ -68,7 +68,7 @@ TEST_P(Tls13PskTest, NormalExternal) {
+   AddPsk(scoped_psk_, kPskDummyLabel_, kPskHash_);
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
++  CheckKeys(ssl_kea_ecdh_hybrid, ssl_grp_kem_mlkem768x25519, ssl_auth_psk, ssl_sig_none);
+   client_->RemovePsk(kPskDummyLabel_);
+   server_->RemovePsk(kPskDummyLabel_);
+ 
+@@ -91,7 +91,7 @@ TEST_P(Tls13PskTest, KeyTooLarge) {
+   AddPsk(scoped_psk_, kPskDummyLabel_, kPskHash_);
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
++  CheckKeys(ssl_kea_ecdh_hybrid, ssl_grp_kem_mlkem768x25519, ssl_auth_psk, ssl_sig_none);
+ }
+ 
+ // Attempt to use a PSK with the wrong PRF hash.
+@@ -117,7 +117,7 @@ TEST_P(Tls13PskTest, LabelMismatch) {
+   client_->AddPsk(scoped_psk_, std::string("foo"), kPskHash_);
+   server_->AddPsk(scoped_psk_, std::string("bar"), kPskHash_);
+   Connect();
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++  CheckKeys();
+ }
+ 
+ SSLHelloRetryRequestAction RetryFirstHello(
+@@ -148,7 +148,7 @@ TEST_P(Tls13PskTest, ResPskRetryStateles
+   Handshake();
+   CheckConnected();
+   EXPECT_EQ(2U, cb_called);
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++  CheckKeys();
+   SendReceive();
+ }
+ 
+@@ -174,7 +174,7 @@ TEST_P(Tls13PskTest, ExtPskRetryStateles
+   Handshake();
+   CheckConnected();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
++  CheckKeys(ssl_kea_ecdh_hybrid, ssl_grp_kem_mlkem768x25519, ssl_auth_psk, ssl_sig_none);
+ }
+ 
+ // Server not configured with PSK and sends a certificate instead of
+@@ -182,7 +182,7 @@ TEST_P(Tls13PskTest, ExtPskRetryStateles
+ TEST_P(Tls13PskTest, ClientOnly) {
+   client_->AddPsk(scoped_psk_, kPskDummyLabel_, kPskHash_);
+   Connect();
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++  CheckKeys();
+ }
+ 
+ // Set a PSK, remove psk_key_exchange_modes.
+@@ -247,7 +247,7 @@ TEST_P(Tls13PskTest, PreferEpsk) {
+   Handshake();
+   CheckConnected();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
++  CheckKeys(ssl_kea_ecdh_hybrid, ssl_grp_kem_mlkem768x25519, ssl_auth_psk, ssl_sig_none);
+ }
+ 
+ // Enable resumption, but connect (initially) with an EPSK.
+@@ -260,7 +260,7 @@ TEST_P(Tls13PskTest, SuppressNewSessionT
+   nst_capture->EnableDecryption();
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
++  CheckKeys(ssl_kea_ecdh_hybrid, ssl_grp_kem_mlkem768x25519, ssl_auth_psk, ssl_sig_none);
+   EXPECT_EQ(SECFailure, SSL_SendSessionTicket(server_->ssl_fd(), nullptr, 0));
+   EXPECT_EQ(0U, nst_capture->buffer().len());
+   if (variant_ == ssl_variant_stream) {
+@@ -275,7 +275,7 @@ TEST_P(Tls13PskTest, SuppressNewSessionT
+   ExpectResumption(RESUME_NONE);
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
++  CheckKeys(ssl_kea_ecdh_hybrid, ssl_grp_kem_mlkem768x25519, ssl_auth_psk, ssl_sig_none);
+ }
+ 
+ TEST_P(Tls13PskTest, BadConfigValues) {
+@@ -314,7 +314,7 @@ TEST_P(Tls13PskTest, FallbackUnsupported
+   client_->EnableSingleCipher(TLS_AES_128_GCM_SHA256);
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++  CheckKeys();
+ }
+ 
+ // That fallback should not occur if there is no cipher overlap.
+@@ -342,7 +342,7 @@ TEST_P(Tls13PskTest, SuppressHandshakeCe
+ 
+   Connect();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
++  CheckKeys(ssl_kea_ecdh_hybrid, ssl_grp_kem_mlkem768x25519, ssl_auth_psk, ssl_sig_none);
+   EXPECT_EQ(0U, cr_cert_capture->buffer().len());
+ }
+ 
+@@ -422,7 +422,7 @@ TEST_P(Tls13PskTestWithCiphers, 0RttCiph
+   ExpectEarlyDataAccepted(true);
+   CheckConnected();
+   SendReceive();
+-  CheckKeys(ssl_kea_ecdh, ssl_grp_ec_curve25519, ssl_auth_psk, ssl_sig_none);
++  CheckKeys(ssl_kea_ecdh_hybrid, ssl_grp_kem_mlkem768x25519, ssl_auth_psk, ssl_sig_none);
+ }
+ 
+ TEST_P(Tls13PskTestWithCiphers, 0RttMaxEarlyData) {
+diff -up ./gtests/ssl_gtest/tls_subcerts_unittest.cc.mlkem_p256 ./gtests/ssl_gtest/tls_subcerts_unittest.cc
+--- ./gtests/ssl_gtest/tls_subcerts_unittest.cc.mlkem_p256	2025-06-25 16:47:19.357362696 -0700
++++ ./gtests/ssl_gtest/tls_subcerts_unittest.cc	2025-06-25 16:47:19.378362966 -0700
+@@ -449,6 +449,7 @@ class ReplaceDCSigScheme : public TlsHan
+ // Aborted because of incorrect DC signature algorithm indication.
+ TEST_P(TlsConnectTls13, DCAbortBadExpectedCertVerifyAlg) {
+   Reset(kEcdsaDelegatorId);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   client_->EnableDelegatedCredentials();
+   server_->AddDelegatedCredential(TlsAgent::kServerEcdsa256,
+                                   ssl_sig_ecdsa_secp256r1_sha256, kDCValidFor,
+@@ -569,6 +570,7 @@ TEST_P(TlsConnectTls13, DCConnectClientN
+ // Connected without DC because server doesn't support TLS 1.3.
+ TEST_P(TlsConnectTls13, DCConnectServerNoTls13) {
+   Reset(kEcdsaDelegatorId);
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   client_->EnableDelegatedCredentials();
+   server_->AddDelegatedCredential(kDCId, kDCScheme, kDCValidFor, now());
+ 
+@@ -613,6 +615,7 @@ TEST_P(TlsConnectTls13, DCConnectExpecte
+ TEST_P(TlsConnectTls13, DCCheckPreliminaryInfo) {
+   Reset(kEcdsaDelegatorId);
+   EnsureTlsSetup();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   client_->EnableDelegatedCredentials();
+   server_->AddDelegatedCredential(TlsAgent::kServerEcdsa256,
+                                   ssl_sig_ecdsa_secp256r1_sha256, kDCValidFor,
+@@ -638,6 +641,7 @@ TEST_P(TlsConnectTls13, DCCheckPrelimina
+ TEST_P(TlsConnectTls13, DCCheckPreliminaryInfoNoDC) {
+   Reset(kEcdsaDelegatorId);
+   EnsureTlsSetup();
++  client_->ConfigNamedGroups(kNonPQDHEGroups);
+   client_->EnableDelegatedCredentials();
+   auto filter = MakeTlsFilter<TlsHandshakeDropper>(server_);
+   filter->SetHandshakeTypes(
+diff -up ./lib/pk11wrap/pk11akey.c.mlkem_p256 ./lib/pk11wrap/pk11akey.c
+--- ./lib/pk11wrap/pk11akey.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/pk11wrap/pk11akey.c	2025-06-25 16:47:19.378362966 -0700
+@@ -249,24 +249,31 @@ PK11_ImportPublicKey(PK11SlotInfo *slot,
+                 }
+                 break;
+             case kyberKey:
++                /*fprintf(stderr, "PK11_ImportPublic key kyber, params=%d\n",
++                        pubKey->u.kyber.params);*/
+                 switch (pubKey->u.kyber.params) {
++#ifndef NSS_DISABLE_KYBER
+                     case params_kyber768_round3:
+                     case params_kyber768_round3_test_mode:
+                         keyType = CKK_NSS_KYBER;
+                         kemParams = CKP_NSS_KYBER_768_ROUND3;
+                         break;
++#endif
+                     case params_ml_kem768:
+                     case params_ml_kem768_test_mode:
+-                        keyType = CKK_NSS_ML_KEM;
+-                        kemParams = CKP_NSS_ML_KEM_768;
++                        keyType = CKK_ML_KEM;
++                        kemParams = CKP_ML_KEM_768;
+                         break;
+                     default:
+                         kemParams = CKP_INVALID_ID;
+                         break;
+                 }
+-                PK11_SETATTRS(attrs, CKA_NSS_PARAMETER_SET,
++                /*fprintf(stderr, "PK11_ImportPublic KEY_TYPE=0x%08lx, kem_params=0x%08lxd\n",
++                        keyType, kemParams); */
++
++                PK11_SETATTRS(attrs, CKA_PARAMETER_SET,
+                               &kemParams,
+-                              sizeof(CK_NSS_KEM_PARAMETER_SET_TYPE));
++                              sizeof(CK_ML_KEM_PARAMETER_SET_TYPE));
+                 attrs++;
+                 PK11_SETATTRS(attrs, CKA_VALUE, pubKey->u.kyber.publicValue.data,
+                               pubKey->u.kyber.publicValue.len);
+@@ -298,6 +305,7 @@ PK11_ImportPublicKey(PK11SlotInfo *slot,
+             SECITEM_FreeItem(pubValue, PR_TRUE);
+         }
+         if (rv != SECSuccess) {
++            /* fprintf(stderr, "PK11_CreatNewObject failed %d\n", PORT_GetError()); */
+             return CK_INVALID_HANDLE;
+         }
+     }
+@@ -684,8 +692,11 @@ PK11_ExtractPublicKey(PK11SlotInfo *slot
+             case CKK_EC_EDWARDS:
+                 keyType = edKey;
+                 break;
++#ifndef NSS_DISABLE_KYBER
+             case CKK_NSS_KYBER:
++#endif
+             case CKK_NSS_ML_KEM:
++            case CKK_ML_KEM:
+                 keyType = kyberKey;
+                 break;
+             default:
+@@ -852,35 +863,54 @@ PK11_ExtractPublicKey(PK11SlotInfo *slot
+             PK11_SETATTRS(attrs, CKA_VALUE, NULL, 0);
+             attrs++;
+             kemParams = attrs;
+-            PK11_SETATTRS(attrs, CKA_NSS_PARAMETER_SET, NULL, 0);
++            PK11_SETATTRS(attrs, CKA_PARAMETER_SET, NULL, 0);
+             attrs++;
+             templateCount = attrs - template;
+             PR_ASSERT(templateCount <= sizeof(template) / sizeof(CK_ATTRIBUTE));
+ 
+             crv = PK11_GetAttributes(arena, slot, id, template, templateCount);
+-            if (crv != CKR_OK)
+-                break;
+-
++            if (crv != CKR_OK) {
++                /* try to fetch with the vendor specific
++                 * CKA_NSS_PARAMETER_SET */
++                kemParams->type = CKA_NSS_PARAMETER_SET;
++                crv = PK11_GetAttributes(arena, slot, id, template,
++                                         templateCount);
++                if (crv != CKR_OK) {
++                    break;
++                }
++            }
+             if (keyClass != CKO_PUBLIC_KEY) {
+                 crv = CKR_OBJECT_HANDLE_INVALID;
+                 break;
+             }
+-
+-            if (pk11KeyType != CKK_NSS_KYBER && pk11KeyType != CKK_NSS_ML_KEM) {
+-                crv = CKR_OBJECT_HANDLE_INVALID;
++            switch (pk11KeyType) {
++#ifndef NSS_DISABLE_KYBER
++                case CKK_NSS_KYBER:
++#endif
++                case CKK_NSS_ML_KEM:
++                case CKK_ML_KEM:
++                    break;
++                default:
++                    crv = CKR_OBJECT_HANDLE_INVALID;
++                    break;
++            }
++            if (crv != CKR_OK) {
+                 break;
+             }
+ 
+-            if (kemParams->ulValueLen != sizeof(CK_NSS_KEM_PARAMETER_SET_TYPE)) {
++            if (kemParams->ulValueLen != sizeof(CK_ML_KEM_PARAMETER_SET_TYPE)) {
+                 crv = CKR_OBJECT_HANDLE_INVALID;
+                 break;
+             }
+-            CK_NSS_KEM_PARAMETER_SET_TYPE *pPK11Params = kemParams->pValue;
++            CK_ML_KEM_PARAMETER_SET_TYPE *pPK11Params = kemParams->pValue;
+             switch (*pPK11Params) {
++#ifdef NSS_DISABLE_KYBER
+                 case CKP_NSS_KYBER_768_ROUND3:
+                     pubKey->u.kyber.params = params_kyber768_round3;
+                     break;
++#endif
+                 case CKP_NSS_ML_KEM_768:
++                case CKP_ML_KEM_768:
+                     pubKey->u.kyber.params = params_ml_kem768;
+                     break;
+                 default:
+@@ -948,8 +978,11 @@ PK11_MakePrivKey(PK11SlotInfo *slot, Key
+             case CKK_EC_EDWARDS:
+                 keyType = edKey;
+                 break;
++#ifndef NSS_DISABLE_KYBER
+             case CKK_NSS_KYBER:
++#endif
+             case CKK_NSS_ML_KEM:
++            case CKK_ML_KEM:
+                 keyType = kyberKey;
+                 break;
+             default:
+@@ -1293,6 +1326,7 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+         { CKA_DECRYPT, NULL, 0 },
+         { CKA_EXTRACTABLE, NULL, 0 },
+         { CKA_MODIFIABLE, NULL, 0 },
++        { CKA_DECAPSULATE, NULL, 0 },
+     };
+     CK_ATTRIBUTE rsaPubTemplate[] = {
+         { CKA_MODULUS_BITS, NULL, 0 },
+@@ -1304,6 +1338,7 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+         { CKA_VERIFY_RECOVER, NULL, 0 },
+         { CKA_ENCRYPT, NULL, 0 },
+         { CKA_MODIFIABLE, NULL, 0 },
++        { CKA_ENCAPSULATE, NULL, 0 },
+     };
+     CK_ATTRIBUTE dsaPubTemplate[] = {
+         { CKA_PRIME, NULL, 0 },
+@@ -1316,6 +1351,7 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+         { CKA_VERIFY_RECOVER, NULL, 0 },
+         { CKA_ENCRYPT, NULL, 0 },
+         { CKA_MODIFIABLE, NULL, 0 },
++        { CKA_ENCAPSULATE, NULL, 0 },
+     };
+     CK_ATTRIBUTE dhPubTemplate[] = {
+         { CKA_PRIME, NULL, 0 },
+@@ -1327,6 +1363,7 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+         { CKA_VERIFY_RECOVER, NULL, 0 },
+         { CKA_ENCRYPT, NULL, 0 },
+         { CKA_MODIFIABLE, NULL, 0 },
++        { CKA_ENCAPSULATE, NULL, 0 },
+     };
+     CK_ATTRIBUTE ecPubTemplate[] = {
+         { CKA_EC_PARAMS, NULL, 0 },
+@@ -1337,6 +1374,7 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+         { CKA_VERIFY_RECOVER, NULL, 0 },
+         { CKA_ENCRYPT, NULL, 0 },
+         { CKA_MODIFIABLE, NULL, 0 },
++        { CKA_ENCAPSULATE, NULL, 0 },
+     };
+     SECKEYECParams *ecParams;
+ 
+@@ -1349,6 +1387,7 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+         { CKA_VERIFY_RECOVER, NULL, 0 },
+         { CKA_ENCRYPT, NULL, 0 },
+         { CKA_MODIFIABLE, NULL, 0 },
++        { CKA_ENCAPSULATE, NULL, 0 },
+     };
+ 
+     /*CK_ULONG key_size = 0;*/
+@@ -1557,18 +1596,17 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+                 test_mech2.mechanism = CKM_ECDSA;
+             }
+             break;
++#ifndef NSS_DISABLE_KYBER
+         case CKM_NSS_KYBER_KEY_PAIR_GEN:
+-            kemParams = (CK_NSS_KEM_PARAMETER_SET_TYPE *)param;
+-            attrs = kyberPubTemplate;
+-            PK11_SETATTRS(attrs, CKA_NSS_PARAMETER_SET,
+-                          kemParams,
+-                          sizeof(CK_NSS_KEM_PARAMETER_SET_TYPE));
+-            attrs++;
+-            pubTemplate = kyberPubTemplate;
+-            keyType = kyberKey;
+             test_mech.mechanism = CKM_NSS_KYBER;
+-            break;
++            goto ml_kem_gen;
++#endif
+         case CKM_NSS_ML_KEM_KEY_PAIR_GEN:
++            test_mech.mechanism = CKM_NSS_ML_KEM;
++            goto ml_kem_gen;
++        case CKM_ML_KEM_KEY_PAIR_GEN:
++            test_mech.mechanism = CKM_ML_KEM;
++ml_kem_gen:
+             kemParams = (CK_NSS_KEM_PARAMETER_SET_TYPE *)param;
+             attrs = kyberPubTemplate;
+             PK11_SETATTRS(attrs, CKA_NSS_PARAMETER_SET,
+@@ -1577,7 +1615,6 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+             attrs++;
+             pubTemplate = kyberPubTemplate;
+             keyType = kyberKey;
+-            test_mech.mechanism = CKM_NSS_ML_KEM;
+             break;
+         case CKM_EC_MONTGOMERY_KEY_PAIR_GEN:
+             ecParams = (SECKEYECParams *)param;
+@@ -1658,7 +1695,13 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+             case CKM_EDDSA:
+                 mechanism_info.flags = CKF_SIGN | CKF_VERIFY;
+                 break;
+-
++#ifndef NSS_DISABLE_KYBER
++            case CKM_NSS_KYBER:
++#endif
++            case CKM_NSS_ML_KEM:
++            case CKM_ML_KEM:
++                mechanism_info.flags = CKF_ENCAPSULATE|CKF_DECAPSULATE;
++                break;
+             default:
+                 break;
+         }
+@@ -1688,6 +1731,12 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+                   mechanism_info.flags & CKF_ENCRYPT ? &cktrue : &ckfalse,
+                   sizeof(CK_BBOOL));
+     attrs++;
++    /* only set encapsulate if it's requested and shows up in the mechanism
++     * list, that way we don't confuse pre-3.2 PKCS #11 modules */
++    if (mechanism_info.flags & CKF_ENCAPSULATE) {
++        PK11_SETATTRS(attrs, CKA_ENCAPSULATE, &cktrue, sizeof(CK_BBOOL));
++        attrs++;
++    }
+     /* set the private key attributes */
+     PK11_SETATTRS(privattrs, CKA_DERIVE,
+                   mechanism_info.flags & CKF_DERIVE ? &cktrue : &ckfalse,
+@@ -1705,6 +1754,10 @@ PK11_GenerateKeyPairWithOpFlags(PK11Slot
+                   mechanism_info.flags & CKF_DECRYPT ? &cktrue : &ckfalse,
+                   sizeof(CK_BBOOL));
+     privattrs++;
++    if (mechanism_info.flags & CKF_DECAPSULATE) {
++        PK11_SETATTRS(privattrs, CKA_DECAPSULATE, &cktrue, sizeof(CK_BBOOL));
++        privattrs++;
++    }
+ 
+     if (token) {
+         session_handle = PK11_GetRWSession(slot);
+diff -up ./lib/pk11wrap/pk11pars.c.mlkem_p256 ./lib/pk11wrap/pk11pars.c
+--- ./lib/pk11wrap/pk11pars.c.mlkem_p256	2025-06-25 16:47:19.354362658 -0700
++++ ./lib/pk11wrap/pk11pars.c	2025-06-25 16:47:19.378362966 -0700
+@@ -245,8 +245,12 @@ static const oidValDef curveOptList[] =
+       NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_CERT_SIGNATURE },
+     { CIPHER_NAME("CURVE25519"), SEC_OID_CURVE25519,
+       NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_CERT_SIGNATURE },
+-    { CIPHER_NAME("XYBER768D00"), SEC_OID_XYBER768D00, 0 },
+-    { CIPHER_NAME("MLKEM768X25519"), SEC_OID_MLKEM768X25519, 0 },
++    { CIPHER_NAME("XYBER768D00"), SEC_OID_XYBER768D00,
++       NSS_USE_ALG_IN_SSL_KX },
++    { CIPHER_NAME("MLKEM768X25519"), SEC_OID_MLKEM768X25519,
++       NSS_USE_ALG_IN_SSL_KX },
++    { CIPHER_NAME("MLKEM768SECP256R1"), SEC_OID_SECP256R1MLKEM768,
++       NSS_USE_ALG_IN_SSL_KX },
+     /* ANSI X9.62 named elliptic curves (characteristic two field) */
+     { CIPHER_NAME("C2PNB163V1"), SEC_OID_ANSIX962_EC_C2PNB163V1,
+       NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_CERT_SIGNATURE },
+diff -up ./lib/pk11wrap/pk11skey.c.mlkem_p256 ./lib/pk11wrap/pk11skey.c
+--- ./lib/pk11wrap/pk11skey.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/pk11wrap/pk11skey.c	2025-06-25 16:47:19.378362966 -0700
+@@ -3107,6 +3107,30 @@ pk11_KEMCiphertextLength(SECKEYPublicKey
+     }
+ }
+ 
++/* only one of privKey and pubKey is set. */
++static SECStatus
++pk11_GetKEMMechanism(KeyType keyType, CK_MECHANISM_PTR mechp,
++                     SECKEYPrivateKey *privKey, SECKEYPublicKey *pubKey)
++{
++    switch (keyType) {
++        case kyberKey:
++            /* we don't need to set the parameter set for the official
++             * mlkem interface, it can it it from the key. If we have
++             * kyber support, this still works because CKM_ML_KEM
++             * will see the CP_NSS_KYBER_786_ROUND3 parameter and use
++             * kyber.*/
++            mechp->mechanism = CKM_ML_KEM;
++            mechp->pParameter = NULL;
++            mechp->ulParameterLen = 0;
++            break;
++         /* add other kems here */
++         default:
++            PORT_SetError(SEC_ERROR_INVALID_KEY);
++            return SECFailure;
++    }
++    return SECSuccess;
++}
++
+ SECStatus
+ PK11_Encapsulate(SECKEYPublicKey *pubKey, CK_MECHANISM_TYPE target, PK11AttrFlags attrFlags, CK_FLAGS opFlags, PK11SymKey **outKey, SECItem **outCiphertext)
+ {
+@@ -3138,20 +3162,11 @@ PK11_Encapsulate(SECKEYPublicKey *pubKey
+     *outKey = NULL;
+     *outCiphertext = NULL;
+ 
+-    CK_MECHANISM_TYPE kemType;
+-    CK_NSS_KEM_PARAMETER_SET_TYPE kemParameterSet = PK11_ReadULongAttribute(slot, pubKey->pkcs11ID, CKA_NSS_PARAMETER_SET);
+-    switch (kemParameterSet) {
+-        case CKP_NSS_KYBER_768_ROUND3:
+-            kemType = CKM_NSS_KYBER;
+-            break;
+-        case CKP_NSS_ML_KEM_768:
+-            kemType = CKM_NSS_ML_KEM;
+-            break;
+-        default:
+-            PORT_SetError(SEC_ERROR_INVALID_KEY);
+-            return SECFailure;
++    CK_MECHANISM mech;
++    SECStatus rv = pk11_GetKEMMechanism(pubKey->keyType, &mech, NULL, pubKey);
++    if (rv != SECSuccess) {
++        return rv;
+     }
+-    CK_MECHANISM mech = { kemType, &kemParameterSet, sizeof(kemParameterSet) };
+ 
+     sharedSecret = pk11_CreateSymKey(slot, target, PR_TRUE, PR_TRUE, NULL);
+     if (sharedSecret == NULL) {
+@@ -3243,20 +3258,11 @@ PK11_Decapsulate(SECKEYPrivateKey *privK
+ 
+     *outKey = NULL;
+ 
+-    CK_MECHANISM_TYPE kemType;
+-    CK_NSS_KEM_PARAMETER_SET_TYPE kemParameterSet = PK11_ReadULongAttribute(slot, privKey->pkcs11ID, CKA_NSS_PARAMETER_SET);
+-    switch (kemParameterSet) {
+-        case CKP_NSS_KYBER_768_ROUND3:
+-            kemType = CKM_NSS_KYBER;
+-            break;
+-        case CKP_NSS_ML_KEM_768:
+-            kemType = CKM_NSS_ML_KEM;
+-            break;
+-        default:
+-            PORT_SetError(SEC_ERROR_INVALID_KEY);
+-            return SECFailure;
++    CK_MECHANISM mech;
++    SECStatus rv = pk11_GetKEMMechanism(privKey->keyType, &mech, privKey, NULL);
++    if (rv != SECSuccess) {
++        return rv;
+     }
+-    CK_MECHANISM mech = { kemType, &kemParameterSet, sizeof(kemParameterSet) };
+ 
+     sharedSecret = pk11_CreateSymKey(slot, target, PR_TRUE, PR_TRUE, NULL);
+     if (sharedSecret == NULL) {
+diff -up ./lib/pk11wrap/pk11slot.c.mlkem_p256 ./lib/pk11wrap/pk11slot.c
+--- ./lib/pk11wrap/pk11slot.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/pk11wrap/pk11slot.c	2025-06-25 16:47:19.378362966 -0700
+@@ -54,6 +54,7 @@ const PK11DefaultArrayEntry PK11_Default
+     { "MD2", SECMOD_MD2_FLAG, CKM_MD2 },
+     { "SSL", SECMOD_SSL_FLAG, CKM_SSL3_PRE_MASTER_KEY_GEN },
+     { "TLS", SECMOD_TLS_FLAG, CKM_TLS_MASTER_KEY_DERIVE },
++    { "MLKEM", SECMOD_MLKEM_FLAG, CKM_ML_KEM },
+     { "SKIPJACK", SECMOD_FORTEZZA_FLAG, CKM_SKIPJACK_CBC64 },
+     { "Publicly-readable certs", SECMOD_FRIENDLY_FLAG, CKM_INVALID_MECHANISM },
+     { "Random Num Generator", SECMOD_RANDOM_FLAG, CKM_FAKE_RANDOM },
+@@ -89,6 +90,7 @@ static PK11SlotList
+     pk11_dsaSlotList,
+     pk11_dhSlotList,
+     pk11_ecSlotList,
++    pk11_mlkemSlotList,
+     pk11_ideaSlotList,
+     pk11_sslSlotList,
+     pk11_tlsSlotList,
+@@ -843,6 +845,7 @@ PK11_InitSlotLists(void)
+     pk11_InitSlotListStatic(&pk11_dsaSlotList);
+     pk11_InitSlotListStatic(&pk11_dhSlotList);
+     pk11_InitSlotListStatic(&pk11_ecSlotList);
++    pk11_InitSlotListStatic(&pk11_mlkemSlotList);
+     pk11_InitSlotListStatic(&pk11_ideaSlotList);
+     pk11_InitSlotListStatic(&pk11_sslSlotList);
+     pk11_InitSlotListStatic(&pk11_tlsSlotList);
+@@ -869,6 +872,7 @@ PK11_DestroySlotLists(void)
+     pk11_FreeSlotListStatic(&pk11_dsaSlotList);
+     pk11_FreeSlotListStatic(&pk11_dhSlotList);
+     pk11_FreeSlotListStatic(&pk11_ecSlotList);
++    pk11_FreeSlotListStatic(&pk11_mlkemSlotList);
+     pk11_FreeSlotListStatic(&pk11_ideaSlotList);
+     pk11_FreeSlotListStatic(&pk11_sslSlotList);
+     pk11_FreeSlotListStatic(&pk11_tlsSlotList);
+@@ -945,11 +949,14 @@ PK11_GetSlotList(CK_MECHANISM_TYPE type)
+         case CKM_EC_KEY_PAIR_GEN: /* aka CKM_ECDSA_KEY_PAIR_GEN */
+         case CKM_NSS_ECDHE_NO_PAIRWISE_CHECK_KEY_PAIR_GEN:
+         case CKM_ECDH1_DERIVE:
++            return &pk11_ecSlotList;
+         case CKM_NSS_KYBER_KEY_PAIR_GEN: /* Bug 1893029 */
+         case CKM_NSS_KYBER:
+         case CKM_NSS_ML_KEM_KEY_PAIR_GEN: /* Bug 1893029 */
+         case CKM_NSS_ML_KEM:
+-            return &pk11_ecSlotList;
++        case CKM_ML_KEM_KEY_PAIR_GEN: /* Bug 1893029 */
++        case CKM_ML_KEM:
++            return &pk11_mlkemSlotList;
+         case CKM_SSL3_PRE_MASTER_KEY_GEN:
+         case CKM_SSL3_MASTER_KEY_DERIVE:
+         case CKM_SSL3_SHA1_MAC:
+diff -up ./lib/pk11wrap/secmodti.h.mlkem_p256 ./lib/pk11wrap/secmodti.h
+--- ./lib/pk11wrap/secmodti.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/pk11wrap/secmodti.h	2025-06-25 16:47:19.378362966 -0700
+@@ -202,4 +202,11 @@ struct PK11GenericObjectStr {
+ /* This mask includes all CK_FLAGs with an equivalent CKA_ attribute. */
+ #define CKF_KEY_OPERATION_FLAGS 0x000e7b00UL
+ 
++/*
++ * private header file, so we can set real names for oids that aren't upstream
++ * yet, so we applications don't try to use them and get hosed when they change
++ */
++#define SEC_OID_SECP256R1MLKEM768 SEC_OID_PRIVATE_1
++#define SEC_OID_MLKEM1024SECP256R1 SEC_OID_PRIVATE_2
++
+ #endif /* _SECMODTI_H_ */
+diff -up ./lib/softoken/fipsaudt.c.mlkem_p256 ./lib/softoken/fipsaudt.c
+--- ./lib/softoken/fipsaudt.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/softoken/fipsaudt.c	2025-06-25 16:47:19.378362966 -0700
+@@ -319,3 +319,51 @@ sftk_AuditDigestKey(CK_SESSION_HANDLE hS
+                 (PRUint32)hSession, (PRUint32)hKey, (PRUint32)rv);
+     sftk_LogAuditMessage(severity, NSS_AUDIT_DIGEST_KEY, msg);
+ }
++
++void
++sftk_AuditEncapsulate(CK_SESSION_HANDLE hSession,
++                      CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hPublicKey,
++                      CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
++                      CK_OBJECT_HANDLE_PTR phKey, CK_BYTE_PTR pCiphertext,
++                      CK_ULONG_PTR pulCiphertextLen, CK_RV rv)
++{
++    char msg[256];
++    char mech[MECHANISM_BUFSIZE];
++    char shKey[32];
++    NSSAuditSeverity severity = (rv == CKR_OK) ? NSS_AUDIT_INFO : NSS_AUDIT_ERROR;
++
++    sftk_PrintMechanism(mech, sizeof mech, pMechanism);
++    sftk_PrintReturnedObjectHandle(shKey, sizeof shKey, "phKey", phKey, rv);
++    PR_snprintf(msg, sizeof msg,
++                "C_Encapsulate(hSession=0x%08lX, pMechanism=%s, "
++                "hPublicKey=0x%08lX, pTemplate=%p, ulAttributeCount=%lu, "
++                "phKey=%p pCipherText=%p, pulCiphertextLen=%p)=0x%08lX%s",
++                (PRUint32)hSession, mech,
++                (PRUint32)hPublicKey, pTemplate, (PRUint32)ulAttributeCount,
++                phKey, pCiphertext, pulCiphertextLen, (PRUint32)rv, shKey);
++    sftk_LogAuditMessage(severity, NSS_AUDIT_ENCAPSULATE_KEY, msg);
++}
++
++void
++sftk_AuditDecapsulate(CK_SESSION_HANDLE hSession,
++                      CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hPrivateKey,
++                      CK_BYTE_PTR pCiphertext, CK_ULONG ulCiphertextLen,
++                      CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
++                      CK_OBJECT_HANDLE_PTR phKey, CK_RV rv)
++{
++    char msg[256];
++    char mech[MECHANISM_BUFSIZE];
++    char shKey[32];
++    NSSAuditSeverity severity = (rv == CKR_OK) ? NSS_AUDIT_INFO : NSS_AUDIT_ERROR;
++
++    sftk_PrintMechanism(mech, sizeof mech, pMechanism);
++    sftk_PrintReturnedObjectHandle(shKey, sizeof shKey, "phKey", phKey, rv);
++    PR_snprintf(msg, sizeof msg,
++                "C_Decapsulate(hSession=0x%08lX, pMechanism=%s, "
++                "hPrivateKey=0x%08lX, pCipherText=%p, ulCiphertextLen=%lu,",
++                "pTemplate=%p, ulAttributeCount=%lu, phKey=%p)=0x%08lX%s",
++                (PRUint32)hSession, mech,
++                (PRUint32)hPrivateKey, pCiphertext, (PRUint32)ulCiphertextLen,
++                pTemplate, (PRUint32)ulAttributeCount, phKey, (PRUint32)rv, shKey);
++    sftk_LogAuditMessage(severity, NSS_AUDIT_DECAPSULATE_KEY, msg);
++}
+diff -up ./lib/softoken/fipstokn.c.mlkem_p256 ./lib/softoken/fipstokn.c
+--- ./lib/softoken/fipstokn.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/softoken/fipstokn.c	2025-06-25 16:47:19.379362979 -0700
+@@ -24,6 +24,7 @@
+ #include "pkcs11i.h"
+ #include "prenv.h"
+ #include "prprf.h"
++#include "kem.h"
+ 
+ #include <ctype.h>
+ 
+@@ -261,6 +262,30 @@ static CK_FUNCTION_LIST_3_0 sftk_fipsTab
+ 
+ };
+ 
++CK_RV FC_Encapsulate(CK_SESSION_HANDLE hSession,
++                      CK_MECHANISM_PTR pMechanism,
++                      CK_OBJECT_HANDLE hPublicKey,
++                      CK_ATTRIBUTE_PTR pTemplate,
++                      CK_ULONG ulAttributeCount,
++                      CK_OBJECT_HANDLE_PTR phKey,
++                      CK_BYTE_PTR pCiphertext,
++                      CK_ULONG_PTR pulCiphertextLen);
++
++CK_RV FC_Decapsulate(CK_SESSION_HANDLE hSession,
++                      CK_MECHANISM_PTR pMechanism,
++                      CK_OBJECT_HANDLE hPrivateKey,
++                      CK_BYTE_PTR pCiphertext,
++                      CK_ULONG ulCiphertextLen,
++                      CK_ATTRIBUTE_PTR pTemplate,
++                      CK_ULONG ulAttributeCount,
++                      CK_OBJECT_HANDLE_PTR phKey);
++
++CK_NSS_KEM_FUNCTIONS sftk_fips_kem_funcList = {
++    { 1, 0 },
++    FC_Encapsulate,
++    FC_Decapsulate
++};
++
+ /* forward declaration of special GetInfo functions */
+ CK_RV FC_GetInfoV2(CK_INFO_PTR pInfo);
+ CK_RV NSC_GetInfoV2(CK_INFO_PTR pInfo);
+@@ -302,10 +327,11 @@ static CK_INTERFACE fips_interfaces[] =
+     { (CK_UTF8CHAR_PTR) "PKCS 11", &sftk_fipsTable, NSS_INTERFACE_FLAGS },
+     { (CK_UTF8CHAR_PTR) "PKCS 11", &sftk_fipsTable_v2, NSS_INTERFACE_FLAGS },
+     { (CK_UTF8CHAR_PTR) "Vendor NSS Module Interface", &sftk_module_funcList, NSS_INTERFACE_FLAGS },
+-    { (CK_UTF8CHAR_PTR) "Vendor NSS FIPS Interface", &sftk_fips_funcList, NSS_INTERFACE_FLAGS }
++    { (CK_UTF8CHAR_PTR) "Vendor NSS FIPS Interface", &sftk_fips_funcList, NSS_INTERFACE_FLAGS },
++    { (CK_UTF8CHAR_PTR) "Vendor NSS KEM Interface", &sftk_fips_kem_funcList, NSS_INTERFACE_FLAGS }
+ };
+ /* must match the count of interfaces in fips_interfaces above*/
+-#define FIPS_INTERFACE_COUNT 4
++#define FIPS_INTERFACE_COUNT PR_ARRAY_SIZE(fips_interfaces)
+ 
+ /* CKO_NOT_A_KEY can be any object class that's not a key object. */
+ #define CKO_NOT_A_KEY CKO_DATA
+@@ -350,6 +376,8 @@ sftk_mapLinuxAuditType(NSSAuditSeverity
+         case NSS_AUDIT_LOAD_KEY:
+         case NSS_AUDIT_UNWRAP_KEY:
+         case NSS_AUDIT_WRAP_KEY:
++        case NSS_AUDIT_ENCAPSULATE_KEY:
++        case NSS_AUDIT_DECAPSULATE_KEY:
+             return AUDIT_CRYPTO_KEY_USER;
+         case NSS_AUDIT_CRYPT:
+             return (severity == NSS_AUDIT_ERROR) ? AUDIT_CRYPTO_FAILURE_USER : AUDIT_CRYPTO_KEY_USER;
+@@ -2078,3 +2106,75 @@ FC_MessageVerifyFinal(CK_SESSION_HANDLE
+     CHECK_FORK();
+     return NSC_MessageVerifyFinal(hSession);
+ }
++
++/*
++ * vendor specific encapsulate/decapsulate
++ */
++CK_RV
++FC_Encapsulate(CK_SESSION_HANDLE hSession,
++               CK_MECHANISM_PTR pMechanism,
++               CK_OBJECT_HANDLE hPublicKey,
++               CK_ATTRIBUTE_PTR pTemplate,
++               CK_ULONG ulAttributeCount,
++               CK_OBJECT_HANDLE_PTR phKey,
++               CK_BYTE_PTR pCiphertext,
++               CK_ULONG_PTR pulCiphertextLen)
++{
++    CK_BBOOL *boolptr;
++    SFTK_FIPSCHECK();
++    CHECK_FORK();
++
++    /* all secret keys must be sensitive, if the upper level code tries to say
++     * otherwise, reject it. */
++    boolptr = (CK_BBOOL *)fc_getAttribute(pTemplate,
++                                          ulAttributeCount, CKA_SENSITIVE);
++    if (boolptr != NULL) {
++        if (!(*boolptr)) {
++            return CKR_ATTRIBUTE_VALUE_INVALID;
++        }
++    }
++
++    rv = NSC_Encapsulate(hSession, pMechanism, hPublicKey, pTemplate,
++                         ulAttributeCount, phKey, pCiphertext,
++                         pulCiphertextLen);
++    if (sftk_audit_enabled) {
++        sftk_AuditEncapsulate(hSession, pMechanism, hPublicKey, pTemplate,
++                              ulAttributeCount, phKey, pCiphertext,
++                              pulCiphertextLen, rv);
++    }
++    return rv;
++}
++
++CK_RV
++FC_Decapsulate(CK_SESSION_HANDLE hSession,
++               CK_MECHANISM_PTR pMechanism,
++               CK_OBJECT_HANDLE hPrivateKey,
++               CK_BYTE_PTR pCiphertext,
++               CK_ULONG ulCiphertextLen,
++               CK_ATTRIBUTE_PTR pTemplate,
++               CK_ULONG ulAttributeCount,
++               CK_OBJECT_HANDLE_PTR phKey)
++{
++    CK_BBOOL *boolptr;
++    SFTK_FIPSCHECK();
++    CHECK_FORK();
++
++    /* all secret keys must be sensitive, if the upper level code tries to say
++     * otherwise, reject it. */
++    boolptr = (CK_BBOOL *)fc_getAttribute(pTemplate,
++                                          ulAttributeCount, CKA_SENSITIVE);
++    if (boolptr != NULL) {
++        if (!(*boolptr)) {
++            return CKR_ATTRIBUTE_VALUE_INVALID;
++        }
++    }
++
++    rv = NSC_Decapsulate(hSession, pMechanism, hPrivateKey, pCiphertext,
++                         ulCiphertextLen, pTemplate, ulAttributeCount, phKey);
++    if (sftk_audit_enabled) {
++        sftk_AuditDecapsulate(hSession, pMechanism, hPrivateKey, pCiphertext,
++                              ulCiphertextLen, pTemplate, ulAttributeCount,
++                              phKey, rv);
++    }
++    return rv;
++}
+diff -up ./lib/softoken/kem.c.mlkem_p256 ./lib/softoken/kem.c
+--- ./lib/softoken/kem.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/softoken/kem.c	2025-06-25 16:56:05.884129793 -0700
+@@ -11,13 +11,19 @@
+ #include "secport.h"
+ #include "softoken.h"
+ 
++/* change to the largest KEM Secret Bytes value supported */
++#define MAX_SHARED_SECRET_BYTES KYBER_SHARED_SECRET_BYTES
++
+ KyberParams
+-sftk_kyber_PK11ParamToInternal(CK_NSS_KEM_PARAMETER_SET_TYPE pk11ParamSet)
++sftk_kyber_PK11ParamToInternal(CK_ML_KEM_PARAMETER_SET_TYPE pk11ParamSet)
+ {
+     switch (pk11ParamSet) {
++#ifndef NSS_DISABLE_KYBER
+         case CKP_NSS_KYBER_768_ROUND3:
+             return params_kyber768_round3;
++#endif
+         case CKP_NSS_ML_KEM_768:
++        case CKP_ML_KEM_768:
+             return params_ml_kem768;
+         default:
+             return params_kyber_invalid;
+@@ -28,8 +34,10 @@ SECItem *
+ sftk_kyber_AllocPubKeyItem(KyberParams params, SECItem *pubkey)
+ {
+     switch (params) {
++#ifndef NSS_DISABLE_KYBER
+         case params_kyber768_round3:
+         case params_kyber768_round3_test_mode:
++#endif
+         case params_ml_kem768:
+         case params_ml_kem768_test_mode:
+             return SECITEM_AllocItem(NULL, pubkey, KYBER768_PUBLIC_KEY_BYTES);
+@@ -42,8 +50,10 @@ SECItem *
+ sftk_kyber_AllocPrivKeyItem(KyberParams params, SECItem *privkey)
+ {
+     switch (params) {
++#ifndef NSS_DISABLE_KYBER
+         case params_kyber768_round3:
+         case params_kyber768_round3_test_mode:
++#endif
+         case params_ml_kem768:
+         case params_ml_kem768_test_mode:
+             return SECITEM_AllocItem(NULL, privkey, KYBER768_PRIVATE_KEY_BYTES);
+@@ -56,8 +66,10 @@ SECItem *
+ sftk_kyber_AllocCiphertextItem(KyberParams params, SECItem *ciphertext)
+ {
+     switch (params) {
++#ifndef NSS_DISABLE_KYBER
+         case params_kyber768_round3:
+         case params_kyber768_round3_test_mode:
++#endif
+         case params_ml_kem768:
+         case params_ml_kem768_test_mode:
+             return SECITEM_AllocItem(NULL, ciphertext, KYBER768_CIPHERTEXT_BYTES);
+@@ -67,70 +79,100 @@ sftk_kyber_AllocCiphertextItem(KyberPara
+ }
+ 
+ static PRBool
+-sftk_kyber_ValidateParams(const CK_NSS_KEM_PARAMETER_SET_TYPE *params)
++sftk_kem_ValidateMechanism(CK_MECHANISM_PTR pMechanism)
+ {
+-    if (!params) {
++    if (!pMechanism) {
+         return PR_FALSE;
+     }
+-    switch (*params) {
+-        case CKP_NSS_KYBER_768_ROUND3:
+-        case CKP_NSS_ML_KEM_768:
++    switch (pMechanism->mechanism) {
++#ifndef NSS_DISABLE_KYBER
++        case CKM_NSS_KYBER:
++#endif
++        case CKM_NSS_ML_KEM:
++        case CKM_ML_KEM:
+             return PR_TRUE;
+         default:
+             return PR_FALSE;
+     }
+ }
+ 
+-static PRBool
+-sftk_kem_ValidateMechanism(CK_MECHANISM_PTR pMechanism)
++/* this is a generic call the returns the paramSet as a CKU_LONG. if the
++ * param set is in a different attribute or mechanism structure, that would
++ * be based on the mechanism. The meaning of the paramter set is alway
++ * mechanism specific */
++static CK_RV
++sftk_kem_getParamSet(CK_MECHANISM_PTR pMechanism, SFTKObject *key,
++                     CK_ULONG *paramSet)
+ {
+-    if (!pMechanism) {
+-        return PR_FALSE;
+-    }
++    CK_RV crv = CKR_MECHANISM_INVALID;
++
+     switch (pMechanism->mechanism) {
++#ifndef NSS_DISABLE_KYBER
+         case CKM_NSS_KYBER:
++#endif
+         case CKM_NSS_ML_KEM:
+-            return pMechanism->ulParameterLen == sizeof(CK_NSS_KEM_PARAMETER_SET_TYPE) && sftk_kyber_ValidateParams(pMechanism->pParameter);
++            if ((pMechanism->pParameter) &&
++                pMechanism->ulParameterLen == sizeof(CK_ML_KEM_PARAMETER_SET_TYPE)) {
++                PR_STATIC_ASSERT(sizeof(CK_ML_KEM_PARAMETER_SET_TYPE) == sizeof(CK_LONG));
++                *paramSet = *(CK_ULONG *)pMechanism->pParameter;
++                crv = CKR_OK;
++                break;
++            }
++            crv = sftk_GetULongAttribute(key, CKA_NSS_PARAMETER_SET, paramSet);
++            if (crv == CKR_OK) {
++                break;
++            }
++        case CKM_ML_KEM:
++            crv = sftk_GetULongAttribute(key, CKA_PARAMETER_SET, paramSet);
++            break;
+         default:
+-            return PR_FALSE;
++            break;
+     }
++    return crv;
+ }
+ 
+ static CK_ULONG
+-sftk_kem_CiphertextLen(CK_MECHANISM_PTR pMechanism)
++sftk_kem_CiphertextLen(CK_MECHANISM_PTR pMechanism, CK_ULONG paramSet)
+ {
+-#ifdef DEBUG
+-    if (!sftk_kem_ValidateMechanism(pMechanism)) {
+-        PORT_Assert(0);
+-        return 0;
+-    }
++    /* the switch here is redundant now, but we will eventually have
++     * other unrelated KEM operations and the meaning of paramSet
++     * is dependent of the mechanism type (in general). Since there
++     * is not overlap between the Vendor specific mechanisms here
++     * and the stand ones, we'll just accept them all here. */
++    switch (pMechanism->mechanism) {
++#ifndef NSS_DISABLE_KYBER
++        case CKM_NSS_KYBER:
+ #endif
+-
+-    /* Assumes pMechanism has been validated with sftk_kem_ValidateMechanism */
+-    CK_NSS_KEM_PARAMETER_SET_TYPE *pParameterSet = pMechanism->pParameter;
+-    switch (*pParameterSet) {
+-        case CKP_NSS_KYBER_768_ROUND3:
+-        case CKP_NSS_ML_KEM_768:
+-            return KYBER768_CIPHERTEXT_BYTES;
++        case CKM_NSS_ML_KEM:
++        case CKM_ML_KEM:
++            switch (paramSet) {
++#ifndef NSS_DISABLE_KYBER
++                case CKP_NSS_KYBER_768_ROUND3:
++#endif
++                case CKP_NSS_ML_KEM_768:
++                case CKP_ML_KEM_768:
++                    return KYBER768_CIPHERTEXT_BYTES;
++                default:
++                    break;
++            }
+         default:
+-            /* unreachable if pMechanism has been validated */
+-            PORT_Assert(0);
+-            return 0;
++            break;
+     }
++    return 0;
+ }
+ 
+ /* C_Encapsulate takes a public encapsulation key hPublicKey, a secret
+  * phKey, and outputs a ciphertext (i.e. encapsulaton) of this secret in
+  * pCiphertext. */
+ CK_RV
+-NSC_Encapsulate(CK_SESSION_HANDLE hSession,
+-                CK_MECHANISM_PTR pMechanism,
+-                CK_OBJECT_HANDLE hPublicKey,
+-                CK_ATTRIBUTE_PTR pTemplate,
+-                CK_ULONG ulAttributeCount,
+-                /* out */ CK_OBJECT_HANDLE_PTR phKey,
+-                /* out */ CK_BYTE_PTR pCiphertext,
+-                /* out */ CK_ULONG_PTR pulCiphertextLen)
++NSC_EncapsulateKey(CK_SESSION_HANDLE hSession,
++                   CK_MECHANISM_PTR pMechanism,
++                   CK_OBJECT_HANDLE hPublicKey,
++                   CK_ATTRIBUTE_PTR pTemplate,
++                   CK_ULONG ulAttributeCount,
++                   /* out */ CK_BYTE_PTR pCiphertext,
++                   /* out */ CK_ULONG_PTR pulCiphertextLen,
++                   /* out */ CK_OBJECT_HANDLE_PTR phKey)
+ {
+     SFTKSession *session = NULL;
+     SFTKSlot *slot = NULL;
+@@ -142,6 +184,10 @@ NSC_Encapsulate(CK_SESSION_HANDLE hSessi
+ 
+     CK_RV crv;
+     SFTKFreeStatus status;
++    CK_ULONG paramSet = 0; /* use a generic U_LONG so we can handle
++                            * different param set types based on the
++                            * Mechanism value */
++    KyberParams kyberParams;
+ 
+     CHECK_FORK();
+ 
+@@ -152,12 +198,6 @@ NSC_Encapsulate(CK_SESSION_HANDLE hSessi
+     if (!sftk_kem_ValidateMechanism(pMechanism)) {
+         return CKR_MECHANISM_INVALID;
+     }
+-
+-    CK_ULONG ciphertextLen = sftk_kem_CiphertextLen(pMechanism);
+-    if (!pCiphertext || *pulCiphertextLen < ciphertextLen) {
+-        *pulCiphertextLen = ciphertextLen;
+-        return CKR_KEY_SIZE_RANGE;
+-    }
+     *phKey = CK_INVALID_HANDLE;
+ 
+     session = sftk_SessionFromHandle(hSession);
+@@ -193,20 +233,39 @@ NSC_Encapsulate(CK_SESSION_HANDLE hSessi
+         goto cleanup;
+     }
+ 
++    crv = sftk_kem_getParamSet(pMechanism, encapsulationKeyObject, &paramSet);
++    if (crv != CKR_OK) {
++        goto cleanup;
++    }
++
++    CK_ULONG ciphertextLen = sftk_kem_CiphertextLen(pMechanism, paramSet);
++    if (!pCiphertext || *pulCiphertextLen < ciphertextLen || ciphertextLen == 0) {
++        *pulCiphertextLen = ciphertextLen;
++        crv = CKR_KEY_SIZE_RANGE;
++        goto cleanup;
++    }
++
+     SECItem ciphertext = { siBuffer, pCiphertext, ciphertextLen };
+     SECItem pubKey = { siBuffer, encapsulationKey->attrib.pValue, encapsulationKey->attrib.ulValueLen };
+ 
+-    /* The length of secretBuf can be increased if we ever support other KEMs */
+-    uint8_t secretBuf[KYBER_SHARED_SECRET_BYTES] = { 0 };
++    /* The length of secretBuf can be increased if we ever support other KEMs
++     * by changing the define at the top of this file */
++    uint8_t secretBuf[MAX_SHARED_SECRET_BYTES] = { 0 };
+     SECItem secret = { siBuffer, secretBuf, sizeof secretBuf };
+ 
++    key->isFIPS = sftk_operationIsFIPS(slot, pMechanism, CKA_ENCAPSULATE,
++                                       key, 0);
++    key->source = SFTK_SOURCE_KEA;
+     switch (pMechanism->mechanism) {
++#ifndef NSS_DISABLE_KYBER
+         case CKM_NSS_KYBER:
++#endif
+         case CKM_NSS_ML_KEM:
+-            PORT_Assert(secret.len == KYBER_SHARED_SECRET_BYTES);
+-            CK_NSS_KEM_PARAMETER_SET_TYPE *pParameter = pMechanism->pParameter;
+-            KyberParams kyberParams = sftk_kyber_PK11ParamToInternal(*pParameter);
+-            SECStatus rv = Kyber_Encapsulate(kyberParams, /* seed */ NULL, &pubKey, &ciphertext, &secret);
++        case CKM_ML_KEM:
++            PORT_Assert(secret.len >= KYBER_SHARED_SECRET_BYTES);
++            kyberParams = sftk_kyber_PK11ParamToInternal(paramSet);
++            SECStatus rv = Kyber_Encapsulate(kyberParams, /* seed */ NULL,
++                                             &pubKey, &ciphertext, &secret);
+             if (rv != SECSuccess) {
+                 crv = (PORT_GetError() == SEC_ERROR_INVALID_ARGS) ? CKR_ARGUMENTS_BAD : CKR_FUNCTION_FAILED;
+                 goto cleanup;
+@@ -232,6 +291,7 @@ NSC_Encapsulate(CK_SESSION_HANDLE hSessi
+     }
+ 
+ cleanup:
++    PORT_SafeZero(secretBuf, sizeof(secretBuf));
+     if (session) {
+         sftk_FreeSession(session);
+     }
+@@ -254,14 +314,14 @@ cleanup:
+ }
+ 
+ CK_RV
+-NSC_Decapsulate(CK_SESSION_HANDLE hSession,
+-                CK_MECHANISM_PTR pMechanism,
+-                CK_OBJECT_HANDLE hPrivateKey,
+-                CK_BYTE_PTR pCiphertext,
+-                CK_ULONG ulCiphertextLen,
+-                CK_ATTRIBUTE_PTR pTemplate,
+-                CK_ULONG ulAttributeCount,
+-                /* out */ CK_OBJECT_HANDLE_PTR phKey)
++NSC_DecapsulateKey(CK_SESSION_HANDLE hSession,
++                   CK_MECHANISM_PTR pMechanism,
++                   CK_OBJECT_HANDLE hPrivateKey,
++                   CK_ATTRIBUTE_PTR pTemplate,
++                   CK_ULONG ulAttributeCount,
++                   CK_BYTE_PTR pCiphertext,
++                   CK_ULONG ulCiphertextLen,
++                   /* out */ CK_OBJECT_HANDLE_PTR phKey)
+ {
+     SFTKSession *session = NULL;
+     SFTKSlot *slot = NULL;
+@@ -270,9 +330,13 @@ NSC_Decapsulate(CK_SESSION_HANDLE hSessi
+ 
+     SFTKObject *decapsulationKeyObject = NULL;
+     SFTKAttribute *decapsulationKey = NULL;
++    CK_ULONG paramSet = 0; /* use a generic U_LONG so we can handle
++                            * different param set types based on the
++                            * Mechanism value */
+ 
+     CK_RV crv;
+     SFTKFreeStatus status;
++    KyberParams kyberParams;
+ 
+     CHECK_FORK();
+ 
+@@ -283,11 +347,6 @@ NSC_Decapsulate(CK_SESSION_HANDLE hSessi
+     if (!sftk_kem_ValidateMechanism(pMechanism)) {
+         return CKR_MECHANISM_INVALID;
+     }
+-
+-    CK_ULONG ciphertextLen = sftk_kem_CiphertextLen(pMechanism);
+-    if (ulCiphertextLen < ciphertextLen) {
+-        return CKR_ARGUMENTS_BAD;
+-    }
+     *phKey = CK_INVALID_HANDLE;
+ 
+     session = sftk_SessionFromHandle(hSession);
+@@ -323,20 +382,39 @@ NSC_Decapsulate(CK_SESSION_HANDLE hSessi
+         goto cleanup;
+     }
+ 
+-    SECItem privKey = { siBuffer, decapsulationKey->attrib.pValue, decapsulationKey->attrib.ulValueLen };
++    crv = sftk_kem_getParamSet(pMechanism, decapsulationKeyObject, &paramSet);
++    if (crv != CKR_OK) {
++        goto cleanup;
++    }
++
++    CK_ULONG ciphertextLen = sftk_kem_CiphertextLen(pMechanism, paramSet);
++    if (!pCiphertext || ulCiphertextLen != ciphertextLen || ciphertextLen == 0) {
++        crv = CKR_ARGUMENTS_BAD;
++        goto cleanup;
++    }
++
++    SECItem privKey = { siBuffer, decapsulationKey->attrib.pValue,
++                        decapsulationKey->attrib.ulValueLen };
+     SECItem ciphertext = { siBuffer, pCiphertext, ulCiphertextLen };
+ 
+-    /* The length of secretBuf can be increased if we ever support other KEMs */
+-    uint8_t secretBuf[KYBER_SHARED_SECRET_BYTES] = { 0 };
++    /* The length of secretBuf can be increased if we ever support other KEMs
++     * by changing the define at the top of this file */
++    uint8_t secretBuf[MAX_SHARED_SECRET_BYTES] = { 0 };
+     SECItem secret = { siBuffer, secretBuf, sizeof secretBuf };
++    key->isFIPS = sftk_operationIsFIPS(slot, pMechanism, CKA_DECAPSULATE,
++                                       key, 0);
++    key->source = SFTK_SOURCE_KEA;
+ 
+     switch (pMechanism->mechanism) {
++#ifndef NSS_DISABLE_KYBER
+         case CKM_NSS_KYBER:
++#endif
+         case CKM_NSS_ML_KEM:
+-            PORT_Assert(secret.len == KYBER_SHARED_SECRET_BYTES);
+-            CK_NSS_KEM_PARAMETER_SET_TYPE *pParameter = pMechanism->pParameter;
+-            KyberParams kyberParams = sftk_kyber_PK11ParamToInternal(*pParameter);
+-            SECStatus rv = Kyber_Decapsulate(kyberParams, &privKey, &ciphertext, &secret);
++        case CKM_ML_KEM:
++            kyberParams = sftk_kyber_PK11ParamToInternal(paramSet);
++            PORT_Assert(secret.len >= KYBER_SHARED_SECRET_BYTES);
++            SECStatus rv = Kyber_Decapsulate(kyberParams, &privKey,
++                                             &ciphertext, &secret);
+             if (rv != SECSuccess) {
+                 crv = (PORT_GetError() == SEC_ERROR_INVALID_ARGS) ? CKR_ARGUMENTS_BAD : CKR_FUNCTION_FAILED;
+                 goto cleanup;
+@@ -359,6 +437,7 @@ NSC_Decapsulate(CK_SESSION_HANDLE hSessi
+     }
+ 
+ cleanup:
++    PORT_SafeZero(secretBuf, sizeof(secretBuf));
+     if (session) {
+         sftk_FreeSession(session);
+     }
+@@ -379,3 +458,36 @@ cleanup:
+     }
+     return crv;
+ }
++
++/* PKCS #11 final spec moved som the the arguments around (to make
++ * NSC_EncapsulateKey and NSC_DecapsulateKey match, keep the old version for
++ * the vendor defined for backward compatibility */
++CK_RV
++NSC_Encapsulate(CK_SESSION_HANDLE hSession,
++                CK_MECHANISM_PTR pMechanism,
++                CK_OBJECT_HANDLE hPublicKey,
++                CK_ATTRIBUTE_PTR pTemplate,
++                CK_ULONG ulAttributeCount,
++                /* out */ CK_OBJECT_HANDLE_PTR phKey,
++                /* out */ CK_BYTE_PTR pCiphertext,
++                /* out */ CK_ULONG_PTR pulCiphertextLen)
++{
++    return NSC_EncapsulateKey(hSession, pMechanism, hPublicKey,
++                              pTemplate, ulAttributeCount,
++                              pCiphertext, pulCiphertextLen, phKey);
++}
++
++CK_RV
++NSC_Decapsulate(CK_SESSION_HANDLE hSession,
++                CK_MECHANISM_PTR pMechanism,
++                CK_OBJECT_HANDLE hPrivateKey,
++                CK_BYTE_PTR pCiphertext,
++                CK_ULONG ulCiphertextLen,
++                CK_ATTRIBUTE_PTR pTemplate,
++                CK_ULONG ulAttributeCount,
++                /* out */ CK_OBJECT_HANDLE_PTR phKey)
++{
++    return NSC_DecapsulateKey(hSession, pMechanism, hPrivateKey, pTemplate,
++                              ulAttributeCount, pCiphertext, ulCiphertextLen,
++                              phKey);
++}
+diff -up ./lib/softoken/pkcs11c.c.mlkem_p256 ./lib/softoken/pkcs11c.c
+--- ./lib/softoken/pkcs11c.c.mlkem_p256	2025-06-25 16:47:19.369362850 -0700
++++ ./lib/softoken/pkcs11c.c	2025-06-25 16:47:19.380362992 -0700
+@@ -5029,6 +5029,64 @@ loser:
+     return crv;
+ }
+ 
++PRBool
++sftk_compareKeysEqual(CK_SESSION_HANDLE hSession,
++                      CK_OBJECT_HANDLE key1, CK_OBJECT_HANDLE  key2)
++{
++    PRBool result = PR_FALSE;
++    SFTKSession *session;
++    SFTKObject *key1obj = NULL;
++    SFTKObject *key2obj = NULL;
++    SFTKAttribute *att1 = NULL;
++    SFTKAttribute *att2 = NULL;
++
++    /* fetch the pkcs11 objects from the handles */
++    session = sftk_SessionFromHandle(hSession);
++    if (session == NULL) {
++        return CKR_SESSION_HANDLE_INVALID;
++    }
++
++    key1obj = sftk_ObjectFromHandle(key1, session);
++    key2obj = sftk_ObjectFromHandle(key2, session);
++    sftk_FreeSession(session);
++    if ((key1obj == NULL) || (key2obj == NULL)) {
++        goto  loser;
++    }
++    /* fetch the value attributes */
++    att1 = sftk_FindAttribute(key1obj, CKA_VALUE);
++    if (att1 == NULL) {
++        goto loser;
++    }
++    att2 = sftk_FindAttribute(key2obj, CKA_VALUE);
++    if (att2 == NULL) {
++        goto loser;
++    }
++    /* make sure that they are equal */
++    if (att1->attrib.ulValueLen != att2->attrib.ulValueLen) {
++        goto loser;
++    }
++    if (PORT_Memcmp(att1->attrib.pValue, att2->attrib.pValue,
++                   att1->attrib.ulValueLen) != 0) {
++        goto loser;
++    }
++    result = PR_TRUE;
++loser:
++    if (key1obj) {
++        sftk_FreeObject(key1obj);
++    }
++    if (key2obj) {
++        sftk_FreeObject(key1obj);
++    }
++    if (att1) {
++        sftk_FreeAttribute(att1);
++    }
++    if (att2) {
++        sftk_FreeAttribute(att2);
++    }
++    return result;
++}
++
++
+ #define PAIRWISE_DIGEST_LENGTH SHA1_LENGTH /* 160-bits */
+ #define PAIRWISE_MESSAGE_LENGTH 20         /* 160-bits */
+ 
+@@ -5043,7 +5101,8 @@ loser:
+  */
+ static CK_RV
+ sftk_PairwiseConsistencyCheck(CK_SESSION_HANDLE hSession, SFTKSlot *slot,
+-                              SFTKObject *publicKey, SFTKObject *privateKey, CK_KEY_TYPE keyType)
++                              SFTKObject *publicKey, SFTKObject *privateKey,
++                              CK_KEY_TYPE keyType)
+ {
+     /*
+      *                      Key type    Mechanism type
+@@ -5058,11 +5117,15 @@ sftk_PairwiseConsistencyCheck(CK_SESSION
+      *
+      * None of these mechanisms has a parameter.
+      *
+-     * For derive           CKK_DH   => CKM_DH_PKCS_DERIVE
+-     *                      CKK_EC   => CKM_ECDH1_DERIVE
+-     *                      CKK_EC_MONTGOMERY   => CKM_ECDH1_DERIVE
++     * For derive: regenerate public key from the private key
++     *                      CKK_DH   => DH_Derive
++     *                      CKK_EC   => EC_NewKeyFromSeed
++     *                      CKK_EC_MONTGOMERY   => EC_NewKeyFromSeed
+      *                      others   => CKM_INVALID_MECHANISM
+      *
++     * For KEM mechanisms:
++     *                     CKK_NSS_KYBER  => don't
++     *
+      * The parameters for these mechanisms is the public key.
+      */
+     CK_MECHANISM mech = { 0, NULL, 0 };
+@@ -5072,6 +5135,7 @@ sftk_PairwiseConsistencyCheck(CK_SESSION
+     PRBool isEncryptable = PR_FALSE;
+     PRBool canSignVerify = PR_FALSE;
+     PRBool isDerivable = PR_FALSE;
++    PRBool isKEM = PR_FALSE;
+     CK_RV crv;
+ 
+     /* Variables used for Encrypt/Decrypt functions. */
+@@ -5089,35 +5153,42 @@ sftk_PairwiseConsistencyCheck(CK_SESSION
+     unsigned char *known_digest = (unsigned char *)"Mozilla Rules the World through NSS!";
+     unsigned char *signature;
+     CK_ULONG signature_length;
++    SFTKAttribute *attribute;
+ 
+-    if (keyType == CKK_RSA) {
+-        SFTKAttribute *attribute;
+-
+-        /* Get modulus length of private key. */
+-        attribute = sftk_FindAttribute(privateKey, CKA_MODULUS);
+-        if (attribute == NULL) {
+-            return CKR_DEVICE_ERROR;
+-        }
+-        modulusLen = attribute->attrib.ulValueLen;
+-        if (*(unsigned char *)attribute->attrib.pValue == 0) {
+-            modulusLen--;
+-        }
+-        sftk_FreeAttribute(attribute);
+-    } else if (keyType == CKK_DSA) {
+-        SFTKAttribute *attribute;
+-
+-        /* Get subprime length of private key. */
+-        attribute = sftk_FindAttribute(privateKey, CKA_SUBPRIME);
+-        if (attribute == NULL) {
+-            return CKR_DEVICE_ERROR;
+-        }
+-        subPrimeLen = attribute->attrib.ulValueLen;
+-        if (subPrimeLen > 1 && *(unsigned char *)attribute->attrib.pValue == 0) {
+-            subPrimeLen--;
+-        }
+-        sftk_FreeAttribute(attribute);
++    switch (keyType) {
++        case CKK_RSA:
++            /* Get modulus length of private key. */
++            attribute = sftk_FindAttribute(privateKey, CKA_MODULUS);
++            if (attribute == NULL) {
++                return CKR_DEVICE_ERROR;
++            }
++            modulusLen = attribute->attrib.ulValueLen;
++            if (*(unsigned char *)attribute->attrib.pValue == 0) {
++                modulusLen--;
++            }
++            sftk_FreeAttribute(attribute);
++            break;
++        case CKK_DSA:
++            /* Get subprime length of private key. */
++            attribute = sftk_FindAttribute(privateKey, CKA_SUBPRIME);
++            if (attribute == NULL) {
++                return CKR_DEVICE_ERROR;
++            }
++            subPrimeLen = attribute->attrib.ulValueLen;
++            if (subPrimeLen > 1 &&
++                *(unsigned char *)attribute->attrib.pValue == 0) {
++                subPrimeLen--;
++            }
++            break;
++        case CKK_NSS_KYBER:
++        case CKK_NSS_ML_KEM:
++            /* these aren't fips. we use them to generate key without a
++             * pairwise consistency check */
++            return CKR_OK;
+     }
+ 
++
++
+     /**************************************************/
+     /* Pairwise Consistency Check of Encrypt/Decrypt. */
+     /**************************************************/
+@@ -5473,6 +5544,79 @@ sftk_PairwiseConsistencyCheck(CK_SESSION
+             return crv;
+         }
+     }
++    isKEM = sftk_isTrue(privateKey, CKA_ENCAPSULATE);
++    if (isKEM) {
++        unsigned char *cipher_text = NULL;
++        CK_ULONG cipher_text_length = 0;
++        CK_OBJECT_HANDLE key1 =  CK_INVALID_HANDLE;
++        CK_OBJECT_HANDLE key2 =  CK_INVALID_HANDLE;
++        CK_KEY_TYPE genType = CKO_SECRET_KEY;
++        CK_ATTRIBUTE template = { CKA_KEY_TYPE, NULL, 0 };
++
++        template.pValue = &genType;
++        template.ulValueLen = sizeof(genType);
++        crv = CKR_OK;
++        switch (keyType) {
++            case CKK_ML_KEM:
++                cipher_text_length = KYBER_SHARED_SECRET_BYTES;
++                mech.mechanism = CKM_ML_KEM;
++                break;
++            case CKK_RSA:
++                if (!isEncryptable) {
++                    /* already handled the pairwise test, no need to
++                     * do it again */
++                    goto kem_done;
++                }
++                cipher_text_length = modulusLen;
++                mech.mechanism = CKM_RSA_PKCS;
++                break;
++            case CKK_EC:
++            case CKK_EC_MONTGOMERY:
++                if (!isDerivable) {
++                    /* again, already handled above, no need to check again
++                     */
++                    goto kem_done;
++                }
++                cipher_text_length = MAX_ECKEY_LEN;
++                mech.mechanism = CKM_ECDH1_DERIVE;
++                break;
++            default:
++                return CKR_DEVICE_ERROR;
++        }
++
++        /* Allocate space for signature data. */
++        cipher_text = (unsigned char *)PORT_ZAlloc(cipher_text_length);
++        if (cipher_text == NULL) {
++            return CKR_HOST_MEMORY;
++        }
++        crv = NSC_Encapsulate(hSession, &mech, publicKey->handle, &template, 1,
++                              &key1, cipher_text, &cipher_text_length);
++        if (crv != CKR_OK) {
++            goto kem_done;
++        }
++        crv = NSC_Decapsulate(hSession, &mech, privateKey->handle,
++                              cipher_text, cipher_text_length, &template, 1,
++                              &key2);
++        if (crv != CKR_OK) {
++            goto kem_done;
++        }
++        if (!sftk_compareKeysEqual(hSession, key1, key2)) {
++            crv = CKR_DEVICE_ERROR;
++            goto kem_done;
++        }
++kem_done:
++        /* PORT_Free already checks for NULL */
++        PORT_Free(cipher_text);
++        if (key1 != CK_INVALID_HANDLE) {
++            NSC_DestroyObject(hSession, key1);
++        }
++        if (key2 != CK_INVALID_HANDLE) {
++            NSC_DestroyObject(hSession, key2);
++        }
++        if (crv != CKR_OK) {
++            return CKR_DEVICE_ERROR;
++        }
++    }
+ 
+     return CKR_OK;
+ }
+@@ -5547,6 +5691,10 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+             ckKyberParamSet = *(CK_NSS_KEM_PARAMETER_SET_TYPE *)pPublicKeyTemplate[i].pValue;
+             continue;
+         }
++        if (pPublicKeyTemplate[i].type == CKA_PARAMETER_SET) {
++            ckKyberParamSet = *(CK_ML_KEM_PARAMETER_SET_TYPE *)pPublicKeyTemplate[i].pValue;
++            continue;
++        }
+ 
+         crv = sftk_AddAttributeType(publicKey,
+                                     sftk_attr_expand(&pPublicKeyTemplate[i]));
+@@ -5883,8 +6031,9 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+             /* extract the necessary parameters and copy them to private keys */
+             crv = sftk_Attribute2SSecItem(NULL, &ecEncodedParams, publicKey,
+                                           CKA_EC_PARAMS);
+-            if (crv != CKR_OK)
++            if (crv != CKR_OK) {
+                 break;
++            }
+ 
+             crv = sftk_AddAttributeType(privateKey, CKA_EC_PARAMS,
+                                         sftk_item_expand(&ecEncodedParams));
+@@ -5895,11 +6044,12 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+ 
+             /* Decode ec params before calling EC_NewKey */
+             rv = EC_DecodeParams(&ecEncodedParams, &ecParams);
+-            SECITEM_ZfreeItem(&ecEncodedParams, PR_FALSE);
+             if (rv != SECSuccess) {
+                 crv = sftk_MapCryptError(PORT_GetError());
++                SECITEM_ZfreeItem(&ecEncodedParams, PR_FALSE);
+                 break;
+             }
++            SECITEM_ZfreeItem(&ecEncodedParams, PR_FALSE);
+             rv = EC_NewKey(ecParams, &ecPriv);
+             if (rv != SECSuccess) {
+                 if (PORT_GetError() == SEC_ERROR_LIBRARY_FAILURE) {
+@@ -5943,10 +6093,18 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+             PORT_FreeArena(ecPriv->ecParams.arena, PR_TRUE);
+             break;
+ 
++#ifndef NSS_DISABLE_KYBER
+         case CKM_NSS_KYBER_KEY_PAIR_GEN:
++            key_type = CKK_NSS_KYBER;
++            goto generate_mlkem;
++#endif
+         case CKM_NSS_ML_KEM_KEY_PAIR_GEN:
++            key_type = CKK_NSS_ML_KEM;
++            goto generate_mlkem;
++        case CKM_ML_KEM_KEY_PAIR_GEN:
++            key_type = CKK_ML_KEM;
++generate_mlkem:
+             sftk_DeleteAttributeType(privateKey, CKA_NSS_DB);
+-            key_type = CKK_NSS_KYBER;
+ 
+             SECItem privKey = { siBuffer, NULL, 0 };
+             SECItem pubKey = { siBuffer, NULL, 0 };
+@@ -5969,8 +6127,8 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+             if (crv != CKR_OK) {
+                 goto kyber_done;
+             }
+-            crv = sftk_AddAttributeType(publicKey, CKA_NSS_PARAMETER_SET,
+-                                        &ckKyberParamSet, sizeof(CK_NSS_KEM_PARAMETER_SET_TYPE));
++            crv = sftk_AddAttributeType(publicKey, CKA_PARAMETER_SET,
++                                        &ckKyberParamSet, sizeof(CK_ML_KEM_PARAMETER_SET_TYPE));
+             if (crv != CKR_OK) {
+                 goto kyber_done;
+             }
+@@ -5979,8 +6137,9 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+             if (crv != CKR_OK) {
+                 goto kyber_done;
+             }
+-            crv = sftk_AddAttributeType(privateKey, CKA_NSS_PARAMETER_SET,
+-                                        &ckKyberParamSet, sizeof(CK_NSS_KEM_PARAMETER_SET_TYPE));
++
++            crv = sftk_AddAttributeType(privateKey, CKA_PARAMETER_SET,
++                                        &ckKyberParamSet, sizeof(CK_ML_KEM_PARAMETER_SET_TYPE));
+             if (crv != CKR_OK) {
+                 goto kyber_done;
+             }
+@@ -6130,7 +6289,8 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+                                   &cktrue, sizeof(CK_BBOOL));
+     }
+ 
+-    if (crv == CKR_OK && pMechanism->mechanism != CKM_NSS_ECDHE_NO_PAIRWISE_CHECK_KEY_PAIR_GEN && key_type != CKK_NSS_KYBER) {
++    if (crv == CKR_OK &&
++        pMechanism->mechanism != CKM_NSS_ECDHE_NO_PAIRWISE_CHECK_KEY_PAIR_GEN) {
+         /* Perform FIPS 140-2 pairwise consistency check. */
+         crv = sftk_PairwiseConsistencyCheck(hSession, slot,
+                                             publicKey, privateKey, key_type);
+@@ -8598,6 +8758,8 @@ NSC_DeriveKey(CK_SESSION_HANDLE hSession
+ 
+             crv = sftk_forceAttribute(key, CKA_VALUE, buf, keySize);
+             PORT_ZFree(buf, tmpKeySize);
++            /* preserve the source of the original base key */
++            /* key->source = sourceKey->source; */
+             sftk_FreeAttribute(att2);
+             sftk_FreeObject(paramKey);
+             break;
+diff -up ./lib/softoken/pkcs11.c.mlkem_p256 ./lib/softoken/pkcs11.c
+--- ./lib/softoken/pkcs11.c.mlkem_p256	2025-06-25 16:47:19.369362850 -0700
++++ ./lib/softoken/pkcs11.c	2025-06-25 16:47:19.379362979 -0700
+@@ -302,6 +302,7 @@ struct mechanismList {
+ #define CKF_SN_VR CKF_SIGN | CKF_VERIFY
+ #define CKF_SN_RE CKF_SIGN_RECOVER | CKF_VERIFY_RECOVER
+ #define CKF_EN_DE_MSG CKF_ENCRYPT | CKF_DECRYPT | CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_DECRYPT
++#define CKF_KEM CKF_ENCAPSULATE | CKF_DECAPSULATE
+ 
+ #define CKF_EN_DE_WR_UN CKF_EN_DE | CKF_WR_UN
+ #define CKF_SN_VR_RE CKF_SN_VR | CKF_SN_RE
+@@ -651,10 +652,14 @@ static const struct mechanismList mechan
+     { CKM_NSS_IKE1_PRF_DERIVE, { 8, 64, CKF_DERIVE }, PR_TRUE },
+     { CKM_NSS_IKE1_APP_B_PRF_DERIVE, { 8, 255 * 64, CKF_DERIVE }, PR_TRUE },
+     /* -------------------- Kyber Operations ----------------------- */
++#ifndef NSS_DISABLE_KYBER
+     { CKM_NSS_KYBER_KEY_PAIR_GEN, { 0, 0, CKF_GENERATE_KEY_PAIR }, PR_TRUE },
+-    { CKM_NSS_KYBER, { 0, 0, 0 }, PR_TRUE },
++    { CKM_NSS_KYBER, { 0, 0, CKF_KEM }, PR_TRUE },
++#endif
+     { CKM_NSS_ML_KEM_KEY_PAIR_GEN, { 0, 0, CKF_GENERATE_KEY_PAIR }, PR_TRUE },
+-    { CKM_NSS_ML_KEM, { 0, 0, 0 }, PR_TRUE },
++    { CKM_NSS_ML_KEM, { 0, 0, CKF_KEM }, PR_TRUE },
++    { CKM_ML_KEM_KEY_PAIR_GEN, { 0, 0, CKF_GENERATE_KEY_PAIR }, PR_TRUE },
++    { CKM_ML_KEM, { 0, 0, CKF_KEM }, PR_TRUE },
+ };
+ static const CK_ULONG mechanismCount = sizeof(mechanisms) / sizeof(mechanisms[0]);
+ 
+@@ -1036,6 +1041,7 @@ sftk_handlePublicKeyObject(SFTKSession *
+     CK_BBOOL wrap = CK_TRUE;
+     CK_BBOOL derive = CK_FALSE;
+     CK_BBOOL verify = CK_TRUE;
++    CK_BBOOL encapsulate = CK_FALSE;
+     CK_RV crv;
+ 
+     switch (key_type) {
+@@ -1109,16 +1115,22 @@ sftk_handlePublicKeyObject(SFTKSession *
+             recover = CK_FALSE;
+             wrap = CK_FALSE;
+             break;
++#ifndef NSS_DISABLE_KYBER
+         case CKK_NSS_KYBER:
++#endif
+         case CKK_NSS_ML_KEM:
+-            if (!sftk_hasAttribute(object, CKA_NSS_PARAMETER_SET)) {
+-                return CKR_TEMPLATE_INCOMPLETE;
++        case CKK_ML_KEM:
++            if (!sftk_hasAttribute(object, CKA_PARAMETER_SET)) {
++                if (!sftk_hasAttribute(object, CKA_NSS_PARAMETER_SET)) {
++                    return CKR_TEMPLATE_INCOMPLETE;
++                }
+             }
+             derive = CK_FALSE;
+             verify = CK_FALSE;
+             encrypt = CK_FALSE;
+             recover = CK_FALSE;
+             wrap = CK_FALSE;
++            encapsulate = CK_TRUE;
+             break;
+         default:
+             return CKR_ATTRIBUTE_VALUE_INVALID;
+@@ -1144,6 +1156,10 @@ sftk_handlePublicKeyObject(SFTKSession *
+     crv = sftk_defaultAttribute(object, CKA_DERIVE, &derive, sizeof(CK_BBOOL));
+     if (crv != CKR_OK)
+         return crv;
++    crv = sftk_defaultAttribute(object, CKA_ENCAPSULATE, &encapsulate,
++                                sizeof(CK_BBOOL));
++    if (crv != CKR_OK)
++        return crv;
+ 
+     object->objectInfo = sftk_GetPubKey(object, key_type, &crv);
+     if (object->objectInfo == NULL) {
+@@ -1196,6 +1212,7 @@ sftk_handlePrivateKeyObject(SFTKSession
+     CK_BBOOL recover = CK_TRUE;
+     CK_BBOOL wrap = CK_TRUE;
+     CK_BBOOL derive = CK_TRUE;
++    CK_BBOOL encapsulate = CK_FALSE;
+     CK_BBOOL ckfalse = CK_FALSE;
+     PRBool createObjectInfo = PR_TRUE;
+     PRBool fillPrivateKey = PR_FALSE;
+@@ -1323,15 +1340,24 @@ sftk_handlePrivateKeyObject(SFTKSession
+             derive = CK_TRUE;
+             createObjectInfo = PR_FALSE;
+             break;
++#ifndef NSS_DISABLE_KYBER
+         case CKK_NSS_KYBER:
++#endif
+         case CKK_NSS_ML_KEM:
++        case CKK_ML_KEM:
+             if (!sftk_hasAttribute(object, CKA_KEY_TYPE)) {
+                 return CKR_TEMPLATE_INCOMPLETE;
+             }
+             if (!sftk_hasAttribute(object, CKA_VALUE)) {
+                 return CKR_TEMPLATE_INCOMPLETE;
+             }
++            if (!sftk_hasAttribute(object, CKA_PARAMETER_SET)) {
++                if (!sftk_hasAttribute(object, CKA_NSS_PARAMETER_SET)) {
++                    return CKR_TEMPLATE_INCOMPLETE;
++                }
++            }
+             encrypt = sign = recover = wrap = CK_FALSE;
++            encapsulate = CK_TRUE;
+             break;
+         default:
+             return CKR_ATTRIBUTE_VALUE_INVALID;
+@@ -1361,6 +1387,9 @@ sftk_handlePrivateKeyObject(SFTKSession
+     crv = sftk_defaultAttribute(object, CKA_DERIVE, &derive, sizeof(CK_BBOOL));
+     if (crv != CKR_OK)
+         return crv;
++    crv = sftk_defaultAttribute(object, CKA_DECAPSULATE, &encapsulate, sizeof(CK_BBOOL));
++    if (crv != CKR_OK)
++        return crv;
+     /* the next two bits get modified only in the key gen and token cases */
+     crv = sftk_forceAttribute(object, CKA_ALWAYS_SENSITIVE,
+                               &ckfalse, sizeof(CK_BBOOL));
+@@ -1372,7 +1401,6 @@ sftk_handlePrivateKeyObject(SFTKSession
+         return crv;
+ 
+     /* should we check the non-token RSA private keys? */
+-
+     if (sftk_isTrue(object, CKA_TOKEN)) {
+         SFTKSlot *slot = session->slot;
+         SFTKDBHandle *keyHandle = sftk_getKeyDB(slot);
+@@ -2017,8 +2045,11 @@ sftk_GetPubKey(SFTKObject *object, CK_KE
+                 crv = CKR_ATTRIBUTE_VALUE_INVALID;
+             }
+             break;
++#ifndef NSS_DISABLE_KYBER
+         case CKK_NSS_KYBER:
++#endif
+         case CKK_NSS_ML_KEM:
++        case CKK_ML_KEM:
+             crv = CKR_OK;
+             break;
+         default:
+@@ -2187,8 +2218,11 @@ sftk_mkPrivKey(SFTKObject *object, CK_KE
+             }
+             break;
+ 
++#ifndef NSS_DISABLE_KYBER
+         case CKK_NSS_KYBER:
++#endif
+         case CKK_NSS_ML_KEM:
++        case CKK_ML_KEM:
+             break;
+ 
+         default:
+diff -up ./lib/softoken/pkcs11u.c.mlkem_p256 ./lib/softoken/pkcs11u.c
+--- ./lib/softoken/pkcs11u.c.mlkem_p256	2025-06-25 16:47:19.361362747 -0700
++++ ./lib/softoken/pkcs11u.c	2025-06-25 16:47:19.380362992 -0700
+@@ -555,6 +555,11 @@ sftk_isTrue(SFTKObject *object, CK_ATTRI
+     if (attribute == NULL) {
+         return PR_FALSE;
+     }
++    if ((attribute->attrib.pValue == NULL) ||
++        (attribute->attrib.ulValueLen != sizeof(CK_BBOOL))) {
++        return PR_FALSE;
++    }
++
+     tok = (PRBool)(*(CK_BBOOL *)attribute->attrib.pValue);
+     sftk_FreeAttribute(attribute);
+ 
+diff -up ./lib/softoken/sdb.c.mlkem_p256 ./lib/softoken/sdb.c
+--- ./lib/softoken/sdb.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/softoken/sdb.c	2025-06-25 16:47:19.380362992 -0700
+@@ -113,6 +113,7 @@ static const CK_ATTRIBUTE_TYPE known_att
+     CKA_RESOLUTION, CKA_CHAR_ROWS, CKA_CHAR_COLUMNS, CKA_COLOR,
+     CKA_BITS_PER_PIXEL, CKA_CHAR_SETS, CKA_ENCODING_METHODS, CKA_MIME_TYPES,
+     CKA_MECHANISM_TYPE, CKA_REQUIRED_CMS_ATTRIBUTES,
++    CKA_ENCAPSULATE, CKA_DECAPSULATE, CKA_PARAMETER_SET,
+     CKA_DEFAULT_CMS_ATTRIBUTES, CKA_SUPPORTED_CMS_ATTRIBUTES,
+     CKA_WRAP_TEMPLATE, CKA_UNWRAP_TEMPLATE, CKA_NSS_TRUST, CKA_NSS_URL,
+     CKA_NSS_EMAIL, CKA_NSS_SMIME_INFO, CKA_NSS_SMIME_TIMESTAMP,
+diff -up ./lib/softoken/sftkdb.c.mlkem_p256 ./lib/softoken/sftkdb.c
+--- ./lib/softoken/sftkdb.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/softoken/sftkdb.c	2025-06-25 16:47:19.380362992 -0700
+@@ -1763,6 +1763,7 @@ static const CK_ATTRIBUTE_TYPE known_att
+     CKA_CHAR_COLUMNS, CKA_COLOR, CKA_BITS_PER_PIXEL, CKA_CHAR_SETS,
+     CKA_ENCODING_METHODS, CKA_MIME_TYPES, CKA_MECHANISM_TYPE,
+     CKA_REQUIRED_CMS_ATTRIBUTES, CKA_DEFAULT_CMS_ATTRIBUTES,
++    CKA_ENCAPSULATE, CKA_DECAPSULATE, CKA_PARAMETER_SET,
+     CKA_SUPPORTED_CMS_ATTRIBUTES, CKA_NSS_URL, CKA_NSS_EMAIL,
+     CKA_NSS_SMIME_INFO, CKA_NSS_SMIME_TIMESTAMP,
+     CKA_NSS_PKCS8_SALT, CKA_NSS_PASSWORD_CHECK, CKA_NSS_EXPIRES,
+diff -up ./lib/softoken/softoken.h.mlkem_p256 ./lib/softoken/softoken.h
+--- ./lib/softoken/softoken.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/softoken/softoken.h	2025-06-25 16:47:19.380362992 -0700
+@@ -137,6 +137,24 @@ extern void sftk_AuditDeriveKey(CK_SESSI
+ extern void sftk_AuditDigestKey(CK_SESSION_HANDLE hSession,
+                                 CK_OBJECT_HANDLE hKey, CK_RV rv);
+ 
++extern void sftk_AuditEncapsulate(CK_SESSION_HANDLE hSession,
++                                  CK_MECHANISM_PTR pMechanism,
++                                  CK_OBJECT_HANDLE hPublicKey,
++                                  CK_ATTRIBUTE_PTR pTemplate,
++                                  CK_ULONG ulAttributeCount,
++                                  CK_OBJECT_HANDLE_PTR phKey,
++                                  CK_BYTE_PTR pCiphertext,
++                                  CK_ULONG_PTR pulCiphertextLen, CK_RV rv);
++
++extern void sftk_AuditDecapsulate(CK_SESSION_HANDLE hSession,
++                                  CK_MECHANISM_PTR pMechanism,
++                                  CK_OBJECT_HANDLE hPrivateKey,
++                                  CK_BYTE_PTR pCiphertext,
++                                  CK_ULONG ulCiphertextLen,
++                                  CK_ATTRIBUTE_PTR pTemplate,
++                                  CK_ULONG ulAttributeCount,
++                                  CK_OBJECT_HANDLE_PTR phKey, CK_RV rv);
++
+ /*
+ ** FIPS 140-2 Error state
+ */
+diff -up ./lib/softoken/softoknt.h.mlkem_p256 ./lib/softoken/softoknt.h
+--- ./lib/softoken/softoknt.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/softoken/softoknt.h	2025-06-25 16:47:19.380362992 -0700
+@@ -40,7 +40,9 @@ typedef enum {
+     NSS_AUDIT_SELF_TEST,
+     NSS_AUDIT_SET_PIN,
+     NSS_AUDIT_UNWRAP_KEY,
+-    NSS_AUDIT_WRAP_KEY
++    NSS_AUDIT_WRAP_KEY,
++    NSS_AUDIT_ENCAPSULATE_KEY,
++    NSS_AUDIT_DECAPSULATE_KEY
+ } NSSAuditType;
+ 
+ #endif /* _SOFTOKNT_H_ */
+diff -up ./lib/ssl/sslimpl.h.mlkem_p256 ./lib/ssl/sslimpl.h
+--- ./lib/ssl/sslimpl.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/ssl/sslimpl.h	2025-06-25 16:47:19.381363005 -0700
+@@ -130,7 +130,13 @@ typedef enum { SSLAppOpRead = 0,
+ #define DTLS_RETRANSMIT_FINISHED_MS 30000
+ 
+ /* default number of entries in namedGroupPreferences */
++#ifndef NSS_DISABLE_KYBER
++/* this define is checked against the namedGroup table
++ * and compile time asserts kick in if it doesn't match */
++#define SSL_NAMED_GROUP_COUNT 34
++#else
+ #define SSL_NAMED_GROUP_COUNT 33
++#endif
+ 
+ /* The maximum DH and RSA bit-length supported. */
+ #define SSL_MAX_DH_KEY_BITS 8192
+diff -up ./lib/ssl/sslsock.c.mlkem_p256 ./lib/ssl/sslsock.c
+--- ./lib/ssl/sslsock.c.mlkem_p256	2025-06-25 16:47:19.358362709 -0700
++++ ./lib/ssl/sslsock.c	2025-06-25 16:47:19.381363005 -0700
+@@ -22,6 +22,7 @@
+ #include "tls13ech.h"
+ #include "tls13psk.h"
+ #include "tls13subcerts.h"
++#include "secmodti.h" /* until SEC_OID_SECP256R1MLKEM768 is upstream */
+ 
+ static const sslSocketOps ssl_default_ops = { /* No SSL. */
+                                               ssl_DefConnect,
+@@ -158,16 +159,24 @@ static const PRUint16 srtpCiphers[] = {
+         ssl_grp_ffdhe_##size, size, ssl_kea_dh, \
+             SEC_OID_TLS_FFDHE_##size, PR_TRUE   \
+     }
++#define HYGROUP(kem, ec, size, kem_oid, ec_oid, assumeSupported) \
++    {                                                            \
++        ssl_grp_kem_##kem##ec, size, ssl_kea_ecdh_hybrid,        \
++            SEC_OID_##kem_oid##ec_oid, assumeSupported          \
++    }
+ 
+ const sslNamedGroupDef ssl_named_groups[] = {
+-    /* Note that 256 for 25519 is a lie, but we only use it for checking bit
+-     * security and expect 256 bits there (not 255). */
++    /* Note that 256 for 25519 and hybrid is a lie, but we only use it for
++     * checking bit security and expect 256 bits there (not 255). */
++    HYGROUP(mlkem768, x25519,    256, MLKEM768, X25519,    PR_TRUE),
++    HYGROUP(mlkem768, secp256r1, 256, MLKEM768, SECP256R1, PR_TRUE),
+     { ssl_grp_ec_curve25519, 256, ssl_kea_ecdh, SEC_OID_CURVE25519, PR_TRUE },
+     ECGROUP(secp256r1, 256, SECP256R1, PR_TRUE),
+     ECGROUP(secp384r1, 384, SECP384R1, PR_TRUE),
+     ECGROUP(secp521r1, 521, SECP521R1, PR_TRUE),
++#ifndef NSS_DISABLE_KYBER
+     { ssl_grp_kem_xyber768d00, 256, ssl_kea_ecdh_hybrid, SEC_OID_XYBER768D00, PR_TRUE },
+-    { ssl_grp_kem_mlkem768x25519, 256, ssl_kea_ecdh_hybrid, SEC_OID_MLKEM768X25519, PR_TRUE },
++#endif
+     FFGROUP(2048),
+     FFGROUP(3072),
+     FFGROUP(4096),
+diff -up ./lib/ssl/sslt.h.mlkem_p256 ./lib/ssl/sslt.h
+--- ./lib/ssl/sslt.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/ssl/sslt.h	2025-06-25 16:47:19.381363005 -0700
+@@ -261,7 +261,10 @@ typedef enum {
+     ssl_grp_ffdhe_6144 = 259,
+     ssl_grp_ffdhe_8192 = 260,
+     ssl_grp_kem_mlkem768x25519 = 4588,
++    ssl_grp_kem_secp256r1mlkem768 = 4587,
++#ifndef NSS_DISABLE_KYBER
+     ssl_grp_kem_xyber768d00 = 25497, /* draft-tls-westerbaan-xyber768d00-02 */
++#endif
+     ssl_grp_none = 65537,            /* special value */
+     ssl_grp_ffdhe_custom = 65538     /* special value */
+ } SSLNamedGroup;
+diff -up ./lib/ssl/tls13con.c.mlkem_p256 ./lib/ssl/tls13con.c
+--- ./lib/ssl/tls13con.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/ssl/tls13con.c	2025-06-25 16:47:19.382363018 -0700
+@@ -382,13 +382,16 @@ tls13_CreateKEMKeyPair(sslSocket *ss, co
+     CK_NSS_KEM_PARAMETER_SET_TYPE paramSet;
+ 
+     switch (groupDef->name) {
++#ifndef NSS_DISABLE_KYBER
+         case ssl_grp_kem_xyber768d00:
+             mechanism = CKM_NSS_KYBER_KEY_PAIR_GEN;
+             paramSet = CKP_NSS_KYBER_768_ROUND3;
+             break;
++#endif
+         case ssl_grp_kem_mlkem768x25519:
++        case ssl_grp_kem_secp256r1mlkem768:
+             mechanism = CKM_NSS_ML_KEM_KEY_PAIR_GEN;
+-            paramSet = CKP_NSS_ML_KEM_768;
++            paramSet = CKP_ML_KEM_768;
+             break;
+         default:
+             PORT_Assert(0);
+@@ -400,15 +403,33 @@ tls13_CreateKEMKeyPair(sslSocket *ss, co
+     if (!slot) {
+         goto loser;
+     }
++    /* avoid pairwise check in non-FIPS mode */
++    /* the only difference between CKM_ML_KEM_KEY_PAIR_GEN and
++     * CKM_NSS_ML_KEM_KEY_PAIR_GEN is the latter skips the pairwise consistency
++     * check and is only supported by softoken */
++    if ((mechanism == CKM_ML_KEM_KEY_PAIR_GEN) && !PK11_IsFIPS() &&
++         PK11_DoesMechanism(slot, CKM_NSS_ML_KEM_KEY_PAIR_GEN)) {
++        mechanism = CKM_NSS_ML_KEM_KEY_PAIR_GEN;
++    }
+ 
+     privKey = PK11_GenerateKeyPairWithOpFlags(slot, mechanism,
+-                                              &paramSet, &pubKey, PK11_ATTR_SESSION | PK11_ATTR_INSENSITIVE | PK11_ATTR_PUBLIC,
+-                                              CKF_DERIVE, CKF_DERIVE, ss->pkcs11PinArg);
++                                              &paramSet, &pubKey,
++                                              PK11_ATTR_SESSION |
++                                              PK11_ATTR_INSENSITIVE |
++                                              PK11_ATTR_PUBLIC,
++                                              CKF_ENCAPSULATE|CKF_DECAPSULATE,
++                                              CKF_ENCAPSULATE|CKF_DECAPSULATE,
++                                              ss->pkcs11PinArg);
+ 
+     if (!privKey) {
+         privKey = PK11_GenerateKeyPairWithOpFlags(slot, mechanism,
+-                                                  &paramSet, &pubKey, PK11_ATTR_SESSION | PK11_ATTR_SENSITIVE | PK11_ATTR_PRIVATE,
+-                                                  CKF_DERIVE, CKF_DERIVE, ss->pkcs11PinArg);
++                                                  &paramSet, &pubKey,
++                                                  PK11_ATTR_SESSION |
++                                                  PK11_ATTR_SENSITIVE |
++                                                  PK11_ATTR_PRIVATE,
++                                                  CKF_ENCAPSULATE|CKF_DECAPSULATE,
++                                                  CKF_ENCAPSULATE|CKF_DECAPSULATE,
++                                                  ss->pkcs11PinArg);
+     }
+ 
+     PK11_FreeSlot(slot);
+@@ -448,6 +469,89 @@ loser:
+     return SECFailure;
+ }
+ 
++/* only copy the ECDh component of an ephemeral KeyPair */
++sslEphemeralKeyPair *
++tls13_CopyDHEphemeralKeyPair(sslEphemeralKeyPair *copyKeyPair,
++                             const sslNamedGroupDef *groupDef) {
++    /* We could use ssl_CopyEphemeralKeyPair here, but we would need to free
++     * the KEM components. So we only copy the ECDH keys */
++    sslEphemeralKeyPair *keyPair = PORT_ZNew(sslEphemeralKeyPair);
++    if (!keyPair) {
++        return NULL;
++    }
++    PR_INIT_CLIST(&keyPair->link);
++    keyPair->group = groupDef;
++    keyPair->keys = ssl_GetKeyPairRef(copyKeyPair->keys);
++    return keyPair;
++}
++
++/*
++ * find a hybrid key Pair they might contain the same ecdh key so we
++ * can reuse them. Each ec group can map to more than one hybrid Pair
++ */
++sslEphemeralKeyPair *
++tls13_FindHybridKeyPair(sslSocket *ss, const sslNamedGroupDef *groupDef)
++{
++    sslEphemeralKeyPair *hybridPair = NULL;
++    switch (groupDef->name) {
++    case ssl_grp_ec_secp256r1:
++        /* future, this may be a loop to check multiple named groups */
++        hybridPair = ssl_LookupEphemeralKeyPair(ss,
++                     ssl_LookupNamedGroup(ssl_grp_kem_secp256r1mlkem768));
++        break;
++    case ssl_grp_ec_curve25519:
++#ifndef NSS_DISABLE_KYBER
++        /* a loop to check multiple named groups */
++        SSLNamedGroup gnames[] = { ssl_grp_kem_xyber768d00,
++                                   ssl_grp_kem_mlkem768x25519 };
++        for (int i=0; i < PR_ARRAY_SIZE(gnames); i++) {
++            hybridPair = ssl_LookupEphemeralKeyPair(ss,
++                         ssl_LookupNamedGroup(gnames[i]));
++            if (hybridPair != NULL) {
++                break;
++            }
++        }
++#else
++        /* future, this will be a loop to check multiple named groups */
++        hybridPair = ssl_LookupEphemeralKeyPair(ss,
++                     ssl_LookupNamedGroup(ssl_grp_kem_mlkem768x25519));
++#endif
++        break;
++    default:
++        PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
++        return NULL;
++    }
++    return hybridPair;
++}
++
++/*
++ * Find a corresponding KEM form another hybrid key
++ */
++#ifdef notdef
++sslKeyPair *
++tls13_FindKEMKeyPairFromHybrid(sslSocket *ss, const sslNamedGroupDef *groupDef)
++{
++    sslEphemeralKeyPair *hybridPair = NULL;
++    switch (groupDef->name) {
++    case ssl_grp_kem_mlkem768x25519:
++        /* future, this may be a loop to check multiple named groups */
++        hybridPair = ssl_LookupEphemeralKeyPair(ss,
++                     ssl_LookupNamedGroup(ssl_grp_kem_secp256r1mlkem768));
++        break;
++    case ssl_grp_kem_secp256r1mlkem768:
++        /* future, this will be a loop to check multiple named groups */
++        hybridPair = ssl_LookupEphemeralKeyPair(ss,
++                     ssl_LookupNamedGroup(ssl_grp_kem_mlkem768x25519));
++        break;
++    default:
++        PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
++        return NULL;
++    }
++    return hybridPair->kemKeys;
++}
++#endif
++
++
+ SECStatus
+ tls13_CreateKeyShare(sslSocket *ss, const sslNamedGroupDef *groupDef,
+                      sslEphemeralKeyPair **outKeyPair)
+@@ -455,21 +559,35 @@ tls13_CreateKeyShare(sslSocket *ss, cons
+     SECStatus rv;
+     const ssl3DHParams *params;
+     sslEphemeralKeyPair *keyPair = NULL;
++    const sslNamedGroupDef *dhGroup = NULL;
+ 
+     PORT_Assert(groupDef);
+     switch (groupDef->keaType) {
+         case ssl_kea_ecdh_hybrid:
+-            if (groupDef->name != ssl_grp_kem_xyber768d00 && groupDef->name != ssl_grp_kem_mlkem768x25519) {
++            switch (groupDef->name) {
++            case ssl_grp_kem_secp256r1mlkem768:
++                dhGroup = ssl_LookupNamedGroup(ssl_grp_ec_secp256r1);
++                break;
++#ifndef NSS_DISABLE_KYBER
++            case ssl_grp_kem_xyber768d00:
++#endif
++            case ssl_grp_kem_mlkem768x25519:
++                dhGroup = ssl_LookupNamedGroup(ssl_grp_ec_curve25519);
++                break;
++            default:
++                PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
++                return SECFailure;
++            }
++            if (dhGroup == NULL) {
+                 PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+                 return SECFailure;
+             }
+-            const sslNamedGroupDef *x25519 = ssl_LookupNamedGroup(ssl_grp_ec_curve25519);
+-            sslEphemeralKeyPair *x25519Pair = ssl_LookupEphemeralKeyPair(ss, x25519);
+-            if (x25519Pair) {
+-                keyPair = ssl_CopyEphemeralKeyPair(x25519Pair);
++            keyPair = ssl_LookupEphemeralKeyPair(ss, dhGroup);
++            if (keyPair) {
++                keyPair= ssl_CopyEphemeralKeyPair(keyPair);
+             }
+             if (!keyPair) {
+-                rv = ssl_CreateECDHEphemeralKeyPair(ss, x25519, &keyPair);
++                rv = ssl_CreateECDHEphemeralKeyPair(ss, dhGroup, &keyPair);
+                 if (rv != SECSuccess) {
+                     return SECFailure;
+                 }
+@@ -477,23 +595,9 @@ tls13_CreateKeyShare(sslSocket *ss, cons
+             keyPair->group = groupDef;
+             break;
+         case ssl_kea_ecdh:
+-            if (groupDef->name == ssl_grp_ec_curve25519) {
+-                sslEphemeralKeyPair *hybridPair = ssl_LookupEphemeralKeyPair(ss, ssl_LookupNamedGroup(ssl_grp_kem_mlkem768x25519));
+-                if (!hybridPair) {
+-                    hybridPair = ssl_LookupEphemeralKeyPair(ss, ssl_LookupNamedGroup(ssl_grp_kem_xyber768d00));
+-                }
+-                if (hybridPair) {
+-                    // We could use ssl_CopyEphemeralKeyPair here, but we would need to free
+-                    // the KEM components. We should pull this out into a utility function when
+-                    // we refactor to support multiple hybrid mechanisms.
+-                    keyPair = PORT_ZNew(sslEphemeralKeyPair);
+-                    if (!keyPair) {
+-                        return SECFailure;
+-                    }
+-                    PR_INIT_CLIST(&keyPair->link);
+-                    keyPair->group = groupDef;
+-                    keyPair->keys = ssl_GetKeyPairRef(hybridPair->keys);
+-                }
++            keyPair = tls13_FindHybridKeyPair(ss, groupDef);
++            if (keyPair) {
++                keyPair = tls13_CopyDHEphemeralKeyPair(keyPair, groupDef);
+             }
+             if (!keyPair) {
+                 rv = ssl_CreateECDHEphemeralKeyPair(ss, groupDef, &keyPair);
+@@ -519,11 +623,27 @@ tls13_CreateKeyShare(sslSocket *ss, cons
+     // If we're creating an ECDH + KEM hybrid share and we're the client, then
+     // we still need to generate the KEM key pair. Otherwise we're done.
+     if (groupDef->keaType == ssl_kea_ecdh_hybrid && !ss->sec.isServer) {
++#ifdef notdef
++        sslKeyPair *kemPair = NULL;
++        kemPair = tls13_FindKEMKeyPairFromHybrid(ss, groupDef);
++        if (kemPair) {
++             kemPair = ssl_GetKeyPairRef(kemPair);
++        }
++        if (!kemPair) {
++            rv = tls13_CreateKEMKeyPair(ss, groupDef, &kemPair);
++            if (rv != SECSuccess) {
++                ssl_FreeEphemeralKeyPair(keyPair);
++                return SECFailure;
++            }
++        }
++        keyPair->kemKeys = kemPair;
++#else
+         rv = tls13_CreateKEMKeyPair(ss, groupDef, &keyPair->kemKeys);
+         if (rv != SECSuccess) {
+             ssl_FreeEphemeralKeyPair(keyPair);
+             return SECFailure;
+         }
++#endif
+     }
+ 
+     *outKeyPair = keyPair;
+@@ -706,12 +826,17 @@ tls13_ImportKEMKeyShare(SECKEYPublicKey
+     size_t expected_len;
+ 
+     switch (entry->group->name) {
++#ifndef NSS_DISABLE_KYBER
+         case ssl_grp_kem_xyber768d00:
+             expected_len = X25519_PUBLIC_KEY_BYTES + KYBER768_PUBLIC_KEY_BYTES;
+             break;
++#endif
+         case ssl_grp_kem_mlkem768x25519:
+             expected_len = X25519_PUBLIC_KEY_BYTES + KYBER768_PUBLIC_KEY_BYTES;
+             break;
++        case ssl_grp_kem_secp256r1mlkem768:
++            expected_len = SECP256_PUBLIC_KEY_BYTES + KYBER768_PUBLIC_KEY_BYTES;
++            break;
+         default:
+             PORT_SetError(SEC_ERROR_UNSUPPORTED_KEYALG);
+             return SECFailure;
+@@ -723,6 +848,7 @@ tls13_ImportKEMKeyShare(SECKEYPublicKey
+     }
+ 
+     switch (entry->group->name) {
++#ifndef NSS_DISABLE_KYBER
+         case ssl_grp_kem_xyber768d00:
+             peerKey->keyType = kyberKey;
+             peerKey->u.kyber.params = params_kyber768_round3;
+@@ -730,6 +856,7 @@ tls13_ImportKEMKeyShare(SECKEYPublicKey
+             pk.data = entry->key_exchange.data + X25519_PUBLIC_KEY_BYTES;
+             pk.len = KYBER768_PUBLIC_KEY_BYTES;
+             break;
++#endif
+         case ssl_grp_kem_mlkem768x25519:
+             peerKey->keyType = kyberKey;
+             peerKey->u.kyber.params = params_ml_kem768;
+@@ -737,6 +864,13 @@ tls13_ImportKEMKeyShare(SECKEYPublicKey
+             pk.data = entry->key_exchange.data;
+             pk.len = KYBER768_PUBLIC_KEY_BYTES;
+             break;
++        case ssl_grp_kem_secp256r1mlkem768:
++            peerKey->keyType = kyberKey;
++            peerKey->u.kyber.params = params_ml_kem768;
++            /* key_exchange.data is `secp256 || mlkem768` */
++            pk.data = entry->key_exchange.data + SECP256_PUBLIC_KEY_BYTES;
++            pk.len = KYBER768_PUBLIC_KEY_BYTES;
++            break;
+         default:
+             PORT_Assert(0);
+             PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+@@ -759,6 +893,7 @@ tls13_HandleKEMCiphertext(sslSocket *ss,
+     SECStatus rv;
+ 
+     switch (entry->group->name) {
++#ifndef NSS_DISABLE_KYBER
+         case ssl_grp_kem_xyber768d00:
+             if (entry->key_exchange.len != X25519_PUBLIC_KEY_BYTES + KYBER768_CIPHERTEXT_BYTES) {
+                 ssl_MapLowLevelError(SSL_ERROR_RX_MALFORMED_HYBRID_KEY_SHARE);
+@@ -767,6 +902,7 @@ tls13_HandleKEMCiphertext(sslSocket *ss,
+             ct.data = entry->key_exchange.data + X25519_PUBLIC_KEY_BYTES;
+             ct.len = KYBER768_CIPHERTEXT_BYTES;
+             break;
++#endif
+         case ssl_grp_kem_mlkem768x25519:
+             if (entry->key_exchange.len != X25519_PUBLIC_KEY_BYTES + KYBER768_CIPHERTEXT_BYTES) {
+                 ssl_MapLowLevelError(SSL_ERROR_RX_MALFORMED_HYBRID_KEY_SHARE);
+@@ -775,13 +911,22 @@ tls13_HandleKEMCiphertext(sslSocket *ss,
+             ct.data = entry->key_exchange.data;
+             ct.len = KYBER768_CIPHERTEXT_BYTES;
+             break;
++        case ssl_grp_kem_secp256r1mlkem768:
++            if (entry->key_exchange.len != SECP256_PUBLIC_KEY_BYTES + KYBER768_CIPHERTEXT_BYTES) {
++                ssl_MapLowLevelError(SSL_ERROR_RX_MALFORMED_HYBRID_KEY_SHARE);
++                return SECFailure;
++            }
++            ct.data = entry->key_exchange.data + SECP256_PUBLIC_KEY_BYTES;
++            ct.len = KYBER768_CIPHERTEXT_BYTES;
++            break;
+         default:
+             PORT_Assert(0);
+             ssl_MapLowLevelError(SEC_ERROR_LIBRARY_FAILURE);
+             return SECFailure;
+     }
+ 
+-    rv = PK11_Decapsulate(keyPair->privKey, &ct, CKM_HKDF_DERIVE, PK11_ATTR_SESSION | PK11_ATTR_INSENSITIVE, CKF_DERIVE, outKey);
++    rv = PK11_Decapsulate(keyPair->privKey, &ct, CKM_HKDF_DERIVE, PK11_ATTR_SESSION,
++                          CKF_DERIVE, outKey);
+     if (rv != SECSuccess) {
+         ssl_MapLowLevelError(SSL_ERROR_KEY_EXCHANGE_FAILURE);
+     }
+@@ -813,9 +958,12 @@ tls13_HandleKEMKey(sslSocket *ss,
+         goto loser;
+     }
+ 
+-    PK11SlotInfo *slot = PK11_GetBestSlot(CKM_NSS_KYBER, ss->pkcs11PinArg);
++    PK11SlotInfo *slot = PK11_GetBestSlot(CKM_ML_KEM, ss->pkcs11PinArg);
+     if (!slot) {
+-        goto loser;
++        slot = PK11_GetBestSlot(CKM_NSS_ML_KEM, ss->pkcs11PinArg);
++        if (!slot) {
++            goto loser;
++        }
+     }
+ 
+     handle = PK11_ImportPublicKey(slot, peerKey, PR_FALSE);
+@@ -825,7 +973,7 @@ tls13_HandleKEMKey(sslSocket *ss,
+     }
+ 
+     rv = PK11_Encapsulate(peerKey,
+-                          CKM_HKDF_DERIVE, PK11_ATTR_SESSION | PK11_ATTR_INSENSITIVE | PK11_ATTR_PUBLIC,
++                          CKM_HKDF_DERIVE, PK11_ATTR_SESSION,
+                           CKF_DERIVE, key, ciphertext);
+ 
+     /* Destroy the imported public key */
+@@ -855,6 +1003,8 @@ tls13_HandleKeyShare(sslSocket *ss,
+     unsigned char *ec_data;
+     SECStatus rv;
+     int keySize = 0;
++    const sslNamedGroupDef *dhGroup = NULL;
++    int dhLen = 0;
+ 
+     PORT_InitCheapArena(&arena, DER_DEFAULT_CHUNKSIZE);
+     peerKey = PORT_ArenaZNew(&arena.arena, SECKEYPublicKey);
+@@ -868,17 +1018,31 @@ tls13_HandleKeyShare(sslSocket *ss,
+     switch (entry->group->keaType) {
+         case ssl_kea_ecdh_hybrid:
+             switch (entry->group->name) {
++#ifndef NSS_DISABLE_KYBER
+                 case ssl_grp_kem_xyber768d00:
++                    dhLen = X25519_PUBLIC_KEY_BYTES;
+                     // x25519 share is at the beginning
+-                    ec_data = entry->key_exchange.len < X25519_PUBLIC_KEY_BYTES
++                    ec_data = entry->key_exchange.len < dhLen
+                                   ? NULL
+                                   : entry->key_exchange.data;
++                    dhGroup = ssl_LookupNamedGroup(ssl_grp_ec_curve25519);
+                     break;
++#endif
+                 case ssl_grp_kem_mlkem768x25519:
++                    dhLen = X25519_PUBLIC_KEY_BYTES;
+                     // x25519 share is at the end
+-                    ec_data = entry->key_exchange.len < X25519_PUBLIC_KEY_BYTES
++                    ec_data = entry->key_exchange.len < dhLen
+                                   ? NULL
+-                                  : entry->key_exchange.data + entry->key_exchange.len - X25519_PUBLIC_KEY_BYTES;
++                                  : entry->key_exchange.data + entry->key_exchange.len - dhLen;
++                    dhGroup = ssl_LookupNamedGroup(ssl_grp_ec_curve25519);
++                    break;
++                case ssl_grp_kem_secp256r1mlkem768:
++                    dhLen = SECP256_PUBLIC_KEY_BYTES;
++                    /* secp256 share is at the beginning */
++                    ec_data = entry->key_exchange.len < dhLen
++                                  ? NULL
++                                  : entry->key_exchange.data;
++                    dhGroup = ssl_LookupNamedGroup(ssl_grp_ec_secp256r1);
+                     break;
+                 default:
+                     ec_data = NULL;
+@@ -888,10 +1052,7 @@ tls13_HandleKeyShare(sslSocket *ss,
+                 PORT_SetError(SSL_ERROR_RX_MALFORMED_HYBRID_KEY_SHARE);
+                 goto loser;
+             }
+-            rv = ssl_ImportECDHKeyShare(peerKey,
+-                                        ec_data,
+-                                        X25519_PUBLIC_KEY_BYTES,
+-                                        ssl_LookupNamedGroup(ssl_grp_ec_curve25519));
++            rv = ssl_ImportECDHKeyShare(peerKey, ec_data, dhLen, dhGroup);
+             mechanism = CKM_ECDH1_DERIVE;
+             break;
+         case ssl_kea_ecdh:
+@@ -927,7 +1088,7 @@ tls13_HandleKeyShare(sslSocket *ss,
+ 
+     *out = key;
+     PORT_DestroyCheapArena(&arena);
+-    return SECSuccess;
++    return rv;
+ 
+ loser:
+     PORT_DestroyCheapArena(&arena);
+@@ -2762,12 +2923,17 @@ tls13_HandleClientKeyShare(sslSocket *ss
+             goto loser; /* Error set by tls13_HandleKEMKey */
+         }
+         switch (peerShare->group->name) {
++#ifndef NSS_DISABLE_KYBER
+             case ssl_grp_kem_xyber768d00:
+                 ss->ssl3.hs.dheSecret = PK11_ConcatSymKeys(dheSecret, kemSecret, CKM_HKDF_DERIVE, CKA_DERIVE);
+                 break;
++#endif
+             case ssl_grp_kem_mlkem768x25519:
+                 ss->ssl3.hs.dheSecret = PK11_ConcatSymKeys(kemSecret, dheSecret, CKM_HKDF_DERIVE, CKA_DERIVE);
+                 break;
++            case ssl_grp_kem_secp256r1mlkem768:
++                ss->ssl3.hs.dheSecret = PK11_ConcatSymKeys(dheSecret, kemSecret, CKM_HKDF_DERIVE, CKA_DERIVE);
++                break;
+             default:
+                 PORT_Assert(0);
+                 PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+@@ -3621,12 +3787,17 @@ tls13_HandleServerKeyShare(sslSocket *ss
+             goto loser; /* Error set by tls13_HandleKEMCiphertext */
+         }
+         switch (entry->group->name) {
++#ifndef NSS_DISABLE_KYBER
+             case ssl_grp_kem_xyber768d00:
+                 ss->ssl3.hs.dheSecret = PK11_ConcatSymKeys(dheSecret, kemSecret, CKM_HKDF_DERIVE, CKA_DERIVE);
+                 break;
++#endif
+             case ssl_grp_kem_mlkem768x25519:
+                 ss->ssl3.hs.dheSecret = PK11_ConcatSymKeys(kemSecret, dheSecret, CKM_HKDF_DERIVE, CKA_DERIVE);
+                 break;
++            case ssl_grp_kem_secp256r1mlkem768:
++                ss->ssl3.hs.dheSecret = PK11_ConcatSymKeys(dheSecret, kemSecret, CKM_HKDF_DERIVE, CKA_DERIVE);
++                break;
+             default:
+                 PORT_Assert(0);
+                 PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+diff -up ./lib/ssl/tls13exthandle.c.mlkem_p256 ./lib/ssl/tls13exthandle.c
+--- ./lib/ssl/tls13exthandle.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/ssl/tls13exthandle.c	2025-06-25 16:47:19.382363018 -0700
+@@ -80,19 +80,30 @@ tls13_SizeOfKeyShareEntry(const sslEphem
+ 
+     if (keyPair->kemKeys) {
+         PORT_Assert(!keyPair->kemCt);
+-        PORT_Assert(keyPair->group->name == ssl_grp_kem_xyber768d00 || keyPair->group->name == ssl_grp_kem_mlkem768x25519);
++        PORT_Assert(
++#ifndef NSS_DISABLE_KYBER
++                keyPair->group->name == ssl_grp_kem_xyber768d00 ||
++#endif
++                keyPair->group->name == ssl_grp_kem_mlkem768x25519 ||
++                keyPair->group->name == ssl_grp_kem_secp256r1mlkem768);
+         pubKey = keyPair->kemKeys->pubKey;
+         size += pubKey->u.kyber.publicValue.len;
+     }
+     if (keyPair->kemCt) {
+         PORT_Assert(!keyPair->kemKeys);
+-        PORT_Assert(keyPair->group->name == ssl_grp_kem_xyber768d00 || keyPair->group->name == ssl_grp_kem_mlkem768x25519);
++        PORT_Assert(
++#ifndef NSS_DISABLE_KYBER
++                keyPair->group->name == ssl_grp_kem_xyber768d00 ||
++#endif
++                keyPair->group->name == ssl_grp_kem_mlkem768x25519 ||
++                keyPair->group->name == ssl_grp_kem_secp256r1mlkem768);
+         size += keyPair->kemCt->len;
+     }
+ 
+     return size;
+ }
+ 
++#ifndef NSS_DISABLE_KYBER
+ static SECStatus
+ tls13_WriteXyber768D00KeyExchangeInfo(sslBuffer *buf, sslEphemeralKeyPair *keyPair)
+ {
+@@ -119,6 +130,34 @@ tls13_WriteXyber768D00KeyExchangeInfo(ss
+     }
+     return rv;
+ }
++#endif
++
++static SECStatus
++tls13_WriteMLKEM768Secp256r1KeyExchangeInfo(sslBuffer *buf, sslEphemeralKeyPair *keyPair)
++ {
++    PORT_Assert(keyPair->group->name == ssl_grp_kem_secp256r1mlkem768);
++    PORT_Assert(keyPair->keys->pubKey->keyType == ecKey);
++
++    // Encode the p256 key first, then the Kyber768 key or ciphertext.
++    SECStatus rv;
++    rv = sslBuffer_Append(buf, keyPair->keys->pubKey->u.ec.publicValue.data,
++                          keyPair->keys->pubKey->u.ec.publicValue.len);
++    if (rv != SECSuccess) {
++        return rv;
++    }
++
++    if (keyPair->kemKeys) {
++        PORT_Assert(!keyPair->kemCt);
++        rv = sslBuffer_Append(buf, keyPair->kemKeys->pubKey->u.kyber.publicValue.data, keyPair->kemKeys->pubKey->u.kyber.publicValue.len);
++    } else if (keyPair->kemCt) {
++        rv = sslBuffer_Append(buf, keyPair->kemCt->data, keyPair->kemCt->len);
++    } else {
++        PORT_Assert(0);
++        PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
++        rv = SECFailure;
++    }
++    return rv;
++}
+ 
+ static SECStatus
+ tls13_WriteMLKEM768X25519KeyExchangeInfo(sslBuffer *buf, sslEphemeralKeyPair *keyPair)
+@@ -187,12 +226,18 @@ tls13_EncodeKeyShareEntry(sslBuffer *buf
+     }
+ 
+     switch (keyPair->group->name) {
++#ifndef NSS_DISABLE_KYBER
++        case ssl_grp_kem_xyber768d00:
++            rv = tls13_WriteXyber768D00KeyExchangeInfo(buf, keyPair);
++            break;
++#endif
+         case ssl_grp_kem_mlkem768x25519:
+             rv = tls13_WriteMLKEM768X25519KeyExchangeInfo(buf, keyPair);
+             break;
+-        case ssl_grp_kem_xyber768d00:
+-            rv = tls13_WriteXyber768D00KeyExchangeInfo(buf, keyPair);
++        case ssl_grp_kem_secp256r1mlkem768:
++            rv = tls13_WriteMLKEM768Secp256r1KeyExchangeInfo(buf, keyPair);
+             break;
++
+         default:
+             rv = tls13_WriteKeyExchangeInfo(buf, keyPair);
+             break;
+diff -up ./lib/util/eccutil.h.mlkem_p256 ./lib/util/eccutil.h
+--- ./lib/util/eccutil.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/util/eccutil.h	2025-06-25 16:47:19.382363018 -0700
+@@ -6,6 +6,7 @@
+ #define _FREEBL_H_
+ 
+ #define X25519_PUBLIC_KEY_BYTES 32U
++#define SECP256_PUBLIC_KEY_BYTES 65U
+ 
+ /* deprecated */
+ typedef enum {
+diff -up ./lib/util/pkcs11n.h.mlkem_p256 ./lib/util/pkcs11n.h
+diff -up ./lib/util/pkcs11t.h.mlkem_p256 ./lib/util/pkcs11t.h
+--- ./lib/util/pkcs11t.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/util/pkcs11t.h	2025-06-25 16:47:19.382363018 -0700
+@@ -755,6 +755,21 @@ typedef CK_ULONG CK_MECHANISM_TYPE;
+ #define CKM_DSA_SHA3_384 0x0000001AUL
+ #define CKM_DSA_SHA3_512 0x0000001BUL
+ 
++/* subset of pkcs11v3.2 defines needed for
++ * mlkem support */
++#define CKM_ML_KEM 0x00000017UL
++#define CKM_ML_KEM_KEY_PAIR_GEN 0x0000000fUL
++#define CKK_ML_KEM 0x00000049UL
++typedef CK_ULONG CK_ML_KEM_PARAMETER_SET_TYPE;
++#define CKP_ML_KEM_512 0x00000001UL
++#define CKP_ML_KEM_768 0x00000002UL
++#define CKP_ML_KEM_1024 0x00000003UL
++#define CKA_PARAMETER_SET 0x0000061dUL
++#define CKA_ENCAPSULATE 0x00000633UL
++#define CKA_DECAPSULATE 0x00000634UL
++#define CKF_DECAPSULATE 0x20000000UL
++#define CKF_ENCAPSULATE 0x10000000UL
++
+ #define CKM_DH_PKCS_KEY_PAIR_GEN 0x00000020UL
+ #define CKM_DH_PKCS_DERIVE 0x00000021UL
+ 
+diff -up ./lib/util/secoid.c.mlkem_p256 ./lib/util/secoid.c
+--- ./lib/util/secoid.c.mlkem_p256	2025-06-25 16:47:19.354362658 -0700
++++ ./lib/util/secoid.c	2025-06-25 16:47:19.382363018 -0700
+@@ -1900,6 +1900,12 @@ const static SECOidData oids[SEC_OID_TOT
+         "ML-KEM-768+X25519 key exchange", CKM_INVALID_MECHANISM, INVALID_CERT_EXTENSION),
+     ODE(SEC_OID_TLS_REQUIRE_EMS,
+         "TLS Require EMS", CKM_INVALID_MECHANISM, INVALID_CERT_EXTENSION),
++/* this will change upstream. for now apps shouldn't use it */
++/* we need it for the policy code.  */
++    ODE(SEC_OID_PRIVATE_1,
++        "ML-KEM-768+SECP256 key exchange", CKM_INVALID_MECHANISM, INVALID_CERT_EXTENSION),
++    ODE(SEC_OID_PRIVATE_2,
++        "ML-KEM-1024+SECP256 key exchange", CKM_INVALID_MECHANISM, INVALID_CERT_EXTENSION),
+ 
+ };
+ 
+diff -up ./lib/util/secoidt.h.mlkem_p256 ./lib/util/secoidt.h
+--- ./lib/util/secoidt.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/util/secoidt.h	2025-06-25 16:47:19.382363018 -0700
+@@ -536,6 +536,12 @@ typedef enum {
+ 
+     SEC_OID_TLS_REQUIRE_EMS = 390,
+ 
++    /* these will change upstream. for now apps shouldn't use it */
++    /* give it an obscure name here */
++
++    SEC_OID_PRIVATE_1 = 391,
++    SEC_OID_PRIVATE_2 = 392,
++
+     SEC_OID_TOTAL
+ } SECOidTag;
+ 
+diff -up ./lib/util/utilmodt.h.mlkem_p256 ./lib/util/utilmodt.h
+--- ./lib/util/utilmodt.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/util/utilmodt.h	2025-06-25 16:47:19.382363018 -0700
+@@ -28,6 +28,7 @@
+ #define SECMOD_CAMELLIA_FLAG 0x00010000L /* = PUBLIC_MECH_CAMELLIA_FLAG */
+ #define SECMOD_SEED_FLAG 0x00020000L
+ #define SECMOD_ECC_FLAG 0x00040000L
++#define SECMOD_MLKEM_FLAG 0x00080000L
+ /* reserved bit for future, do not use */
+ #define SECMOD_RESERVED_FLAG 0X08000000L
+ #define SECMOD_FRIENDLY_FLAG 0x10000000L
+diff -up ./lib/util/utilpars.c.mlkem_p256 ./lib/util/utilpars.c
+--- ./lib/util/utilpars.c.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/util/utilpars.c	2025-06-25 16:47:19.382363018 -0700
+@@ -609,6 +609,7 @@ static struct nssutilArgSlotFlagTable ns
+     NSSUTIL_ARG_ENTRY(SEED, SECMOD_SEED_FLAG),
+     NSSUTIL_ARG_ENTRY(PublicCerts, SECMOD_FRIENDLY_FLAG),
+     NSSUTIL_ARG_ENTRY(RANDOM, SECMOD_RANDOM_FLAG),
++    NSSUTIL_ARG_ENTRY(MLKEM, SECMOD_MLKEM_FLAG),
+     NSSUTIL_ARG_ENTRY(Disable, SECMOD_DISABLE_FLAG),
+ };
+ 
+diff -up ./lib/util/utilparst.h.mlkem_p256 ./lib/util/utilparst.h
+--- ./lib/util/utilparst.h.mlkem_p256	2025-05-23 06:07:49.000000000 -0700
++++ ./lib/util/utilparst.h	2025-06-25 16:47:19.382363018 -0700
+@@ -43,7 +43,7 @@
+ #define NSSUTIL_DEFAULT_INTERNAL_INIT3 \
+     " askpw=any timeout=30})\""
+ #define NSSUTIL_DEFAULT_SFTKN_FLAGS \
+-    "slotFlags=[ECC,RSA,DSA,DH,RC2,RC4,DES,RANDOM,SHA1,MD5,MD2,SSL,TLS,AES,Camellia,SEED,SHA256,SHA512]"
++    "slotFlags=[ECC,RSA,DSA,DH,RC2,RC4,DES,RANDOM,SHA1,MD5,MD2,SSL,TLS,AES,Camellia,SEED,MLKEM,SHA256,SHA512]"
+ 
+ #define NSSUTIL_DEFAULT_CIPHER_ORDER 0
+ #define NSSUTIL_DEFAULT_TRUST_ORDER 50
+diff -up ./tests/ssl/sslcov.txt.mlkem_p256 ./tests/ssl/sslcov.txt
+--- ./tests/ssl/sslcov.txt.mlkem_p256	2025-06-25 16:47:19.370362863 -0700
++++ ./tests/ssl/sslcov.txt	2025-06-25 16:47:19.383363031 -0700
+@@ -4,7 +4,7 @@
+ #
+ # This file enables test coverage of the various SSL ciphers
+ #
+-# Enable Enable Cipher Test Name 
++# Enable Enable Cipher Test Name
+ #  EC     TLS
+ #
+   noECC  SSL3   c    SSL3_RSA_WITH_RC4_128_MD5
+@@ -147,3 +147,9 @@
+    ECC   TLS13  :1301 TLS13_ECDHE_WITH_AES_128_GCM_SHA256
+    ECC   TLS13  :1302 TLS13_ECDHE_WITH_AES_256_GCM_SHA384
+    ECC   TLS13  :1303 TLS13_ECDHE_WITH_CHACHA20_POLY1305_SHA256
++MLKEM256 TLS13  :1301 TLS13_MLKEMP256_WITH_AES_128_GCM_SHA256
++MLKEM256 TLS13  :1302 TLS13_MLKEMP256_WITH_AES_256_GCM_SHA384
++MLKEM256 TLS13  :1303 TLS13_MLKEMP256_WITH_CHACHA20_POLY1305_SHA256
++MLKEM219 TLS13  :1301 TLS13_MLKEMX25519_WITH_AES_128_GCM_SHA256
++MLKEM219 TLS13  :1302 TLS13_MLKEMX25519_WITH_AES_256_GCM_SHA384
++MLKEM219 TLS13  :1303 TLS13_MLKEMX25519_WITH_CHACHA20_POLY1305_SHA256
+diff -up ./tests/ssl/ssl.sh.mlkem_p256 ./tests/ssl/ssl.sh
+--- ./tests/ssl/ssl.sh.mlkem_p256	2025-06-25 16:47:19.370362863 -0700
++++ ./tests/ssl/ssl.sh	2025-06-25 16:47:19.383363031 -0700
+@@ -121,8 +121,12 @@ ssl_init()
+   CIPHER_SUITES="-c ${EC_SUITES}${NON_EC_SUITES}"
+   TLS13_CIPHER_SUITES="-c ${TLS13_SUITES}${EC_SUITES}${NON_EC_SUITES}"
+ 
++  # FIPS specific options for both clients and servers
++  FIPS_OPTIONS=""
+   # in fips mode, turn off curve25519 until it's NIST approved
+-  FIPS_OPTIONS="-I P256,P384,P521,FF2048,FF3072,FF4096,FF6144,FF8192"
++  ALL_GROUPS="P256,P384,P521,x25519,FF2048,FF3072,FF4096,FF6144,FF8192,mlkem768secp256r1,mlkem768x25519"
++  NON_PQ_GROUPS="P256,P384,P521,x25519,FF2048,FF3072,FF4096,FF6144,FF8192"
++  FIPS_GROUPS="P256,P384,P521,FF2048,FF3072,FF4096,FF6144,FF8192,mlkem768secp256r1,mlkem768x25519"
+ 
+   # in non-fips mode, tstclnt may run without the db password in some
+   # cases, but in fips mode it's always needed
+@@ -312,10 +316,12 @@ ssl_cov()
+ 
+   SAVE_SERVER_OPTIONS=${SERVER_OPTIONS}
+   if [ "${SERVER_MODE}" = "fips" ] ; then
+-      SERVER_OPTIONS="${SERVER_OPTIONS} ${FIPS_OPTIONS}"
++      SERVER_OPTIONS="${SERVER_OPTIONS} -I ${FIPS_GROUPS} ${FIPS_OPTIONS}"
+   fi
+   SAVE_CLIENT_OPTIONS=${CLIENT_OPTIONS}
++  CLIENT_GROUPS=${NON_PQ_GROUPS}
+   if [ "${CLIENT_MODE}" = "fips" ] ; then
++      CLIENT_GROUPS=${FIPS_GROUPS}
+       CLIENT_OPTIONS="${CLIENT_OPTIONS} ${FIPS_OPTIONS}"
+   fi
+ 
+@@ -340,7 +346,7 @@ ssl_cov()
+           ;;
+       esac
+ 
+-      echo "$SCRIPTNAME: running $testname ----------------------------"
++      echo "$SCRIPTNAME: running $testname ------------------"
+       VMAX="ssl3"
+       if [ "$testmax" = "TLS10" ]; then
+           VMAX="tls1.0"
+@@ -375,13 +381,19 @@ ssl_cov()
+               VMIN="ssl3"
+       fi
+ 
++      TLS_GROUPS=${CLIENT_GROUPS}
++      if [ "$ectype" = "MLKEM256" ]; then
++          TLS_GROUPS="mlkem768secp256r1"
++      elif [ "$ectype" = "MLKEM219" ]; then
++          TLS_GROUPS="mlkem768x25519"
++      fi
++      echo "TLS_GROUPS=${TLS_GROUPS}"
+ 
+-
+-      echo "tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} \\"
++      echo "tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -I \"${TLS_GROUPS}\" -V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} \\"
+       echo "        -f -d ${P_R_CLIENTDIR} $verbose -w nss < ${REQUEST_FILE}"
+ 
+       rm ${TMP}/$HOST.tmp.$$ 2>/dev/null
+-      ${PROFTOOL} ${BINDIR}/tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} -f \
++      ${PROFTOOL} ${BINDIR}/tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -I "${TLS_GROUPS}" -V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} -f \
+               -d ${P_R_CLIENTDIR} $verbose -w nss < ${REQUEST_FILE} \
+               >${TMP}/$HOST.tmp.$$  2>&1
+       ret=$?

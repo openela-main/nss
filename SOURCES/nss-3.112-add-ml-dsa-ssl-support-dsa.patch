@@ -1,0 +1,4323 @@
+diff --git a/cmd/certutil/certutil.c b/cmd/certutil/certutil.c
+--- a/cmd/certutil/certutil.c
++++ b/cmd/certutil/certutil.c
+@@ -298,20 +298,17 @@ CertReq(SECKEYPrivateKey *privk, SECKEYP
+         if (rv != SECSuccess) {
+             PORT_FreeArena(arena, PR_FALSE);
+             SECU_PrintError(progName, "unable to set algorithm ID");
+             return SECFailure;
+         }
+     } else {
+         /* sigh, we need to create a new SEC_GetSignatureAlgorithOidTag()
+          * that takes a public key and one that takes a private key */
+-        if (keyType == mldsaKey) {
+-            hashAlgTag = pubk->u.mldsa.params;
+-        }
+-        signAlgTag = SEC_GetSignatureAlgorithmOidTag(keyType, hashAlgTag);
++        signAlgTag = SECU_GetSignatureAlgorithmFromPublicKey(pubk, hashAlgTag);
+         if (signAlgTag == SEC_OID_UNKNOWN) {
+             PORT_FreeArena(arena, PR_FALSE);
+             SECU_PrintError(progName, "unknown Key or Hash type");
+             return SECFailure;
+         }
+         rv = SECOID_SetAlgorithmID(arena, &signAlg, signAlgTag, 0);
+         if (rv != SECSuccess) {
+             PORT_FreeArena(arena, PR_FALSE);
+@@ -2056,39 +2053,16 @@ MakeV1Cert(CERTCertDBHandle *handle,
+     }
+     if (issuerCert) {
+         CERT_DestroyCertificate(issuerCert);
+     }
+ 
+     return (cert);
+ }
+ 
+-/* sigh look up the ml-dsa oid by string */
+-static SECOidTag
+-FindTagFromString(char *cipherString)
+-{
+-    SECOidTag tag;
+-    SECOidData *oid;
+-
+-    /* future enhancement: accept dotted oid spec? */
+-
+-    for (tag = 1; (oid = SECOID_FindOIDByTag(tag)) != NULL; tag++) {
+-        /* only interested in oids that we actually understand */
+-        if (oid->mechanism == CKM_INVALID_MECHANISM) {
+-            continue;
+-        }
+-        if (PORT_Strcasecmp(oid->desc, cipherString) != 0) {
+-            continue;
+-        }
+-        return tag;
+-    }
+-    return SEC_OID_UNKNOWN;
+-}
+-
+-
+ static SECStatus
+ SetSignatureAlgorithm(PLArenaPool *arena,
+                       SECAlgorithmID *signAlg,
+                       SECAlgorithmID *spkiAlg,
+                       SECOidTag hashAlgTag,
+                       SECKEYPrivateKey *privKey,
+                       PRBool pssSign)
+ {
+@@ -2119,72 +2093,23 @@ SetSignatureAlgorithm(PLArenaPool *arena
+         }
+         rv = SECOID_SetAlgorithmID(arena, signAlg,
+                                    SEC_OID_PKCS1_RSA_PSS_SIGNATURE,
+                                    params);
+         if (rv != SECSuccess) {
+             SECU_PrintError(progName, "Could not set signature algorithm id.");
+             return rv;
+         }
+-    } else if (privKey->keyType == mldsaKey) {
+-        /* sigh, we need toexport SECKEY_GetParameterSet(), for now
+-         * just do it inline */
+-        /* this is temp code until we fix it correctly upstream. Don't
+-         * push this upstream */
+-        SECOidTag algID;
+-        SECItem item;
+-        CK_ULONG paramSet;
+-
+-        rv = PK11_ReadRawAttribute(PK11_TypePrivKey, privKey,
+-                                   CKA_PARAMETER_SET, &item);
+-
+-        if (rv != SECSuccess) {
+-            SECU_PrintError(progName, "missing parameter set for ml-dsa key.");
+-            return SECFailure;
+-        }
+-        if (item.len != sizeof (paramSet)) {
+-            SECU_PrintError(progName, "corrupted parameter set for ml-dsa key.");
+-            PORT_Free(item.data);
+-            return SECFailure;
+-        }
+-        paramSet = *(CK_ULONG *)item.data;
+-        PORT_Free(item.data);
+-        switch  (paramSet) {
+-            case CKP_ML_DSA_44:
+-                algID = FindTagFromString("ML-DSA-44");
+-                break;
+-            case CKP_ML_DSA_65:
+-                algID = FindTagFromString("ML-DSA-65");
+-                break;
+-            case CKP_ML_DSA_87:
+-                algID = FindTagFromString("ML-DSA-87");
+-                break;
+-            default:
+-                algID = SEC_OID_UNKNOWN;
+-                break;
+-        }
+-        if (algID == SEC_OID_UNKNOWN) {
+-                PORT_SetError(SEC_ERROR_INVALID_KEY);
+-                SECU_PrintError(progName, "invalid parameter set for ml-dsa key.");
+-                return SECFailure;
+-        }
+-                
+-        rv = SECOID_SetAlgorithmID(arena, signAlg, algID, 0);
+-        if (rv != SECSuccess) {
+-            SECU_PrintError(progName, "Could not set signature algorithm id.");
+-            return rv;
+-        }
+     } else {
+-        KeyType keyType = SECKEY_GetPrivateKeyType(privKey);
+         SECOidTag algID;
+        
+         /* first, try to get the ParameterSet from the key, If the
+          * key as a parameter set, use it, otherwise fall back to
+          * SEC_GetSignatureAlgorithmoidTag */ 
+-        algID = SEC_GetSignatureAlgorithmOidTag(keyType, hashAlgTag);
++        algID = SECU_GetSignatureAlgorithmFromPrivateKey(privKey, hashAlgTag);
+         if (algID == SEC_OID_UNKNOWN) {
+             SECU_PrintError(progName, "Unknown key or hash type for issuer.");
+             return SECFailure;
+         }
+         rv = SECOID_SetAlgorithmID(arena, signAlg, algID, 0);
+         if (rv != SECSuccess) {
+             SECU_PrintError(progName, "Could not set signature algorithm id.");
+             return rv;
+diff --git a/cmd/crmf-cgi/crmfcgi.c b/cmd/crmf-cgi/crmfcgi.c
+--- a/cmd/crmf-cgi/crmfcgi.c
++++ b/cmd/crmf-cgi/crmfcgi.c
+@@ -377,18 +377,17 @@ createNewCert(CERTCertificate **issuedCe
+     rv = addExtensions(newCert, certReq);
+     if (rv != NO_ERROR) {
+         goto loser;
+     }
+     issuerPrivKey = PK11_FindKeyByAnyCert(issuerCert, varTable);
+     if (issuerPrivKey == NULL) {
+         rv = COULD_NOT_FIND_ISSUER_PRIVATE_KEY;
+     }
+-    signTag = SEC_GetSignatureAlgorithmOidTag(issuerPrivatekey->keytype,
+-                                              SEC_OID_UNKNOWN);
++    signTag = SECU_GetSignatureAlgorithmFromPrivateKey(issuerPrivatekey, SEC_OID_UNKNOWN);
+     if (signTag == SEC_OID_UNKNOWN) {
+         rv = UNSUPPORTED_SIGN_OPERATION_FOR_ISSUER;
+         goto loser;
+     }
+     srv = SECOID_SetAlgorithmID(newCert->arena, &newCert->signature,
+                                 signTag, 0);
+     if (srv != SECSuccess) {
+         rv = ERROR_SETTING_SIGN_ALG;
+diff --git a/cmd/lib/secutil.c b/cmd/lib/secutil.c
+--- a/cmd/lib/secutil.c
++++ b/cmd/lib/secutil.c
+@@ -3854,16 +3854,94 @@ SECU_StoreCRL(PK11SlotInfo *slot, SECIte
+     }
+     if (!outFile && !slot) {
+         PORT_SetError(SEC_ERROR_INVALID_ARGS);
+         return SECFailure;
+     }
+     return SECSuccess;
+ }
+ 
++/* look up the an oid by string */
++SECOidTag
++SECU_FindTagFromString(char *cipherString)
++{
++    SECOidTag tag;
++    SECOidData *oid;
++
++    /* future enhancement: accept dotted oid spec? */
++
++    for (tag = 1; (oid = SECOID_FindOIDByTag(tag)) != NULL; tag++) {
++        /* only interested in oids that we actually understand */
++        if (oid->mechanism == CKM_INVALID_MECHANISM) {
++            continue;
++        }
++        if (PORT_Strcasecmp(oid->desc, cipherString) != 0) {
++            continue;
++        }
++        return tag;
++    }
++    return SEC_OID_UNKNOWN;
++}
++
++
++/* sigh, we need toexport SECKEY_GetParameterSet(), for now
++  * just do it inline */
++/* this is temp code until we fix it correctly upstream. Don't
++  * push this upstream */
++SECOidTag
++SECU_GetSignatureAlgorithmFromPrivateKey(SECKEYPrivateKey *privKey, SECOidTag hashAlg)
++{
++    SECItem item;
++    CK_ULONG paramSet;
++    SECStatus rv;
++
++    /* don't modify hashAlg if we aren't a DSA key */
++    if (privKey->keyType != mldsaKey) {
++        return SEC_GetSignatureAlgorithmOidTag(privKey->keyType, hashAlg);
++    }
++
++    rv = PK11_ReadRawAttribute(PK11_TypePrivKey, privKey,
++                                CKA_PARAMETER_SET, &item);
++
++    if (rv != SECSuccess) {
++        return SEC_OID_UNKNOWN;
++    }
++    if (item.len != sizeof (paramSet)) {
++        PORT_Free(item.data);
++        PORT_SetError(SEC_ERROR_INVALID_KEY);
++        return SEC_OID_UNKNOWN;
++    }
++    paramSet = *(CK_ULONG *)item.data;
++    PORT_Free(item.data);
++    switch  (paramSet) {
++        case CKP_ML_DSA_44:
++            return SECU_FindTagFromString("ML-DSA-44");
++            break;
++        case CKP_ML_DSA_65:
++            return SECU_FindTagFromString("ML-DSA-65");
++            break;
++        case CKP_ML_DSA_87:
++            return SECU_FindTagFromString("ML-DSA-87");
++            break;
++        default:
++            PORT_SetError(SEC_ERROR_INVALID_KEY);
++            break;
++    }
++    return SEC_OID_UNKNOWN;
++}
++
++SECOidTag
++SECU_GetSignatureAlgorithmFromPublicKey(SECKEYPublicKey *pubKey, SECOidTag hashAlg)
++{
++    if (pubKey->keyType == mldsaKey) {
++        return pubKey->u.mldsa.params;
++    }
++    return SEC_GetSignatureAlgorithmOidTag(pubKey->keyType, hashAlg);
++}
++
+ SECStatus
+ SECU_SignAndEncodeCRL(CERTCertificate *issuer, CERTSignedCrl *signCrl,
+                       SECOidTag hashAlgTag, SignAndEncodeFuncExitStat *resCode)
+ {
+     SECItem der;
+     SECKEYPrivateKey *caPrivateKey = NULL;
+     SECStatus rv;
+     PLArenaPool *arena;
+@@ -3879,17 +3957,17 @@ SECU_SignAndEncodeCRL(CERTCertificate *i
+     arena = signCrl->arena;
+ 
+     caPrivateKey = PK11_FindKeyByAnyCert(issuer, NULL);
+     if (caPrivateKey == NULL) {
+         *resCode = noKeyFound;
+         return SECFailure;
+     }
+ 
+-    algID = SEC_GetSignatureAlgorithmOidTag(caPrivateKey->keyType, hashAlgTag);
++    algID = SECU_GetSignatureAlgorithmFromPrivateKey(caPrivateKey, hashAlgTag);
+     if (algID == SEC_OID_UNKNOWN) {
+         *resCode = noSignatureMatch;
+         rv = SECFailure;
+         goto done;
+     }
+ 
+     if (!signCrl->crl.signatureAlg.parameters.data) {
+         rv = SECOID_SetAlgorithmID(arena, &signCrl->crl.signatureAlg, algID, 0);
+@@ -4379,16 +4457,19 @@ schemeNameToScheme(const char *name)
+     compareScheme(ed448);
+     compareScheme(rsa_pss_pss_sha256);
+     compareScheme(rsa_pss_pss_sha384);
+     compareScheme(rsa_pss_pss_sha512);
+     compareScheme(dsa_sha1);
+     compareScheme(dsa_sha256);
+     compareScheme(dsa_sha384);
+     compareScheme(dsa_sha512);
++    compareScheme(mldsa44);
++    compareScheme(mldsa65);
++    compareScheme(mldsa87);
+ 
+ #undef compareScheme
+ 
+     return ssl_sig_none;
+ }
+ 
+ SECStatus
+ parseSigSchemeList(const char *arg, const SSLSignatureScheme **enabledSigSchemes,
+diff --git a/cmd/lib/secutil.h b/cmd/lib/secutil.h
+--- a/cmd/lib/secutil.h
++++ b/cmd/lib/secutil.h
+@@ -457,12 +457,18 @@ extern int ffs(unsigned int i);
+ #endif
+ 
+ /* Finds certificate by searching it in the DB or by examinig file
+  * in the local directory. */
+ CERTCertificate *
+ SECU_FindCertByNicknameOrFilename(CERTCertDBHandle *handle,
+                                   char *name, PRBool ascii,
+                                   void *pwarg);
++
++/* temparary libraries for ml-dsa support */
++SECOidTag SECu_FindTagFromString(char *cipherString);
++SECOidTag SECU_GetSignatureAlgorithmFromPrivateKey(SECKEYPrivateKey *privKey, SECOidTag hashAlg);
++SECOidTag SECU_GetSignatureAlgorithmFromPublicKey(SECKEYPublicKey *privKey, SECOidTag hashAlg);
++
+ #include "secerr.h"
+ #include "sslerr.h"
+ 
+ #endif /* _SEC_UTIL_H_ */
+diff --git a/cmd/selfserv/selfserv.c b/cmd/selfserv/selfserv.c
+--- a/cmd/selfserv/selfserv.c
++++ b/cmd/selfserv/selfserv.c
+@@ -156,24 +156,25 @@ static PRLogModuleInfo *lm;
+         fflush(stderr); \
+     }
+ #define VLOG(arg) PR_LOG(lm, PR_LOG_DEBUG, arg)
+ 
+ static void
+ PrintUsageHeader(const char *progName)
+ {
+     fprintf(stderr,
+-            "Usage: %s -n rsa_nickname -p port [-BDENRZbjlmrsuvx] [-w password]\n"
++            "Usage: %s -n cert_nickname -p port [-BDENRZbjlmrsuvx] [-w password]\n"
+             "         [-t threads] [-i pid_file] [-c ciphers] [-Y] [-d dbdir] [-g numblocks]\n"
+             "         [-f password_file] [-L [seconds]] [-M maxProcs] [-P dbprefix]\n"
+             "         [-V [min-version]:[max-version]] [-a sni_name]\n"
+             "         [ T <good|revoked|unknown|badsig|corrupted|none|ocsp>] [-A ca]\n"
+-            "         [-C SSLCacheEntries] [-S dsa_nickname] [-Q]\n"
+-            "         [-I groups] [-J signatureschemes] [-e ec_nickname]\n"
++            "         [-C SSLCacheEntries] [-S cert_nickname ] [-Q]\n"
++            "         [-I groups] [-J signatureschemes] [-e cer_nickname]\n"
+             "         -U [0|1] -H [0|1|2] -W [0|1] [-z externalPsk] -q\n"
++            "  -n is for the primary cert, -e are for additional certs -S is deprecated\n"
+             "\n",
+             progName);
+ }
+ 
+ static void
+ PrintParameterUsage()
+ {
+     fputs(
+@@ -234,16 +235,17 @@ PrintParameterUsage()
+         "x25519mlkem768, secp256r1mlkem768, secp384r1mlkem1024\n"
+         "-J comma separated list of enabled signature schemes in preference order.\n"
+         "   The following values are valid:\n"
+         "     rsa_pkcs1_sha1, rsa_pkcs1_sha256, rsa_pkcs1_sha384, rsa_pkcs1_sha512,\n"
+         "     ecdsa_sha1, ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384,\n"
+         "     ecdsa_secp521r1_sha512,\n"
+         "     rsa_pss_rsae_sha256, rsa_pss_rsae_sha384, rsa_pss_rsae_sha512,\n"
+         "     rsa_pss_pss_sha256, rsa_pss_pss_sha384, rsa_pss_pss_sha512,\n"
++        "     mldsa44, mldsa65, mldsa87\n"
+         "-Z enable 0-RTT (for TLS 1.3; also use -u)\n"
+         "-E enable post-handshake authentication\n"
+         "   (for TLS 1.3; only has an effect with 3 or more -r options)\n"
+         "-x Export and print keying material after successful handshake\n"
+         "   The argument is a comma separated list of exporters in the form:\n"
+         "     LABEL[:OUTPUT-LENGTH[:CONTEXT]]\n"
+         "   where LABEL and CONTEXT can be either a free-form string or\n"
+         "   a hex string if it is preceded by \"0x\"; OUTPUT-LENGTH\n"
+@@ -2923,17 +2925,17 @@ main(int argc, char **argv)
+         }
+         if (listen_sock) {
+             PR_Close(listen_sock);
+         }
+         exit(0);
+     }
+ 
+     if (certNicknameIndex == 0) {
+-        fprintf(stderr, "Must specify at least one certificate nickname using '-n' (RSA), '-S' (DSA), or 'e' (EC).\n");
++        fprintf(stderr, "Must specify at least one certificate nickname using '-n' or '-e' or '-S' (deprecated) \n");
+         fprintf(stderr, "Run '%s -h' for usage information.\n", progName);
+         exit(6);
+     }
+ 
+     if (port == 0) {
+         fprintf(stderr, "Required argument 'port' must be non-zero value\n");
+         exit(7);
+     }
+diff --git a/cmd/signtool/certgen.c b/cmd/signtool/certgen.c
+--- a/cmd/signtool/certgen.c
++++ b/cmd/signtool/certgen.c
+@@ -433,17 +433,17 @@ sign_cert(CERTCertificate *cert, SECKEYP
+ {
+     SECStatus rv;
+ 
+     SECItem der2;
+     SECItem *result2;
+ 
+     SECOidTag alg = SEC_OID_UNKNOWN;
+ 
+-    alg = SEC_GetSignatureAlgorithmOidTag(privk->keyType, SEC_OID_UNKNOWN);
++    alg = SECU_GetSignatureAlgorithmFromPrivateKey(privk, SEC_OID_UNKNOWN);
+     if (alg == SEC_OID_UNKNOWN) {
+         FatalError("Unknown key type");
+     }
+ 
+     rv = SECOID_SetAlgorithmID(cert->arena, &cert->signature, alg, 0);
+ 
+     if (rv != SECSuccess) {
+         PR_fprintf(errorFD, "%s: unable to set signature alg id\n",
+diff --git a/cmd/strsclnt/strsclnt.c b/cmd/strsclnt/strsclnt.c
+--- a/cmd/strsclnt/strsclnt.c
++++ b/cmd/strsclnt/strsclnt.c
+@@ -169,17 +169,18 @@ Usage(void)
+             "          This takes a comma separated list of signature schemes in preference\n"
+             "          order.\n"
+             "          Possible values are:\n"
+             "          rsa_pkcs1_sha1, rsa_pkcs1_sha256, rsa_pkcs1_sha384, rsa_pkcs1_sha512,\n"
+             "          ecdsa_sha1, ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384,\n"
+             "          ecdsa_secp521r1_sha512,\n"
+             "          rsa_pss_rsae_sha256, rsa_pss_rsae_sha384, rsa_pss_rsae_sha512,\n"
+             "          rsa_pss_pss_sha256, rsa_pss_pss_sha384, rsa_pss_pss_sha512,\n"
+-            "          dsa_sha1, dsa_sha256, dsa_sha384, dsa_sha512\n",
++            "          dsa_sha1, dsa_sha256, dsa_sha384, dsa_sha512\n"
++            "          mldsa44, mldsa65, mldsa87\n",
+             progName);
+     exit(1);
+ }
+ 
+ static void
+ errWarn(char *funcString)
+ {
+     PRErrorCode perr = PR_GetError();
+diff --git a/cmd/tstclnt/tstclnt.c b/cmd/tstclnt/tstclnt.c
+--- a/cmd/tstclnt/tstclnt.c
++++ b/cmd/tstclnt/tstclnt.c
+@@ -136,16 +136,19 @@ signatureSchemeName(SSLSignatureScheme s
+         strcase(ed448);
+         strcase(rsa_pss_pss_sha256);
+         strcase(rsa_pss_pss_sha384);
+         strcase(rsa_pss_pss_sha512);
+         strcase(dsa_sha1);
+         strcase(dsa_sha256);
+         strcase(dsa_sha384);
+         strcase(dsa_sha512);
++        strcase(mldsa44);
++        strcase(mldsa65);
++        strcase(mldsa87);
+ #undef strcase
+         case ssl_sig_rsa_pkcs1_sha1md5:
+             return "RSA PKCS#1 SHA1+MD5";
+         default:
+             break;
+     }
+     return "Unknown Scheme";
+ }
+@@ -318,17 +321,17 @@ PrintParameterUsage()
+             "-I", "", "", "");
+     fprintf(stderr, "%-20s Comma separated list of signature schemes in preference order.\n"
+                     "%-20s The following values are valid:\n"
+                     "%-20s rsa_pkcs1_sha1, rsa_pkcs1_sha256, rsa_pkcs1_sha384, rsa_pkcs1_sha512,\n"
+                     "%-20s ecdsa_sha1, ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384,\n"
+                     "%-20s ecdsa_secp521r1_sha512,\n"
+                     "%-20s rsa_pss_rsae_sha256, rsa_pss_rsae_sha384, rsa_pss_rsae_sha512,\n"
+                     "%-20s rsa_pss_pss_sha256, rsa_pss_pss_sha384, rsa_pss_pss_sha512,\n"
+-                    "%-20s dsa_sha1, dsa_sha256, dsa_sha384, dsa_sha512\n",
++                    "%-20s dsa_sha1, dsa_sha256, dsa_sha384, dsa_sha512 mldsa44 mldsa65 mldsa87\n",
+             "-J", "", "", "", "", "", "", "");
+     fprintf(stderr, "%-20s Use DTLS\n", "-P {client, server}");
+     fprintf(stderr, "%-20s Exit after handshake\n", "-Q");
+     fprintf(stderr, "%-20s Use Encrypted Client Hello with the given Base64-encoded ECHConfigs\n", "-N");
+     fprintf(stderr, "%-20s Enable Encrypted Client Hello GREASEing with the given padding size (0-255) \n", "-i");
+     fprintf(stderr, "%-20s Enable post-handshake authentication\n"
+                     "%-20s for TLS 1.3; need to specify -n\n",
+             "-E", "");
+diff --git a/doc/certutil.xml b/doc/certutil.xml
+--- a/doc/certutil.xml
++++ b/doc/certutil.xml
+@@ -271,17 +271,17 @@ Add one or multiple extensions that cert
+         <listitem><para>Pass an input file to the command. Depending on the command option, an input file can be a specific certificate, a certificate request file, or a batch file of commands.</para></listitem>
+       </varlistentry>
+ 
+       <varlistentry>
+         <term>-k key-type-or-id</term>
+         <listitem>
+           <para>Specify the type or specific ID of a key.</para>
+           <para>
+-           The valid key type options are rsa, dsa, ec, or all. The default 
++           The valid key type options are rsa, dsa, ec, mldsa or all. The default 
+            value is rsa. Specifying the type of key can avoid mistakes caused by
+            duplicate nicknames. Giving a key type generates a new key pair; 
+            giving the ID of an existing key reuses that key pair (which is 
+            required to renew certificates).
+           </para>
+         </listitem>
+       </varlistentry>
+ 
+@@ -312,17 +312,17 @@ Add one or multiple extensions that cert
+       </varlistentry>
+ 
+       <varlistentry>
+         <term>-p phone</term>
+         <listitem><para>Specify a contact telephone number to include in new certificates or certificate requests. Bracket this string with quotation marks if it contains spaces.</para></listitem>
+       </varlistentry>
+ 
+       <varlistentry>
+-        <term>-q pqgfile or curve-name</term>
++        <term>-q pqgfile or curve-name or ml-dsa-parameter-set</term>
+         <listitem>
+         <para>Read an alternate PQG value from the specified file when generating DSA key pairs. If this argument is not used, <command>certutil</command> generates its own PQG value. PQG files are created with a separate DSA utility.</para>
+         <para>Elliptic curve name is one of the ones from nistp256, nistp384, nistp521, curve25519.</para>
+         <para>
+            If a token is available that supports more curves, the foolowing curves are supported as well:
+            sect163k1, nistk163, sect163r1, sect163r2,
+            nistb163,  sect193r1, sect193r2, sect233k1, nistk233,
+            sect233r1, nistb233, sect239k1, sect283k1, nistk283,
+@@ -336,16 +336,17 @@ Add one or multiple extensions that cert
+            c2pnb163v2, c2pnb163v3, c2pnb176v1, c2tnb191v1,
+            c2tnb191v2, c2tnb191v3,
+            c2pnb208w1, c2tnb239v1, c2tnb239v2, c2tnb239v3,
+            c2pnb272w1, c2pnb304w1,
+            c2tnb359w1, c2pnb368w1, c2tnb431r1, secp112r1,
+            secp112r2, secp128r1, secp128r2, sect113r1, sect113r2,
+            sect131r1, sect131r2
+         </para>
++        <para>ML-DSA parameter set is one of ml-dsa-44, ml-dsa-65, ml-dsa-87.</para>
+         </listitem>
+         
+       </varlistentry>
+ 
+       <varlistentry>
+         <term>-r </term>
+         <listitem><para>Display a certificate's binary DER encoding when listing information about that certificate with the -L option.</para></listitem>
+       </varlistentry>
+diff --git a/gtests/ssl_gtest/ssl_auth_unittest.cc b/gtests/ssl_gtest/ssl_auth_unittest.cc
+--- a/gtests/ssl_gtest/ssl_auth_unittest.cc
++++ b/gtests/ssl_gtest/ssl_auth_unittest.cc
+@@ -2289,9 +2289,31 @@ INSTANTIATE_TEST_SUITE_P(
+ INSTANTIATE_TEST_SUITE_P(
+     SignatureSchemeEcdsaSha1, TlsSignatureSchemeConfiguration,
+     ::testing::Combine(TlsConnectTestBase::kTlsVariantsAll,
+                        TlsConnectTestBase::kTlsV12,
+                        ::testing::Values(TlsAgent::kServerEcdsa256,
+                                          TlsAgent::kServerEcdsa384),
+                        ::testing::Values(ssl_auth_ecdsa),
+                        ::testing::Values(ssl_sig_ecdsa_sha1)));
++// ML-DSA is only allowed to be used in TLS 1.3 or greater
++INSTANTIATE_TEST_SUITE_P(
++    SignatureSchemeMlDsa44Tls13, TlsSignatureSchemeConfiguration,
++    ::testing::Combine(TlsConnectTestBase::kTlsVariantsAll,
++                       TlsConnectTestBase::kTlsV13,
++                       ::testing::Values(TlsAgent::kServerMlDsa44),
++                       ::testing::Values(ssl_auth_mldsa44),
++                       ::testing::Values(ssl_sig_mldsa44)));
++INSTANTIATE_TEST_SUITE_P(
++    SignatureSchemeMlDsa65Tls13, TlsSignatureSchemeConfiguration,
++    ::testing::Combine(TlsConnectTestBase::kTlsVariantsAll,
++                       TlsConnectTestBase::kTlsV13,
++                       ::testing::Values(TlsAgent::kServerMlDsa65),
++                       ::testing::Values(ssl_auth_mldsa65),
++                       ::testing::Values(ssl_sig_mldsa65)));
++INSTANTIATE_TEST_SUITE_P(
++    SignatureSchemeMlDsa87Tls13, TlsSignatureSchemeConfiguration,
++    ::testing::Combine(TlsConnectTestBase::kTlsVariantsAll,
++                       TlsConnectTestBase::kTlsV13,
++                       ::testing::Values(TlsAgent::kServerMlDsa87),
++                       ::testing::Values(ssl_auth_mldsa87),
++                       ::testing::Values(ssl_sig_mldsa87)));
+ }  // namespace nss_test
+diff --git a/gtests/ssl_gtest/tls_agent.cc b/gtests/ssl_gtest/tls_agent.cc
+--- a/gtests/ssl_gtest/tls_agent.cc
++++ b/gtests/ssl_gtest/tls_agent.cc
+@@ -39,19 +39,25 @@ const std::string TlsAgent::kServerRsaSi
+ const std::string TlsAgent::kServerRsaPss = "rsa_pss";
+ const std::string TlsAgent::kServerRsaDecrypt = "rsa_decrypt";
+ const std::string TlsAgent::kServerEcdsa256 = "ecdsa256";
+ const std::string TlsAgent::kServerEcdsa384 = "ecdsa384";
+ const std::string TlsAgent::kServerEcdsa521 = "ecdsa521";
+ const std::string TlsAgent::kServerEcdhRsa = "ecdh_rsa";
+ const std::string TlsAgent::kServerEcdhEcdsa = "ecdh_ecdsa";
+ const std::string TlsAgent::kServerDsa = "dsa";
++const std::string TlsAgent::kServerMlDsa44 = "mldsa44";
++const std::string TlsAgent::kServerMlDsa65 = "mldsa65";
++const std::string TlsAgent::kServerMlDsa87 = "mldsa87";
+ const std::string TlsAgent::kDelegatorEcdsa256 = "delegator_ecdsa256";
+ const std::string TlsAgent::kDelegatorRsae2048 = "delegator_rsae2048";
+ const std::string TlsAgent::kDelegatorRsaPss2048 = "delegator_rsa_pss2048";
++const std::string TlsAgent::kDelegatorMlDsa44 = "delegator_mldsa44";
++const std::string TlsAgent::kDelegatorMlDsa65 = "delegator_mldsa65";
++const std::string TlsAgent::kDelegatorMlDsa87 = "delegator_mldsa87";
+ 
+ static const uint8_t kCannedTls13ServerHello[] = {
+     0x03, 0x03, 0x9c, 0xbc, 0x14, 0x9b, 0x0e, 0x2e, 0xfa, 0x0d, 0xf3,
+     0xf0, 0x5c, 0x70, 0x7a, 0xe0, 0xd1, 0x9b, 0x3e, 0x5a, 0x44, 0x6b,
+     0xdf, 0xe5, 0xc2, 0x28, 0x64, 0xf7, 0x00, 0xc1, 0x9c, 0x08, 0x76,
+     0x08, 0x00, 0x13, 0x01, 0x00, 0x00, 0x2e, 0x00, 0x33, 0x00, 0x24,
+     0x00, 0x1d, 0x00, 0x20, 0xc2, 0xcf, 0x23, 0x17, 0x64, 0x23, 0x03,
+     0xf0, 0xfb, 0x45, 0x98, 0x26, 0xd1, 0x65, 0x24, 0xa1, 0x6c, 0xa9,
+diff --git a/gtests/ssl_gtest/tls_agent.h b/gtests/ssl_gtest/tls_agent.h
+--- a/gtests/ssl_gtest/tls_agent.h
++++ b/gtests/ssl_gtest/tls_agent.h
+@@ -82,19 +82,25 @@ class TlsAgent : public PollTarget {
+   static const std::string kServerRsaPss;
+   static const std::string kServerRsaDecrypt;
+   static const std::string kServerEcdsa256;
+   static const std::string kServerEcdsa384;
+   static const std::string kServerEcdsa521;
+   static const std::string kServerEcdhEcdsa;
+   static const std::string kServerEcdhRsa;
+   static const std::string kServerDsa;
++  static const std::string kServerMlDsa44;
++  static const std::string kServerMlDsa65;
++  static const std::string kServerMlDsa87;
+   static const std::string kDelegatorEcdsa256;    // draft-ietf-tls-subcerts
+   static const std::string kDelegatorRsae2048;    // draft-ietf-tls-subcerts
+   static const std::string kDelegatorRsaPss2048;  // draft-ietf-tls-subcerts
++  static const std::string kDelegatorMlDsa44;     // draft-ietf-tls-subcerts
++  static const std::string kDelegatorMlDsa65;     // draft-ietf-tls-subcerts
++  static const std::string kDelegatorMlDsa87;     // draft-ietf-tls-subcerts
+ 
+   TlsAgent(const std::string& name, Role role, SSLProtocolVariant variant);
+   virtual ~TlsAgent();
+ 
+   void SetPeer(std::shared_ptr<TlsAgent>& peer) {
+     adapter_->SetPeer(peer->adapter_);
+   }
+ 
+diff --git a/gtests/ssl_gtest/tls_subcerts_unittest.cc b/gtests/ssl_gtest/tls_subcerts_unittest.cc
+--- a/gtests/ssl_gtest/tls_subcerts_unittest.cc
++++ b/gtests/ssl_gtest/tls_subcerts_unittest.cc
+@@ -19,21 +19,23 @@
+ 
+ namespace nss_test {
+ 
+ #ifndef LTO
+ // sigh this construction breaks LTO
+ const std::string kEcdsaDelegatorId = TlsAgent::kDelegatorEcdsa256;
+ const std::string kRsaeDelegatorId = TlsAgent::kDelegatorRsae2048;
+ const std::string kPssDelegatorId = TlsAgent::kDelegatorRsaPss2048;
++const std::string kMlDsa65DelegatorId = TlsAgent::kDelegatorMlDsa65;
+ const std::string kDCId = TlsAgent::kServerEcdsa256;
+ #else
+ #define kEcdsaDelegatorId TlsAgent::kDelegatorEcdsa256
+ #define kRsaeDelegatorId TlsAgent::kDelegatorRsae2048
+ #define kPssDelegatorId TlsAgent::kDelegatorRsaPss2048
++#define kMlDsa65DelegatorId TlsAgent::kDelegatorMlDsa65
+ #define kDCId  TlsAgent::kServerEcdsa256
+ #endif
+ const SSLSignatureScheme kDCScheme = ssl_sig_ecdsa_secp256r1_sha256;
+ const PRUint32 kDCValidFor = 60 * 60 * 24 * 7 /* 1 week (seconds) */;
+ 
+ static void CheckPreliminaryPeerDelegCred(
+     const std::shared_ptr<TlsAgent>& client, bool expected,
+     PRUint32 key_bits = 0, SSLSignatureScheme sig_scheme = ssl_sig_none) {
+@@ -234,16 +236,63 @@ TEST_P(TlsConnectTls13, DCConnectEcdsaP2
+       client_, ssl_delegated_credentials_xtn);
+   Connect();
+ 
+   EXPECT_TRUE(cfilter->captured());
+   CheckPeerDelegCred(client_, true, 256);
+   EXPECT_EQ(ssl_sig_ecdsa_secp256r1_sha256, client_->info().signatureScheme);
+ }
+ 
++// Connected with ML-DSA-65, using an ML-DSA-65 SKI and ML-DSA-65 delegation cert.
++TEST_P(TlsConnectTls13, DCConnectMlDsa65MlDsa65) {
++  Reset(kMlDsa65DelegatorId);
++
++  // Need to enable PSS-PSS, which is not on by default.
++  static const SSLSignatureScheme kSchemes[] = {ssl_sig_ecdsa_secp256r1_sha256,
++                                                ssl_sig_mldsa65};
++  client_->SetSignatureSchemes(kSchemes, PR_ARRAY_SIZE(kSchemes));
++  server_->SetSignatureSchemes(kSchemes, PR_ARRAY_SIZE(kSchemes));
++
++  client_->EnableDelegatedCredentials();
++  server_->AddDelegatedCredential(
++      TlsAgent::kServerMlDsa65, ssl_sig_mldsa65, kDCValidFor, now());
++
++  auto cfilter = MakeTlsFilter<TlsExtensionCapture>(
++      client_, ssl_delegated_credentials_xtn);
++  Connect();
++
++  EXPECT_TRUE(cfilter->captured());
++  CheckPeerDelegCred(client_, true, ML_DSA_65_PUBLICKEY_LEN*8);
++  EXPECT_EQ(ssl_sig_mldsa65, client_->info().signatureScheme);
++}
++
++// Connected with ECDSA-P256 using a PSS delegation cert.
++TEST_P(TlsConnectTls13, DCConnectEcdsaP256MlDsa65) {
++  Reset(kMlDsa65DelegatorId);
++
++  // Need to enable PSS-PSS, which is not on by default.
++  static const SSLSignatureScheme kSchemes[] = {ssl_sig_ecdsa_secp256r1_sha256,
++                                                ssl_sig_mldsa65};
++  client_->SetSignatureSchemes(kSchemes, PR_ARRAY_SIZE(kSchemes));
++  server_->SetSignatureSchemes(kSchemes, PR_ARRAY_SIZE(kSchemes));
++
++  client_->EnableDelegatedCredentials();
++  server_->AddDelegatedCredential(TlsAgent::kServerEcdsa256,
++                                  ssl_sig_ecdsa_secp256r1_sha256, kDCValidFor,
++                                  now());
++
++  auto cfilter = MakeTlsFilter<TlsExtensionCapture>(
++      client_, ssl_delegated_credentials_xtn);
++  Connect();
++
++  EXPECT_TRUE(cfilter->captured());
++  CheckPeerDelegCred(client_, true, 256);
++  EXPECT_EQ(ssl_sig_ecdsa_secp256r1_sha256, client_->info().signatureScheme);
++}
++
+ // Simulate the client receiving a DC containing algorithms not advertised.
+ // Do this by tweaking the client's supported sigSchemes after the CH.
+ TEST_P(TlsConnectTls13, DCReceiveUnadvertisedScheme) {
+   Reset(kEcdsaDelegatorId);
+   static const SSLSignatureScheme kClientSchemes[] = {
+       ssl_sig_ecdsa_secp256r1_sha256, ssl_sig_ecdsa_secp384r1_sha384};
+   static const SSLSignatureScheme kServerSchemes[] = {
+       ssl_sig_ecdsa_secp384r1_sha384, ssl_sig_ecdsa_secp256r1_sha256};
+@@ -733,11 +782,29 @@ TEST_F(DCDelegation, DCDelegations) {
+                             cert.get(), priv.get(), pub_ecdsa.get(),
+                             ssl_sig_rsa_pss_pss_sha256, kDCValidFor, now, &dc));
+   EXPECT_EQ(SSL_ERROR_INCORRECT_SIGNATURE_ALGORITHM, PORT_GetError());
+   EXPECT_EQ(SECFailure,
+             SSL_DelegateCredential(cert.get(), priv.get(), pub_ecdsa.get(),
+                                    ssl_sig_ecdsa_secp384r1_sha384, kDCValidFor,
+                                    now, &dc));
+   EXPECT_EQ(SSL_ERROR_INCORRECT_SIGNATURE_ALGORITHM, PORT_GetError());
++  ScopedSECKEYPublicKey pub_mldsa;
++  ScopedSECKEYPrivateKey priv_mldsa;
++  ASSERT_TRUE(TlsAgent::LoadKeyPairFromCert(TlsAgent::kServerMlDsa65,
++                                            &pub_mldsa, &priv_mldsa));
++  EXPECT_EQ(SECFailure,
++            SSL_DelegateCredential(cert.get(), priv.get(), pub_mldsa.get(),
++                                   ssl_sig_rsa_pss_rsae_sha256, kDCValidFor,
++                                   now, &dc));
++  EXPECT_EQ(SSL_ERROR_INCORRECT_SIGNATURE_ALGORITHM, PORT_GetError());
++  EXPECT_EQ(SECFailure, SSL_DelegateCredential(
++                            cert.get(), priv.get(), pub_mldsa.get(),
++                            ssl_sig_mldsa44, kDCValidFor, now, &dc));
++  EXPECT_EQ(SSL_ERROR_INCORRECT_SIGNATURE_ALGORITHM, PORT_GetError());
++  EXPECT_EQ(SECSuccess,
++            SSL_DelegateCredential(cert.get(), priv.get(), pub_mldsa.get(),
++                                   ssl_sig_mldsa65, kDCValidFor,
++                                   now, &dc));
++  dc.Reset();
+ }
+ 
+ }  // namespace nss_test
+diff --git a/lib/cryptohi/secsign.c b/lib/cryptohi/secsign.c
+--- a/lib/cryptohi/secsign.c
++++ b/lib/cryptohi/secsign.c
+@@ -764,28 +764,24 @@ SEC_GetSignatureAlgorithmOidTag(KeyType 
+     return sigTag;
+ }
+ 
+ static SECItem *
+ sec_CreateRSAPSSParameters(PLArenaPool *arena,
+                            SECItem *result,
+                            SECOidTag hashAlgTag,
+                            const SECItem *params,
+-                           const SECKEYPrivateKey *key)
++                           int modBytes)
+ {
+     SECKEYRSAPSSParams pssParams;
+-    int modBytes, hashLength;
++    int hashLength;
+     unsigned long saltLength;
+     PRBool defaultSHA1 = PR_FALSE;
+     SECStatus rv;
+ 
+-    if (key->keyType != rsaKey && key->keyType != rsaPssKey) {
+-        PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
+-        return NULL;
+-    }
+ 
+     PORT_Memset(&pssParams, 0, sizeof(pssParams));
+ 
+     if (params && params->data) {
+         /* The parameters field should either be empty or contain
+          * valid RSA-PSS parameters */
+         PORT_Assert(!(params->len == 2 &&
+                       params->data[0] == SEC_ASN1_NULL &&
+@@ -808,21 +804,28 @@ sec_CreateRSAPSSParameters(PLArenaPool *
+             return NULL;
+         }
+         if (trailerField != 1) {
+             PORT_SetError(SEC_ERROR_INVALID_ARGS);
+             return NULL;
+         }
+     }
+ 
+-    modBytes = PK11_GetPrivateModulusLen((SECKEYPrivateKey *)key);
+ 
+     /* Determine the hash algorithm to use, based on hashAlgTag and
+-     * pssParams.hashAlg; there are four cases */
+-    if (hashAlgTag != SEC_OID_UNKNOWN) {
++     * pssParams.hashAlg; there are 6  cases.
++     *  case:
++     *  1) we did not specify any parameters but we did specifi
++     *  a hashAlgTag. Use the specified hash algtag. This is the fall
++     *  through case (none of the if's trigger).
++     *  2) We have params and we have a  specified hashAlgTag from
++     *  the app and the hash alg is in the parameters, make sure that the
++     *  hashAlgTag specified by the appication  matches.
++     *  3) Same as 2 except the algorithm is not specified by the */
++    if (params && (hashAlgTag != SEC_OID_UNKNOWN)) {
+         SECOidTag tag = SEC_OID_UNKNOWN;
+ 
+         if (pssParams.hashAlg) {
+             tag = SECOID_GetAlgorithmTag(pssParams.hashAlg);
+         } else if (defaultSHA1) {
+             tag = SEC_OID_SHA1;
+         }
+ 
+@@ -897,16 +900,18 @@ sec_CreateRSAPSSParameters(PLArenaPool *
+                                    &saltLength);
+         if (rv != SECSuccess) {
+             return NULL;
+         }
+ 
+         /* The specified salt length is too long */
+         if (saltLength > (unsigned long)(modBytes - hashLength - 2)) {
+             PORT_SetError(SEC_ERROR_INVALID_ARGS);
++
++
+             return NULL;
+         }
+     } else if (defaultSHA1) {
+         saltLength = 20;
+     }
+ 
+     /* Fill in the parameters */
+     if (pssParams.hashAlg) {
+@@ -983,22 +988,57 @@ sec_CreateRSAPSSParameters(PLArenaPool *
+ SECItem *
+ SEC_CreateSignatureAlgorithmParameters(PLArenaPool *arena,
+                                        SECItem *result,
+                                        SECOidTag signAlgTag,
+                                        SECOidTag hashAlgTag,
+                                        const SECItem *params,
+                                        const SECKEYPrivateKey *key)
+ {
++    int modBytes;
+     switch (signAlgTag) {
+         case SEC_OID_PKCS1_RSA_PSS_SIGNATURE:
++            if (key->keyType != rsaKey && key->keyType != rsaPssKey) {
++                PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
++                return NULL;
++            }
++            modBytes = PK11_GetPrivateModulusLen((SECKEYPrivateKey *)key);
+             return sec_CreateRSAPSSParameters(arena, result,
+-                                              hashAlgTag, params, key);
++                                              hashAlgTag, params, modBytes);
+         default:
+             if (params == NULL)
+                 return NULL;
+             if (result == NULL)
+                 result = SECITEM_AllocItem(arena, NULL, 0);
+             if (SECITEM_CopyItem(arena, result, params) != SECSuccess)
+                 return NULL;
+             return result;
+     }
+ }
++
++SECItem *
++SEC_CreateVerifySignatureAlgorithmParameters(PLArenaPool *arena,
++                                             SECItem *result,
++                                             SECOidTag signAlgTag,
++                                             SECOidTag hashAlgTag,
++                                             const SECItem *params,
++                                             const SECKEYPublicKey *key)
++{
++    int modBytes;
++    switch (signAlgTag) {
++        case SEC_OID_PKCS1_RSA_PSS_SIGNATURE:
++            if (key->keyType != rsaKey && key->keyType != rsaPssKey) {
++                PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
++                return NULL;
++            }
++            modBytes = key->u.rsa.modulus.len;
++            return sec_CreateRSAPSSParameters(arena, result,
++                                              hashAlgTag, params, modBytes);
++        default:
++            if (params == NULL)
++                return NULL;
++            if (result == NULL)
++                result = SECITEM_AllocItem(arena, NULL, 0);
++            if (SECITEM_CopyItem(arena, result, params) != SECSuccess)
++                return NULL;
++            return result;
++    }
++}
+diff --git a/lib/ssl/ssl3con.c b/lib/ssl/ssl3con.c
+--- a/lib/ssl/ssl3con.c
++++ b/lib/ssl/ssl3con.c
+@@ -31,16 +31,17 @@
+ #include "pratom.h"
+ #include "prthread.h"
+ #include "nss.h"
+ #include "nssoptions.h"
+ 
+ #include "pk11func.h"
+ #include "secmod.h"
+ #include "blapi.h"
++#include "secmodti.h" /* for ML_DSA_OIDS, not needed upstream */
+ 
+ #include <limits.h>
+ #include <stdio.h>
+ 
+ static PK11SymKey *ssl3_GenerateRSAPMS(sslSocket *ss, ssl3CipherSpec *spec,
+                                        PK11SlotInfo *serverKeySlot);
+ static SECStatus ssl3_ComputeMasterSecret(sslSocket *ss, PK11SymKey *pms,
+                                           PK11SymKey **msp);
+@@ -66,16 +67,17 @@ static SECStatus ssl3_HandlePostHelloHan
+                                                       PRUint32 length);
+ static SECStatus ssl3_FlushHandshakeMessages(sslSocket *ss, PRInt32 flags);
+ static CK_MECHANISM_TYPE ssl3_GetHashMechanismByHashType(SSLHashType hashType);
+ static CK_MECHANISM_TYPE ssl3_GetMgfMechanismByHashType(SSLHashType hash);
+ PRBool ssl_IsRsaPssSignatureScheme(SSLSignatureScheme scheme);
+ PRBool ssl_IsRsaeSignatureScheme(SSLSignatureScheme scheme);
+ PRBool ssl_IsRsaPkcs1SignatureScheme(SSLSignatureScheme scheme);
+ PRBool ssl_IsDsaSignatureScheme(SSLSignatureScheme scheme);
++PRBool ssl_IsMlDsaSignatureScheme(SSLSignatureScheme scheme);
+ static SECStatus ssl3_UpdateDefaultHandshakeHashes(sslSocket *ss,
+                                                    const unsigned char *b,
+                                                    unsigned int l);
+ const PRUint32 kSSLSigSchemePolicy =
+     NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_ANY_SIGNATURE;
+ 
+ const PRUint8 ssl_hello_retry_random[] = {
+     0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+@@ -200,17 +202,20 @@ static const SSLSignatureScheme defaultS
+     ssl_sig_rsa_pss_rsae_sha512,
+     ssl_sig_rsa_pkcs1_sha256,
+     ssl_sig_rsa_pkcs1_sha384,
+     ssl_sig_rsa_pkcs1_sha512,
+     ssl_sig_rsa_pkcs1_sha1,
+     ssl_sig_dsa_sha256,
+     ssl_sig_dsa_sha384,
+     ssl_sig_dsa_sha512,
+-    ssl_sig_dsa_sha1
++    ssl_sig_dsa_sha1,
++    ssl_sig_mldsa44,
++    ssl_sig_mldsa65,
++    ssl_sig_mldsa87,
+ };
+ PR_STATIC_ASSERT(PR_ARRAY_SIZE(defaultSignatureSchemes) <=
+                  MAX_SIGNATURE_SCHEMES);
+ 
+ /* Verify that SSL_ImplementedCiphers and cipherSuites are in consistent order.
+  */
+ #ifdef DEBUG
+ void
+@@ -358,17 +363,20 @@ static const CK_MECHANISM_TYPE auth_alg_
+     CKM_DSA, /* ? _SHA1 */ /* ssl_auth_dsa */
+     CKM_INVALID_MECHANISM, /* ssl_auth_kea (unused) */
+     CKM_ECDSA,             /* ssl_auth_ecdsa */
+     CKM_ECDH1_DERIVE,      /* ssl_auth_ecdh_rsa */
+     CKM_ECDH1_DERIVE,      /* ssl_auth_ecdh_ecdsa */
+     CKM_RSA_PKCS,          /* ssl_auth_rsa_sign */
+     CKM_RSA_PKCS_PSS,      /* ssl_auth_rsa_pss */
+     CKM_NSS_HKDF_SHA256,   /* ssl_auth_psk (just check for HKDF) */
+-    CKM_INVALID_MECHANISM  /* ssl_auth_tls13_any */
++    CKM_INVALID_MECHANISM, /* ssl_auth_tls13_any */
++    CKM_ML_DSA,            /* ssl_auth_mldsa (same mech for each) */
++    CKM_ML_DSA,            /* ssl_auth_mldsa (key determines the*/
++    CKM_ML_DSA,            /* ssl_auth_mldsa  parameter set) */
+ };
+ PR_STATIC_ASSERT(PR_ARRAY_SIZE(auth_alg_defs) == ssl_auth_size);
+ 
+ static const CK_MECHANISM_TYPE kea_alg_defs[] = {
+     CKM_INVALID_MECHANISM, /* ssl_kea_null */
+     CKM_RSA_PKCS,          /* ssl_kea_rsa */
+     CKM_DH_PKCS_DERIVE,    /* ssl_kea_dh */
+     CKM_INVALID_MECHANISM, /* ssl_kea_fortezza (unused) */
+@@ -758,16 +766,23 @@ ssl_KEAEnabled(const sslSocket *ss, SSLK
+ 
+ static PRBool
+ ssl_HasCert(const sslSocket *ss, PRUint16 maxVersion, SSLAuthType authType)
+ {
+     PRCList *cursor;
+     if (authType == ssl_auth_null || authType == ssl_auth_psk || authType == ssl_auth_tls13_any) {
+         return PR_TRUE;
+     }
++    /* mldsa is only supported in TLS 1.3 or greater */
++    if (maxVersion < SSL_LIBRARY_VERSION_TLS_1_3 &&
++        (authType == ssl_auth_mldsa44 ||
++         authType == ssl_auth_mldsa65 ||
++         authType == ssl_auth_mldsa87)) {
++        return PR_FALSE;
++    }
+     for (cursor = PR_NEXT_LINK(&ss->serverCerts);
+          cursor != &ss->serverCerts;
+          cursor = PR_NEXT_LINK(cursor)) {
+         sslServerCert *cert = (sslServerCert *)cursor;
+         if (!cert->serverKeyPair ||
+             !cert->serverKeyPair->privKey ||
+             !cert->serverCertChain ||
+             !SSL_CERT_IS(cert, authType)) {
+@@ -803,16 +818,21 @@ ssl_HasCert(const sslSocket *ss, PRUint1
+ static PRBool
+ ssl_SchemePolicyOK(SSLSignatureScheme scheme, PRUint32 require)
+ {
+     /* Hash policy. */
+     PRUint32 policy;
+     SECOidTag hashOID = ssl3_HashTypeToOID(ssl_SignatureSchemeToHashType(scheme));
+     SECOidTag sigOID;
+ 
++#ifndef NSS_ENABLE_ML_DSA
++    if (ssl_IsMlDsaSignatureScheme(scheme)) {
++        return PR_FALSE;
++    }
++#endif
+     /* policy bits needed to enable a SignatureScheme */
+     SECStatus rv = NSS_GetAlgorithmPolicy(hashOID, &policy);
+     if (rv == SECSuccess &&
+         (policy & require) != require) {
+         return PR_FALSE;
+     }
+ 
+     /* ssl_SignatureSchemeToAuthType reports rsa for rsa_pss_rsae, but we
+@@ -830,17 +850,17 @@ ssl_SchemePolicyOK(SSLSignatureScheme sc
+         return PR_FALSE;
+     }
+     return PR_TRUE;
+ }
+ 
+ /* Check that a signature scheme is accepted.
+  * Both by policy and by having a token that supports it. */
+ static PRBool
+-ssl_SignatureSchemeAccepted(PRUint16 minVersion,
++ssl_SignatureSchemeAccepted(PRUint16 minVersion, PRUint16 maxVersion,
+                             SSLSignatureScheme scheme,
+                             PRBool forCert)
+ {
+     /* Disable RSA-PSS schemes if there are no tokens to verify them. */
+     if (ssl_IsRsaPssSignatureScheme(scheme)) {
+         if (!PK11_TokenExists(auth_alg_defs[ssl_auth_rsa_pss])) {
+             return PR_FALSE;
+         }
+@@ -852,16 +872,21 @@ ssl_SignatureSchemeAccepted(PRUint16 min
+         if (minVersion >= SSL_LIBRARY_VERSION_TLS_1_3) {
+             return PR_FALSE;
+         }
+     } else if (ssl_IsDsaSignatureScheme(scheme)) {
+         /* DSA: not in TLS 1.3, and check policy. */
+         if (minVersion >= SSL_LIBRARY_VERSION_TLS_1_3) {
+             return PR_FALSE;
+         }
++    } else if (ssl_IsMlDsaSignatureScheme(scheme)) {
++        /* MLDSA: limit ml-dsa if we don't support TLS 1.3. */
++        if (maxVersion < SSL_LIBRARY_VERSION_TLS_1_3) {
++            return PR_FALSE;
++        }
+     }
+ 
+     return ssl_SchemePolicyOK(scheme, kSSLSigSchemePolicy);
+ }
+ 
+ static SECStatus
+ ssl_CheckSignatureSchemes(sslSocket *ss)
+ {
+@@ -887,17 +912,17 @@ ssl_CheckSignatureSchemes(sslSocket *ss)
+         if (!foundCert) {
+             PORT_SetError(SSL_ERROR_NO_SUPPORTED_SIGNATURE_ALGORITHM);
+             return SECFailure;
+         }
+     }
+ 
+     /* Ensure that there is a signature scheme that can be accepted.*/
+     for (unsigned int i = 0; i < ss->ssl3.signatureSchemeCount; ++i) {
+-        if (ssl_SignatureSchemeAccepted(ss->vrange.min,
++        if (ssl_SignatureSchemeAccepted(ss->vrange.min, ss->vrange.max,
+                                         ss->ssl3.signatureSchemes[i],
+                                         PR_FALSE /* forCert */)) {
+             return SECSuccess;
+         }
+     }
+     PORT_SetError(SSL_ERROR_NO_SUPPORTED_SIGNATURE_ALGORITHM);
+     return SECFailure;
+ }
+@@ -918,17 +943,18 @@ ssl_HasSignatureScheme(const sslSocket *
+         return PR_TRUE;
+     }
+     for (unsigned int i = 0; i < ss->ssl3.signatureSchemeCount; ++i) {
+         SSLSignatureScheme scheme = ss->ssl3.signatureSchemes[i];
+         SSLAuthType schemeAuthType = ssl_SignatureSchemeToAuthType(scheme);
+         PRBool acceptable = authType == schemeAuthType ||
+                             (schemeAuthType == ssl_auth_rsa_pss &&
+                              authType == ssl_auth_rsa_sign);
+-        if (acceptable && ssl_SignatureSchemeAccepted(ss->version, scheme, PR_FALSE /* forCert */)) {
++        if (acceptable && ssl_SignatureSchemeAccepted(ss->version,
++                          ss->version, scheme, PR_FALSE /* forCert */)) {
+             return PR_TRUE;
+         }
+     }
+     return PR_FALSE;
+ }
+ 
+ /* Initialize the suite->isPresent value for config_match
+  * Returns count of enabled ciphers supported by extant tokens,
+@@ -1228,17 +1254,18 @@ ssl3_GetNewRandom(SSL3Random random)
+ 
+     rv = PK11_GenerateRandom(random, SSL3_RANDOM_LENGTH);
+     if (rv != SECSuccess) {
+         ssl_MapLowLevelError(SSL_ERROR_GENERATE_RANDOM_FAILURE);
+     }
+     return rv;
+ }
+ 
+-SECStatus
++/* this only implements TLS 1.2 and earlier signatures */
++static SECStatus
+ ssl3_SignHashesWithPrivKey(SSL3Hashes *hash, SECKEYPrivateKey *key,
+                            SSLSignatureScheme scheme, PRBool isTls, SECItem *buf)
+ {
+     SECStatus rv = SECFailure;
+     PRBool doDerEncode = PR_FALSE;
+     PRBool useRsaPss = ssl_IsRsaPssSignatureScheme(scheme);
+     SECItem hashItem;
+ 
+@@ -1289,18 +1316,19 @@ ssl3_SignHashesWithPrivKey(SSL3Hashes *h
+         SECItem pssParamsItem = { siBuffer,
+                                   (unsigned char *)&pssParams,
+                                   sizeof(pssParams) };
+ 
+         if (signatureLen <= 0) {
+             PORT_SetError(SEC_ERROR_INVALID_KEY);
+             goto done;
+         }
+-        /* since we are calling PK11_SignWithMechanism directly, we need to check the
+-         * key policy ourselves (which is already checked in SGN_Digest */
++        /* since we are calling PK11_SignWithMechanism directly, we need to
++         * check the key policy ourselves (which is already checked in
++         * SGN_Digest */
+         rv = NSS_OptionGet(NSS_KEY_SIZE_POLICY_FLAGS, &optval);
+         if ((rv == SECSuccess) &&
+             ((optval & NSS_KEY_SIZE_POLICY_SIGN_FLAG) == NSS_KEY_SIZE_POLICY_SIGN_FLAG)) {
+             rv = SECKEY_EnforceKeySize(key->keyType, SECKEY_PrivateKeyStrengthInBits(key),
+                                        SEC_ERROR_SIGNATURE_ALGORITHM_DISABLED);
+             if (rv != SECSuccess) {
+                 goto done; /* error code already set */
+             }
+@@ -1365,18 +1393,19 @@ ssl3_SignHashes(sslSocket *ss, SSL3Hashe
+     if (ss->sec.isServer) {
+         ss->sec.signatureScheme = scheme;
+         ss->sec.authType = ssl_SignatureSchemeToAuthType(scheme);
+     }
+ 
+     return SECSuccess;
+ }
+ 
+-/* Called from ssl3_VerifySignedHashes and tls13_HandleCertificateVerify. */
+-SECStatus
++/* Called from ssl3_VerifySignedHashes */
++/* this only implements TLS 1.2 and earlier signatures */
++static SECStatus
+ ssl_VerifySignedHashesWithPubKey(sslSocket *ss, SECKEYPublicKey *key,
+                                  SSLSignatureScheme scheme,
+                                  SSL3Hashes *hash, SECItem *buf)
+ {
+     SECItem *signature = NULL;
+     SECStatus rv = SECFailure;
+     SECItem hashItem;
+     SECOidTag encAlg;
+@@ -3407,16 +3436,17 @@ ssl3_GetHashMechanismByHashType(SSLHashT
+         case ssl_hash_sha384:
+             return CKM_SHA384;
+         case ssl_hash_sha256:
+         case ssl_hash_none:
+             /* ssl_hash_none is for pre-1.2 suites, which use SHA-256. */
+             return CKM_SHA256;
+         case ssl_hash_sha1:
+             return CKM_SHA_1;
++        /* don't return a mechansim for ml_dsa hashes */
+         default:
+             PORT_Assert(0);
+     }
+     return CKM_SHA256;
+ }
+ 
+ /* Function valid for >= TLS 1.2, only. */
+ static CK_MECHANISM_TYPE
+@@ -4345,16 +4375,29 @@ ssl3_HashTypeToOID(SSLHashType hashType)
+         case ssl_hash_sha1:
+             return SEC_OID_SHA1;
+         case ssl_hash_sha256:
+             return SEC_OID_SHA256;
+         case ssl_hash_sha384:
+             return SEC_OID_SHA384;
+         case ssl_hash_sha512:
+             return SEC_OID_SHA512;
++        /* ml-dsa has it's own has algorithm,
++         * if we are using an external hash,
++         * we need to fail (at least until
++         * we get mu support). Fortunately
++         * mldsa is only supported in TLS 1.3
++         * and can do full hash and sign in
++         * the TLS 1.3 protocol */
++        case ssl_hash_mldsa44:
++            return SEC_OID_ML_DSA_44;
++        case ssl_hash_mldsa65:
++            return SEC_OID_ML_DSA_65;
++        case ssl_hash_mldsa87:
++            return SEC_OID_ML_DSA_87;
+         default:
+             break;
+     }
+     return SEC_OID_UNKNOWN;
+ }
+ 
+ SECOidTag
+ ssl3_AuthTypeToOID(SSLAuthType authType)
+@@ -4363,16 +4406,22 @@ ssl3_AuthTypeToOID(SSLAuthType authType)
+         case ssl_auth_rsa_sign:
+             return SEC_OID_PKCS1_RSA_ENCRYPTION;
+         case ssl_auth_rsa_pss:
+             return SEC_OID_PKCS1_RSA_PSS_SIGNATURE;
+         case ssl_auth_ecdsa:
+             return SEC_OID_ANSIX962_EC_PUBLIC_KEY;
+         case ssl_auth_dsa:
+             return SEC_OID_ANSIX9_DSA_SIGNATURE;
++        case ssl_auth_mldsa44:
++            return SEC_OID_ML_DSA_44;
++        case ssl_auth_mldsa65:
++            return SEC_OID_ML_DSA_65;
++        case ssl_auth_mldsa87:
++            return SEC_OID_ML_DSA_87;
+         default:
+             break;
+     }
+     /* shouldn't ever get there */
+     PORT_Assert(0);
+     return SEC_OID_UNKNOWN;
+ }
+ 
+@@ -4397,16 +4446,22 @@ ssl_SignatureSchemeToHashType(SSLSignatu
+         case ssl_sig_dsa_sha384:
+             return ssl_hash_sha384;
+         case ssl_sig_rsa_pkcs1_sha512:
+         case ssl_sig_ecdsa_secp521r1_sha512:
+         case ssl_sig_rsa_pss_rsae_sha512:
+         case ssl_sig_rsa_pss_pss_sha512:
+         case ssl_sig_dsa_sha512:
+             return ssl_hash_sha512;
++        case ssl_sig_mldsa44:
++            return ssl_hash_mldsa44;
++        case ssl_sig_mldsa65:
++            return ssl_hash_mldsa65;
++        case ssl_sig_mldsa87:
++            return ssl_hash_mldsa87;
+         case ssl_sig_rsa_pkcs1_sha1md5:
+             return ssl_hash_none; /* Special for TLS 1.0/1.1. */
+         case ssl_sig_none:
+         case ssl_sig_ed25519:
+         case ssl_sig_ed448:
+             break;
+     }
+     PORT_Assert(0);
+@@ -4451,16 +4506,20 @@ ssl_SignatureSchemeValid(SSLSignatureSch
+             return PR_FALSE;
+         }
+         if (ssl_IsDsaSignatureScheme(scheme)) {
+             return PR_FALSE;
+         }
+         /* With TLS 1.3, EC keys should have been selected based on calling
+          * ssl_SignatureSchemeFromSpki(), reject them otherwise. */
+         return spkiOid != SEC_OID_ANSIX962_EC_PUBLIC_KEY;
++    } else {
++        if (ssl_IsMlDsaSignatureScheme(scheme)) {
++            return PR_FALSE;
++        }
+     }
+     return PR_TRUE;
+ }
+ 
+ static SECStatus
+ ssl_SignatureSchemeFromPssSpki(const CERTSubjectPublicKeyInfo *spki,
+                                SSLSignatureScheme *scheme)
+ {
+@@ -4538,37 +4597,65 @@ ssl_SignatureSchemeFromEcSpki(const CERT
+             return SECSuccess;
+         default:
+             break;
+     }
+     PORT_SetError(SSL_ERROR_BAD_CERTIFICATE);
+     return SECFailure;
+ }
+ 
++
++/* some schmemes match 1 for 1 to oids, for those schemes, we
++ * can return the oid directly. If this function return ssl_sig_none,
++ * it means the oid doen't match a scheme or matches more than one
++ * scheme */
++SSLSignatureScheme
++ssl_SignatureSchemeFromPublicKeyOid(SECOidTag tag)
++{
++    switch (tag) {
++        case SEC_OID_ML_DSA_44:
++            return ssl_sig_mldsa44;
++        case SEC_OID_ML_DSA_65:
++            return ssl_sig_mldsa65;
++        case SEC_OID_ML_DSA_87:
++            return ssl_sig_mldsa87;
++        default:
++            break;
++    }
++    return ssl_sig_none;
++}
++
++
+ /* Newer signature schemes are designed so that a single SPKI can be used with
+  * that scheme.  This determines that scheme from the SPKI. If the SPKI doesn't
+  * have a single scheme, |*scheme| is set to ssl_sig_none. */
+ SECStatus
+ ssl_SignatureSchemeFromSpki(const CERTSubjectPublicKeyInfo *spki,
+                             PRBool isTls13, SSLSignatureScheme *scheme)
+ {
+     SECOidTag spkiOid = SECOID_GetAlgorithmTag(&spki->algorithm);
+ 
+-    if (spkiOid == SEC_OID_PKCS1_RSA_PSS_SIGNATURE) {
+-        return ssl_SignatureSchemeFromPssSpki(spki, scheme);
+-    }
+-
+-    /* Only do this lookup for TLS 1.3, where the scheme can be determined from
+-     * the SPKI alone because the ECDSA key size determines the hash. Earlier
+-     * TLS versions allow the same EC key to be used with different hashes. */
+-    if (isTls13 && spkiOid == SEC_OID_ANSIX962_EC_PUBLIC_KEY) {
+-        return ssl_SignatureSchemeFromEcSpki(spki, scheme);
+-    }
+-
++    /* default */
+     *scheme = ssl_sig_none;
++    switch (spkiOid) {
++        case SEC_OID_PKCS1_RSA_PSS_SIGNATURE:
++            return ssl_SignatureSchemeFromPssSpki(spki, scheme);
++        case SEC_OID_ANSIX962_EC_PUBLIC_KEY:
++            /* Only do this lookup for TLS 1.3, where the scheme can be
++             * determined from the SPKI alone because the ECDSA key size
++             * determines the hash. Earlier TLS versions allow the same
++             * EC key to be used with different hashes. */
++            if (isTls13) {
++                return ssl_SignatureSchemeFromEcSpki(spki, scheme);
++            }
++            break;
++        default:
++            *scheme = ssl_SignatureSchemeFromPublicKeyOid(spkiOid);
++            break;
++    }
+     return SECSuccess;
+ }
+ 
+ /* Check that a signature scheme is enabled by configuration. */
+ PRBool
+ ssl_SignatureSchemeEnabled(const sslSocket *ss, SSLSignatureScheme scheme)
+ {
+     unsigned int i;
+@@ -4664,16 +4751,19 @@ ssl_IsSupportedSignatureScheme(SSLSignat
+         case ssl_sig_rsa_pss_rsae_sha384:
+         case ssl_sig_rsa_pss_rsae_sha512:
+         case ssl_sig_rsa_pss_pss_sha256:
+         case ssl_sig_rsa_pss_pss_sha384:
+         case ssl_sig_rsa_pss_pss_sha512:
+         case ssl_sig_ecdsa_secp256r1_sha256:
+         case ssl_sig_ecdsa_secp384r1_sha384:
+         case ssl_sig_ecdsa_secp521r1_sha512:
++        case ssl_sig_mldsa44:
++        case ssl_sig_mldsa65:
++        case ssl_sig_mldsa87:
+         case ssl_sig_dsa_sha1:
+         case ssl_sig_dsa_sha256:
+         case ssl_sig_dsa_sha384:
+         case ssl_sig_dsa_sha512:
+         case ssl_sig_ecdsa_sha1:
+             return ssl_SchemePolicyOK(scheme, kSSLSigSchemePolicy);
+             break;
+ 
+@@ -4746,16 +4836,31 @@ ssl_IsDsaSignatureScheme(SSLSignatureSch
+             return PR_TRUE;
+ 
+         default:
+             return PR_FALSE;
+     }
+     return PR_FALSE;
+ }
+ 
++PRBool
++ssl_IsMlDsaSignatureScheme(SSLSignatureScheme scheme)
++{
++    switch (scheme) {
++        case ssl_sig_mldsa44:
++        case ssl_sig_mldsa65:
++        case ssl_sig_mldsa87:
++            return PR_TRUE;
++
++        default:
++            return PR_FALSE;
++    }
++    return PR_FALSE;
++}
++
+ SSLAuthType
+ ssl_SignatureSchemeToAuthType(SSLSignatureScheme scheme)
+ {
+     switch (scheme) {
+         case ssl_sig_rsa_pkcs1_sha1:
+         case ssl_sig_rsa_pkcs1_sha1md5:
+         case ssl_sig_rsa_pkcs1_sha256:
+         case ssl_sig_rsa_pkcs1_sha384:
+@@ -4769,16 +4874,22 @@ ssl_SignatureSchemeToAuthType(SSLSignatu
+         case ssl_sig_rsa_pss_pss_sha384:
+         case ssl_sig_rsa_pss_pss_sha512:
+             return ssl_auth_rsa_pss;
+         case ssl_sig_ecdsa_secp256r1_sha256:
+         case ssl_sig_ecdsa_secp384r1_sha384:
+         case ssl_sig_ecdsa_secp521r1_sha512:
+         case ssl_sig_ecdsa_sha1:
+             return ssl_auth_ecdsa;
++        case ssl_sig_mldsa44:
++            return ssl_auth_mldsa44;
++        case ssl_sig_mldsa65:
++            return ssl_auth_mldsa65;
++        case ssl_sig_mldsa87:
++            return ssl_auth_mldsa87;
+         case ssl_sig_dsa_sha1:
+         case ssl_sig_dsa_sha256:
+         case ssl_sig_dsa_sha384:
+         case ssl_sig_dsa_sha512:
+             return ssl_auth_dsa;
+ 
+         default:
+             PORT_Assert(0);
+@@ -5852,28 +5963,78 @@ ssl_FindIndexByWrapMechanism(CK_MECHANIS
+             return SECSuccess;
+         }
+     }
+     PORT_Assert(0);
+     PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+     return SECFailure;
+ }
+ 
++/* mldsa server private key cannot be used directly in
++ * a key exchange. Instead we'll sign the fixed value
++ * use it in a PBE. This will work with any signature scheme
++ * with a deterministic signature */
++#define SSL_SIG_KEY "NSS Session Cashe Ks Init String"
++static PK11SymKey *
++ssl_getSigKs(SECKEYPrivateKey *svrPrivKey, CK_MECHANISM_TYPE mechanism,
++             CK_MECHANISM_TYPE masterWrapMech, void *pwArg)
++{
++     const char *sigKey = SSL_SIG_KEY;
++     SECItem msg = { siBuffer, (unsigned char *)sigKey, sizeof(sigKey) };
++     /* set to the the size of the largest signature supported. currently
++      * ml_dsa. If This value is to small, PK11_SignWithMechanism will
++      * safely fail below without generating the signature */
++     unsigned char sigBuf[MAX_ML_DSA_SIGNATURE_LEN];
++     SECItem sig = {siBuffer, sigBuf, sizeof(sigBuf)};
++     /* can't use the default because we need to generate
++      * deterministic signatures */
++     CK_SIGN_ADDITIONAL_CONTEXT sig_context =
++        { CKH_DETERMINISTIC_REQUIRED, NULL, 0 };
++     SECItem sig_params={siBuffer, (unsigned char *)&sig_context,
++                                 sizeof(sig_context)};
++     PK11SymKey *Ks = NULL;
++     SECStatus rv;
++
++     sig_context.hedgeVariant = CKH_DETERMINISTIC_REQUIRED;
++     sig_context.pContext = NULL;
++     sig_context.ulContextLen = 0;
++
++     rv = PK11_SignWithMechanism(svrPrivKey, mechanism, &sig_params,
++                                 &sig, &msg);
++     if (rv != SECSuccess) {
++         return NULL;
++     }
++
++     Ks = PK11_RawPBEKeyGen(svrPrivKey->pkcs11Slot, masterWrapMech, NULL,
++                            &sig, PR_FALSE, pwArg);
++     /* sigBuf became a CSP when we turned it into a password for the
++      * PBE */
++     PORT_SafeZero(sigBuf, sizeof(sigBuf));
++
++     if (Ks == NULL) {
++         return NULL;
++     }
++     return Ks;
++}
++
+ /* Each process sharing the server session ID cache has its own array of SymKey
+  * pointers for the symmetric wrapping keys that are used to wrap the master
+  * secrets.  There is one key for each authentication type.  These Symkeys
+  * correspond to the wrapped SymKeys kept in the server session cache.
+  */
+ const SSLAuthType ssl_wrap_key_auth_type[SSL_NUM_WRAP_KEYS] = {
+     ssl_auth_rsa_decrypt,
+     ssl_auth_rsa_sign,
+     ssl_auth_rsa_pss,
+     ssl_auth_ecdsa,
+     ssl_auth_ecdh_rsa,
+-    ssl_auth_ecdh_ecdsa
++    ssl_auth_ecdh_ecdsa,
++    ssl_auth_mldsa44,
++    ssl_auth_mldsa65,
++    ssl_auth_mldsa87
+ };
+ 
+ static SECStatus
+ ssl_FindIndexByWrapKey(const sslServerCert *serverCert, unsigned int *wrapKeyIndex)
+ {
+     unsigned int i;
+     for (i = 0; i < SSL_NUM_WRAP_KEYS; ++i) {
+         if (SSL_CERT_IS(serverCert, ssl_wrap_key_auth_type[i])) {
+@@ -5958,29 +6119,46 @@ ssl_UnwrapSymWrappingKey(
+ 
+             wrappedKey.len = ecWrapped->wrappedKeyLen;
+             wrappedKey.data = ecWrapped->var + ecWrapped->encodedParamLen +
+                               ecWrapped->pubValueLen;
+ 
+             /* Derive Ks using ECDH */
+             Ks = PK11_PubDeriveWithKDF(svrPrivKey, &pubWrapKey, PR_FALSE, NULL,
+                                        NULL, CKM_ECDH1_DERIVE, masterWrapMech,
+-                                       CKA_DERIVE, 0, CKD_NULL, NULL, NULL);
++                                       CKA_DERIVE, 0, CKD_NULL, NULL, pwArg);
+             if (Ks == NULL) {
+                 goto loser;
+             }
+ 
+             /*  Use Ks to unwrap the wrapping key */
+             unwrappedWrappingKey = PK11_UnwrapSymKey(Ks, masterWrapMech, NULL,
+                                                      &wrappedKey, masterWrapMech,
+                                                      CKA_UNWRAP, 0);
+             PK11_FreeSymKey(Ks);
+ 
+             break;
+-
++        case ssl_auth_mldsa44:
++        case ssl_auth_mldsa65:
++        case ssl_auth_mldsa87:
++            /* Signature only algorithms can use a trick of signing a
++             * constant with the private key and using that constant
++             * as the password for a PBE. This only works if the
++             * signature is deterministic */
++            Ks = ssl_getSigKs(svrPrivKey, CKM_ML_DSA, masterWrapMech, pwArg);
++            if (Ks == NULL) {
++                 goto loser;
++            }
++            /*  Use Ks to unwrap the wrapping key */
++            unwrappedWrappingKey = PK11_UnwrapSymKey(Ks, masterWrapMech, NULL,
++                                                     &wrappedKey, masterWrapMech,
++                                                     CKA_UNWRAP, 0);
++            PK11_FreeSymKey(Ks);
++            break;
++        break;
+         default:
+             PORT_Assert(0);
+             PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+             goto loser;
+     }
+ loser:
+     return unwrappedWrappingKey;
+ }
+@@ -6244,16 +6422,33 @@ ssl3_GetWrappingKey(sslSocket *ss,
+             if (privWrapKey)
+                 SECKEY_DestroyPrivateKey(privWrapKey);
+             if (pubWrapKey)
+                 SECKEY_DestroyPublicKey(pubWrapKey);
+             if (Ks)
+                 PK11_FreeSymKey(Ks);
+             asymWrapMechanism = masterWrapMech;
+             break;
++        case ssl_auth_mldsa44:
++        case ssl_auth_mldsa65:
++        case ssl_auth_mldsa87:
++            /* Signature only algorithms can use a trick of signing a
++             * constant with the private key and using that constant
++             * as the password for a PBE. This only works if the
++             * signature is deterministic */
++            Ks = ssl_getSigKs(svrPrivKey, CKM_ML_DSA, masterWrapMech, pwArg);
++            if (Ks == NULL) {
++                 goto loser;
++            }
++            /*  Use Ks to unwrap the wrapping key */
++            rv = PK11_WrapSymKey(masterWrapMech, NULL,Ks,
++                                 unwrappedWrappingKey, &wrappedKey);
++            PK11_FreeSymKey(Ks);
++            asymWrapMechanism = masterWrapMech;
++            break;
+ 
+         default:
+             rv = SECFailure;
+             break;
+     }
+ 
+     if (rv != SECSuccess) {
+         ssl_MapLowLevelError(SSL_ERROR_CLIENT_KEY_EXCHANGE_FAILURE);
+@@ -10334,23 +10529,25 @@ ssl3_SendServerKeyExchange(sslSocket *ss
+             PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+             break;
+     }
+ 
+     return SECFailure;
+ }
+ 
+ SECStatus
+-ssl3_EncodeSigAlgs(const sslSocket *ss, PRUint16 minVersion, PRBool forCert,
+-                   PRBool grease, sslBuffer *buf)
++ssl3_EncodeSigAlgs(const sslSocket *ss, PRUint16 minVersion,
++                   PRUint16 maxVersion, PRBool forCert, PRBool grease,
++                   sslBuffer *buf)
+ {
+     SSLSignatureScheme filtered[MAX_SIGNATURE_SCHEMES] = { 0 };
+     unsigned int filteredCount = 0;
+ 
+-    SECStatus rv = ssl3_FilterSigAlgs(ss, minVersion, PR_FALSE, forCert,
++    SECStatus rv = ssl3_FilterSigAlgs(ss, minVersion, maxVersion,
++                                      PR_FALSE, forCert,
+                                       PR_ARRAY_SIZE(filtered),
+                                       filtered, &filteredCount);
+     if (rv != SECSuccess) {
+         return SECFailure;
+     }
+     return ssl3_EncodeFilteredSigAlgs(ss, filtered, filteredCount, grease, buf);
+ }
+ 
+@@ -10417,17 +10614,18 @@ ssl3_EncodeFilteredSigAlgs(const sslSock
+  * that include PKCS#1. Hence, forCert is used to enable advertising
+  * PKCS#1 support. Note that we include these in signature_algorithms
+  * because we don't yet support signature_algorithms_cert. TLS 1.3
+  * requires that PKCS#1 schemes are placed last in the list if they
+  * are present. This sorting can be removed once we support
+  * signature_algorithms_cert.
+  */
+ SECStatus
+-ssl3_FilterSigAlgs(const sslSocket *ss, PRUint16 minVersion, PRBool disableRsae,
++ssl3_FilterSigAlgs(const sslSocket *ss, PRUint16 minVersion, PRUint16 maxVersion,
++                   PRBool disableRsae,
+                    PRBool forCert,
+                    unsigned int maxSchemes, SSLSignatureScheme *filteredSchemes,
+                    unsigned int *numFilteredSchemes)
+ {
+     PORT_Assert(filteredSchemes);
+     PORT_Assert(numFilteredSchemes);
+     PORT_Assert(maxSchemes >= ss->ssl3.signatureSchemeCount);
+     if (maxSchemes < ss->ssl3.signatureSchemeCount) {
+@@ -10435,31 +10633,31 @@ ssl3_FilterSigAlgs(const sslSocket *ss, 
+     }
+ 
+     *numFilteredSchemes = 0;
+     PRBool allowUnsortedPkcs1 = forCert && minVersion < SSL_LIBRARY_VERSION_TLS_1_3;
+     for (unsigned int i = 0; i < ss->ssl3.signatureSchemeCount; ++i) {
+         if (disableRsae && ssl_IsRsaeSignatureScheme(ss->ssl3.signatureSchemes[i])) {
+             continue;
+         }
+-        if (ssl_SignatureSchemeAccepted(minVersion,
++        if (ssl_SignatureSchemeAccepted(minVersion, maxVersion,
+                                         ss->ssl3.signatureSchemes[i],
+                                         allowUnsortedPkcs1)) {
+             filteredSchemes[(*numFilteredSchemes)++] = ss->ssl3.signatureSchemes[i];
+         }
+     }
+     if (forCert && !allowUnsortedPkcs1) {
+         for (unsigned int i = 0; i < ss->ssl3.signatureSchemeCount; ++i) {
+             if (disableRsae && ssl_IsRsaeSignatureScheme(ss->ssl3.signatureSchemes[i])) {
+                 continue;
+             }
+-            if (!ssl_SignatureSchemeAccepted(minVersion,
++            if (!ssl_SignatureSchemeAccepted(minVersion, maxVersion,
+                                              ss->ssl3.signatureSchemes[i],
+                                              PR_FALSE) &&
+-                ssl_SignatureSchemeAccepted(minVersion,
++                ssl_SignatureSchemeAccepted(minVersion, maxVersion,
+                                             ss->ssl3.signatureSchemes[i],
+                                             PR_TRUE)) {
+                 filteredSchemes[(*numFilteredSchemes)++] = ss->ssl3.signatureSchemes[i];
+             }
+         }
+     }
+     return SECSuccess;
+ }
+@@ -10492,17 +10690,18 @@ ssl3_SendCertificateRequest(sslSocket *s
+     if (rv != SECSuccess) {
+         return rv;
+     }
+     certTypes = certificate_types;
+     certTypesLength = sizeof certificate_types;
+ 
+     length = 1 + certTypesLength + 2 + calen;
+     if (isTLS12) {
+-        rv = ssl3_EncodeSigAlgs(ss, ss->version, PR_TRUE /* forCert */,
++        rv = ssl3_EncodeSigAlgs(ss, ss->version, ss->version,
++                                PR_TRUE /* forCert */,
+                                 PR_FALSE /* GREASE */, &sigAlgsBuf);
+         if (rv != SECSuccess) {
+             return rv;
+         }
+         length += SSL_BUFFER_LEN(&sigAlgsBuf);
+     }
+ 
+     rv = ssl3_AppendHandshakeHeader(ss, ssl_hs_certificate_request, length);
+@@ -11196,21 +11395,19 @@ get_fake_cert(SECItem *pCertItem, int *p
+         numBytes = PR_Read(cf, pCertItem->data, info.size);
+     }
+     PR_Close(cf);
+     if (numBytes != info.size) {
+         SECITEM_FreeItem(pCertItem, PR_FALSE);
+         PORT_SetError(SEC_ERROR_IO);
+         goto loser;
+     }
+-    fprintf(stderr, "using %s\n", cfn);
+     return SECSuccess;
+ 
+ loser:
+-    fprintf(stderr, "failed to use %s\n", cfn);
+     *pIndex = -1;
+     return SECFailure;
+ }
+ #endif
+ 
+ /*
+  * Used by both client and server.
+  * Called from HandleServerHelloDone and from SendServerHelloSequence.
+@@ -11698,16 +11895,21 @@ ssl_SetAuthKeyBits(sslSocket *ss, const 
+             if (rv == SECSuccess && optval > 0) {
+                 minKey = (PRUint32)optval;
+             } else {
+                 /* Don't check EC strength here on the understanding that we
+                  * only support curves we like. */
+                 minKey = ss->sec.authKeyBits;
+             }
+             break;
++        case mldsaKey:
++            /* ML DSA has fixed sizes and are handled by separate oids
++             * for each key */
++            minKey = ss->sec.authKeyBits;
++            break;
+ 
+         default:
+             FATAL_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE, internal_error);
+             return SECFailure;
+     }
+ 
+     /* Too small: not good enough. Send a fatal alert. */
+     if (ss->sec.authKeyBits < minKey) {
+@@ -14059,16 +14261,17 @@ SSL_SignatureSchemePrefSet(PRFileDesc *f
+                      SSL_GETPID(), fd, schemes[i]));
+             continue;
+         }
+ 
+         ss->ssl3.signatureSchemes[ss->ssl3.signatureSchemeCount++] = schemes[i];
+     }
+ 
+     if (ss->ssl3.signatureSchemeCount == 0) {
++        PORT_SetError(SEC_ERROR_INVALID_ARGS);
+         PORT_SetError(SSL_ERROR_NO_SUPPORTED_SIGNATURE_ALGORITHM);
+         return SECFailure;
+     }
+     return SECSuccess;
+ }
+ 
+ SECStatus
+ SSL_SignaturePrefSet(PRFileDesc *fd, const SSLSignatureAndHashAlg *algorithms,
+diff --git a/lib/ssl/ssl3exthandle.c b/lib/ssl/ssl3exthandle.c
+--- a/lib/ssl/ssl3exthandle.c
++++ b/lib/ssl/ssl3exthandle.c
+@@ -1650,23 +1650,27 @@ SECStatus
+ ssl3_SendSigAlgsXtn(const sslSocket *ss, TLSExtensionData *xtnData,
+                     sslBuffer *buf, PRBool *added)
+ {
+     if (ss->vrange.max < SSL_LIBRARY_VERSION_TLS_1_2) {
+         return SECSuccess;
+     }
+ 
+     PRUint16 minVersion;
++    PRUint16 maxVersion;
+     if (ss->sec.isServer) {
+         minVersion = ss->version; /* CertificateRequest */
++        maxVersion = ss->version;
+     } else {
+         minVersion = ss->vrange.min; /* ClientHello */
++        maxVersion = ss->vrange.max; /* ClientHello */
+     }
+ 
+-    SECStatus rv = ssl3_EncodeSigAlgs(ss, minVersion, PR_TRUE /* forCert */,
++    SECStatus rv = ssl3_EncodeSigAlgs(ss, minVersion, maxVersion,
++                                      PR_TRUE /* forCert */,
+                                       ss->opt.enableGrease, buf);
+     if (rv != SECSuccess) {
+         return SECFailure;
+     }
+ 
+     *added = PR_TRUE;
+     return SECSuccess;
+ }
+diff --git a/lib/ssl/sslcert.c b/lib/ssl/sslcert.c
+--- a/lib/ssl/sslcert.c
++++ b/lib/ssl/sslcert.c
+@@ -8,16 +8,17 @@
+ 
+ #include "ssl.h"
+ #include "sslimpl.h"
+ #include "secoid.h"        /* for SECOID_GetAlgorithmTag */
+ #include "pk11func.h"      /* for PK11_ReferenceSlot */
+ #include "nss.h"           /* for NSS_RegisterShutdown */
+ #include "prinit.h"        /* for PR_CallOnceWithArg */
+ #include "tls13subcerts.h" /* for tls13_ReadDelegatedCredential */
++#include "secmodti.h" /* for private OID defines, don't upstream */
+ 
+ /* This global item is used only in servers.  It is is initialized by
+  * SSL_ConfigSecureServer(), and is used in ssl3_SendCertificateRequest().
+  */
+ static struct {
+     PRCallOnceType setup;
+     CERTDistNames *names;
+ } ssl_server_ca_list;
+@@ -565,16 +566,34 @@ ssl_GetCertificateAuthTypes(CERTCertific
+                 authTypes |= 1 << ssl_auth_ecdsa;
+             }
+             /* Again, bad form to have dual usage and we don't prevent it. */
+             if (cert->keyUsage & KU_KEY_ENCIPHERMENT) {
+                 authTypes |= 1 << ssl_GetEcdhAuthType(cert);
+             }
+             break;
+ 
++        case SEC_OID_ML_DSA_44:
++            if (cert->keyUsage & KU_DIGITAL_SIGNATURE) {
++                authTypes |= 1 << ssl_auth_mldsa44;
++            }
++            break;
++
++        case SEC_OID_ML_DSA_65:
++            if (cert->keyUsage & KU_DIGITAL_SIGNATURE) {
++                authTypes |= 1 << ssl_auth_mldsa65;
++            }
++            break;
++
++        case SEC_OID_ML_DSA_87:
++            if (cert->keyUsage & KU_DIGITAL_SIGNATURE) {
++                authTypes |= 1 << ssl_auth_mldsa87;
++            }
++            break;
++
+         default:
+             break;
+     }
+ 
+     /* Check that we successfully picked an authType */
+     if (targetAuthType != ssl_auth_null) {
+         authTypes &= 1 << targetAuthType;
+     }
+@@ -726,16 +745,25 @@ ssl_CertSuitableForAuthType(CERTCertific
+         case SEC_OID_ANSIX9_DSA_SIGNATURE:
+             mask |= 1 << ssl_auth_dsa;
+             break;
+         case SEC_OID_ANSIX962_EC_PUBLIC_KEY:
+             mask |= 1 << ssl_auth_ecdsa;
+             mask |= 1 << ssl_auth_ecdh_rsa;
+             mask |= 1 << ssl_auth_ecdh_ecdsa;
+             break;
++        case SEC_OID_ML_DSA_44:
++            mask |= 1 << ssl_auth_mldsa44;
++            break;
++        case SEC_OID_ML_DSA_65:
++            mask |= 1 << ssl_auth_mldsa65;
++            break;
++        case SEC_OID_ML_DSA_87:
++            mask |= 1 << ssl_auth_mldsa87;
++            break;
+         default:
+             break;
+     }
+     PORT_Assert(authTypes);
+     /* Simply test that no inappropriate auth types are set. */
+     return (authTypes & ~mask) == 0;
+ }
+ 
+diff --git a/lib/ssl/sslimpl.h b/lib/ssl/sslimpl.h
+--- a/lib/ssl/sslimpl.h
++++ b/lib/ssl/sslimpl.h
+@@ -41,16 +41,17 @@ typedef struct sslNamedGroupDefStr sslNa
+ typedef struct sslEchConfigStr sslEchConfig;
+ typedef struct sslEchConfigContentsStr sslEchConfigContents;
+ typedef struct sslEchCookieDataStr sslEchCookieData;
+ typedef struct sslEchXtnStateStr sslEchXtnState;
+ typedef struct sslPskStr sslPsk;
+ typedef struct sslDelegatedCredentialStr sslDelegatedCredential;
+ typedef struct sslEphemeralKeyPairStr sslEphemeralKeyPair;
+ typedef struct TLS13KeyShareEntryStr TLS13KeyShareEntry;
++typedef struct tlsSignOrVerifyContextStr tlsSignOrVerifyContext;
+ 
+ #include "sslencode.h"
+ #include "sslexp.h"
+ #include "ssl3ext.h"
+ #include "sslspec.h"
+ 
+ #if defined(DEBUG) || defined(TRACE)
+ #ifdef __cplusplus
+@@ -108,17 +109,17 @@ typedef enum { SSLAppOpRead = 0,
+ 
+ #define SSL_MIN_CHALLENGE_BYTES 16
+ #define SSL_MAX_CHALLENGE_BYTES 32
+ 
+ #define SSL3_MASTER_SECRET_LENGTH 48
+ 
+ /* number of wrap mechanisms potentially used to wrap master secrets. */
+ #define SSL_NUM_WRAP_MECHS 15
+-#define SSL_NUM_WRAP_KEYS 6
++#define SSL_NUM_WRAP_KEYS 9
+ 
+ /* This makes the cert cache entry exactly 4k. */
+ #define SSL_MAX_CACHED_CERT_LEN 4060
+ 
+ #ifndef BPB
+ #define BPB 8 /* Bits Per Byte */
+ #endif
+ 
+@@ -1689,30 +1690,39 @@ extern SECStatus ssl_CheckSignatureSchem
+     sslSocket *ss, SSLSignatureScheme scheme, CERTSubjectPublicKeyInfo *spki);
+ extern SECStatus ssl_ParseSignatureSchemes(const sslSocket *ss, PLArenaPool *arena,
+                                            SSLSignatureScheme **schemesOut,
+                                            unsigned int *numSchemesOut,
+                                            unsigned char **b,
+                                            unsigned int *len);
+ extern SECStatus ssl_ConsumeSignatureScheme(
+     sslSocket *ss, PRUint8 **b, PRUint32 *length, SSLSignatureScheme *out);
+-extern SECStatus ssl3_SignHashesWithPrivKey(SSL3Hashes *hash,
+-                                            SECKEYPrivateKey *key,
+-                                            SSLSignatureScheme scheme,
+-                                            PRBool isTls,
+-                                            SECItem *buf);
+ extern SECStatus ssl3_SignHashes(sslSocket *ss, SSL3Hashes *hash,
+                                  SECKEYPrivateKey *key, SECItem *buf);
+-extern SECStatus ssl_VerifySignedHashesWithPubKey(sslSocket *ss,
+-                                                  SECKEYPublicKey *spki,
+-                                                  SSLSignatureScheme scheme,
+-                                                  SSL3Hashes *hash,
+-                                                  SECItem *buf);
+ extern SECStatus ssl3_VerifySignedHashes(sslSocket *ss, SSLSignatureScheme scheme,
+                                          SSL3Hashes *hash, SECItem *buf);
++/* new signaure algorithms don't really have a 'sign hashes' interface,
++ * TLS13 now supports proper signing, where, if we are signing hashes, we
++ * will sign them with a proper hash and signed signature. Provide
++ * an API for those places in tls 13 where we need to sign. This leverages
++ * the work in secsign and secvfy, so we don't need to add a lot of
++ * algorithm specific code. Once the sign/verify interfaces work, we can
++ * just add the oid in tls13con.c and the ssl_sig_xxxx value and we are
++ * good to go */
++extern tlsSignOrVerifyContext * tls_SignOrVerifyGetNewContext(
++                              SECKEYPrivateKey *privKey,
++                              SECKEYPublicKey *pubKey,
++                              SSLSignatureScheme scheme, PRBool sign,
++                              SECItem *signature, void *pwArg);
++SECStatus tls_SignOrVerifyUpdate(tlsSignOrVerifyContext *ctx,
++                                 const unsigned char *buf, int len);
++SECStatus tls_SignOrVerifyEnd(tlsSignOrVerifyContext *ctx, SECItem *sig);
++void tls_DestroySignOrVerifyContext(tlsSignOrVerifyContext *ctx);
++
++
+ extern SECStatus ssl3_CacheWrappedSecret(sslSocket *ss, sslSessionID *sid,
+                                          PK11SymKey *secret);
+ extern void ssl3_FreeSniNameArray(TLSExtensionData *xtnData);
+ 
+ /* Hello Extension related routines. */
+ extern void ssl3_SetSIDSessionTicket(sslSessionID *sid,
+                                      /*in/out*/ NewSessionTicket *session_ticket);
+ SECStatus ssl3_EncodeSessionTicket(sslSocket *ss,
+@@ -1789,22 +1799,24 @@ SECStatus ssl3_HandleNoCertificate(sslSo
+ SECStatus ssl3_SendEmptyCertificate(sslSocket *ss);
+ void ssl3_CleanupPeerCerts(sslSocket *ss);
+ SECStatus ssl3_SendCertificateStatus(sslSocket *ss);
+ SECStatus ssl_SetAuthKeyBits(sslSocket *ss, const SECKEYPublicKey *pubKey);
+ SECStatus ssl3_HandleServerSpki(sslSocket *ss);
+ SECStatus ssl3_AuthCertificate(sslSocket *ss);
+ SECStatus ssl_ReadCertificateStatus(sslSocket *ss, PRUint8 *b,
+                                     PRUint32 length);
+-SECStatus ssl3_EncodeSigAlgs(const sslSocket *ss, PRUint16 minVersion, PRBool forCert,
++SECStatus ssl3_EncodeSigAlgs(const sslSocket *ss, PRUint16 minVersion,
++                             PRUint16 maxVersion, PRBool forCert,
+                              PRBool grease, sslBuffer *buf);
+ SECStatus ssl3_EncodeFilteredSigAlgs(const sslSocket *ss,
+                                      const SSLSignatureScheme *schemes,
+                                      PRUint32 numSchemes, PRBool grease, sslBuffer *buf);
+-SECStatus ssl3_FilterSigAlgs(const sslSocket *ss, PRUint16 minVersion, PRBool disableRsae, PRBool forCert,
++SECStatus ssl3_FilterSigAlgs(const sslSocket *ss, PRUint16 minVersion,
++                             PRUint16 maxVersion, PRBool disableRsae, PRBool forCert,
+                              unsigned int maxSchemes, SSLSignatureScheme *filteredSchemes,
+                              unsigned int *numFilteredSchemes);
+ SECStatus ssl_GetCertificateRequestCAs(const sslSocket *ss,
+                                        unsigned int *calenp,
+                                        const SECItem **namesp,
+                                        unsigned int *nnamesp);
+ SECStatus ssl3_ParseCertificateRequestCAs(sslSocket *ss, PRUint8 **b,
+                                           PRUint32 *length, CERTDistNames *ca_list);
+@@ -1854,26 +1866,28 @@ SECStatus ssl_PickSignatureScheme(sslSoc
+                                   SSLSignatureScheme *schemPtr);
+ SECStatus ssl_PickClientSignatureScheme(sslSocket *ss,
+                                         CERTCertificate *clientCertificate,
+                                         SECKEYPrivateKey *privKey,
+                                         const SSLSignatureScheme *schemes,
+                                         unsigned int numSchemes,
+                                         SSLSignatureScheme *schemePtr);
+ SECOidTag ssl3_HashTypeToOID(SSLHashType hashType);
+-SECOidTag ssl3_AuthTypeToOID(SSLAuthType hashType);
++SECOidTag ssl3_AuthTypeToOID(SSLAuthType authType);
+ SSLHashType ssl_SignatureSchemeToHashType(SSLSignatureScheme scheme);
+ SSLAuthType ssl_SignatureSchemeToAuthType(SSLSignatureScheme scheme);
+ 
+ SECStatus ssl3_SetupCipherSuite(sslSocket *ss, PRBool initHashes);
+ SECStatus ssl_InsertRecordHeader(const sslSocket *ss, ssl3CipherSpec *cwSpec,
+                                  SSLContentType contentType, sslBuffer *wrBuf,
+                                  PRBool *needsLength);
+ PRBool ssl_SignatureSchemeValid(SSLSignatureScheme scheme, SECOidTag spkiOid,
+                                 PRBool isTls13);
++SSLSignatureScheme ssl_SignatureSchemeFromPublicKeyOid(SECOidTag tag);
++
+ 
+ /* Pull in DTLS functions */
+ #include "dtlscon.h"
+ 
+ /* Pull in TLS 1.3 functions */
+ #include "tls13con.h"
+ #include "dtls13con.h"
+ 
+diff --git a/lib/ssl/sslt.h b/lib/ssl/sslt.h
+--- a/lib/ssl/sslt.h
++++ b/lib/ssl/sslt.h
+@@ -116,17 +116,20 @@ typedef enum {
+     /* ssl_hash_none is used internally to mean the pre-1.2 combination of MD5
+      * and SHA1. The other values are only used in TLS 1.2. */
+     ssl_hash_none = 0,
+     ssl_hash_md5 = 1,
+     ssl_hash_sha1 = 2,
+     ssl_hash_sha224 = 3,
+     ssl_hash_sha256 = 4,
+     ssl_hash_sha384 = 5,
+-    ssl_hash_sha512 = 6
++    ssl_hash_sha512 = 6,
++    ssl_hash_mldsa44 = 7, /* these make sure mldsa works, */
++    ssl_hash_mldsa65 = 8, /* but only for tls 1.3, attempts */
++    ssl_hash_mldsa87 = 9, /* to hash will these will fail */
+ } SSLHashType;
+ 
+ /* Deprecated */
+ typedef struct SSLSignatureAndHashAlgStr {
+     SSLHashType hashAlg;
+     SSLSignType sigAlg;
+ } SSLSignatureAndHashAlg;
+ 
+@@ -151,16 +154,20 @@ typedef enum {
+     ssl_sig_rsa_pss_pss_sha512 = 0x080b,
+ 
+     ssl_sig_dsa_sha1 = 0x0202,
+     ssl_sig_dsa_sha256 = 0x0402,
+     ssl_sig_dsa_sha384 = 0x0502,
+     ssl_sig_dsa_sha512 = 0x0602,
+     ssl_sig_ecdsa_sha1 = 0x0203,
+ 
++    ssl_sig_mldsa44 = 0x0904,
++    ssl_sig_mldsa65 = 0x0905,
++    ssl_sig_mldsa87 = 0x0906,
++
+     /* The following value (which can't be used in the protocol), represents
+      * the RSA signature using SHA-1 and MD5 that is used in TLS 1.0 and 1.1.
+      * This is reported as a signature scheme when TLS 1.0 or 1.1 is used.
+      * This should not be passed to SSL_SignatureSchemePrefSet(); this
+      * signature scheme is always used and cannot be disabled. */
+     ssl_sig_rsa_pkcs1_sha1md5 = 0x10101,
+ } SSLSignatureScheme;
+ 
+@@ -180,16 +187,19 @@ typedef enum {
+     ssl_auth_kea = 3, /* unused */
+     ssl_auth_ecdsa = 4,
+     ssl_auth_ecdh_rsa = 5,   /* ECDH cert with an RSA signature. */
+     ssl_auth_ecdh_ecdsa = 6, /* ECDH cert with an ECDSA signature. */
+     ssl_auth_rsa_sign = 7,   /* RSA signing with an rsaEncryption key. */
+     ssl_auth_rsa_pss = 8,    /* RSA signing with a PSS key. */
+     ssl_auth_psk = 9,
+     ssl_auth_tls13_any = 10,
++    ssl_auth_mldsa44 = 11, /* use separate auth for each paramset */
++    ssl_auth_mldsa65 = 12, /* so we can properly identify the certs */
++    ssl_auth_mldsa87 = 13,
+     ssl_auth_size /* number of authentication types */
+ } SSLAuthType;
+ 
+ typedef enum {
+     ssl_psk_none = 0,
+     ssl_psk_resume = 1,
+     ssl_psk_external = 2,
+ } SSLPskType;
+diff --git a/lib/ssl/tls13con.c b/lib/ssl/tls13con.c
+--- a/lib/ssl/tls13con.c
++++ b/lib/ssl/tls13con.c
+@@ -10,16 +10,19 @@
+ #include "stdarg.h"
+ #include "cert.h"
+ #include "ssl.h"
+ #include "keyhi.h"
+ #include "pk11func.h"
+ #include "prerr.h"
+ #include "secitem.h"
+ #include "secmod.h"
++#include "secmodti.h" /* don't upstream, to get private SEC_OID_ defines */
++#include "cryptohi.h"
++#include "sechash.h"
+ #include "sslimpl.h"
+ #include "sslproto.h"
+ #include "sslerr.h"
+ #include "ssl3exthandle.h"
+ #include "tls13hkdf.h"
+ #include "tls13con.h"
+ #include "tls13err.h"
+ #include "tls13ech.h"
+@@ -4494,76 +4497,368 @@ tls13_HandleCertificate(sslSocket *ss, P
+ 
+         first = PR_FALSE;
+     }
+     SECKEY_UpdateCertPQG(ss->sec.peerCert);
+ 
+     return ssl3_AuthCertificate(ss); /* sets ss->ssl3.hs.ws */
+ }
+ 
++/* this should be in cryptohi, but we need can't create a new API
++ * for it which doesn't try to parse old parameters and select things
++ * based on the privkey stuff */
++static
++SECItem *
++tls_encodeRSAParams(PLArenaPool *arena, SECOidTag hashAlgTag)
++{
++    SECKEYRSAPSSParams pssParams;
++    SECStatus rv;
++    int saltLen;
++    SECItem *hashAlgItem = NULL;
++    SECItem *saltItem = NULL;
++
++    PORT_Memset(&pssParams, 0, sizeof(pssParams));
++
++    /* RSA PSS let's us default SHA1, but we know this can only be called
++     * for TLS 1.3 and greater, and there isn't any SHA-1 in TLS 1.3, so
++     * we can skip those checks */
++    pssParams.hashAlg = PORT_ArenaZNew(arena, SECAlgorithmID);
++    if (!pssParams.hashAlg) {
++        return NULL;
++    }
++    rv = SECOID_SetAlgorithmID(arena, pssParams.hashAlg, hashAlgTag, NULL);
++    if (rv != SECSuccess) {
++        return NULL;
++    }
++    hashAlgItem = SEC_ASN1EncodeItem(arena, NULL, pssParams.hashAlg,
++                                     SEC_ASN1_GET(SECOID_AlgorithmIDTemplate));
++    if (!hashAlgItem) {
++        return NULL;
++    }
++    pssParams.maskAlg = PORT_ArenaZNew(arena, SECAlgorithmID);
++    if (!pssParams.maskAlg) {
++        return NULL;
++    }
++    rv = SECOID_SetAlgorithmID(arena, pssParams.maskAlg,
++                               SEC_OID_PKCS1_MGF1, hashAlgItem);
++    if (rv != SECSuccess) {
++        return  NULL;
++    }
++    saltLen = HASH_ResultLenByOidTag(hashAlgTag);
++    if (saltLen == 0) {
++        return NULL;
++    }
++    saltItem = SEC_ASN1EncodeInteger(arena, &pssParams.saltLength, saltLen);
++    if (!saltItem) {
++        return NULL;
++    }
++    return SEC_ASN1EncodeItem(arena, NULL, &pssParams, SECKEY_RSAPSSParamsTemplate);
++}
++
++/* we put this here because it only affects TLS 1.3, TLS 1.2 and earlier
++ * use the old sign hashes interface. TLS 1.3 is friendly to algorthims
++ * that don't have a signed hashes interface */
++/* we generate an algorithm ID rather than just use an OID to support RSAPSS.
++ * It's generated completely from the scheme, without the key */
++SECAlgorithmID  *
++tls_GetSignatureAlgorithmId(PLArenaPool *arena, SSLSignatureScheme scheme)
++{
++    SECAlgorithmID *newAlgID = PORT_ArenaZNew(arena, SECAlgorithmID);
++    SECOidTag algTag = SEC_OID_UNKNOWN;
++    SECOidTag hashAlgTag = SEC_OID_UNKNOWN;
++    SECItem *params = NULL;
++    SECStatus rv;
++
++    switch (scheme) {
++        /* do rsa PSS first because it needs to set the params
++         * for the algTag the difference between rsa_pss_rsae and
++         * rsa_pss_pss is in the selection an validation of the cert
++         * At this stage, the signatures are the same, so for our
++         * purposed they are equivalent */
++    case ssl_sig_rsa_pss_rsae_sha256:
++    case ssl_sig_rsa_pss_pss_sha256:
++        hashAlgTag = SEC_OID_SHA256;
++        goto rsa_pss_next;
++    case ssl_sig_rsa_pss_rsae_sha384:
++    case ssl_sig_rsa_pss_pss_sha384:
++        hashAlgTag = SEC_OID_SHA384;
++        goto rsa_pss_next;
++    case ssl_sig_rsa_pss_rsae_sha512:
++    case ssl_sig_rsa_pss_pss_sha512:
++        hashAlgTag = SEC_OID_SHA512;
++rsa_pss_next:
++        params = tls_encodeRSAParams(arena, hashAlgTag);
++        if (params == NULL) {
++            break;
++        }
++        algTag = SEC_OID_PKCS1_RSA_PSS_SIGNATURE;
++        break;
++    /* the curve comes from the key and should have already been
++     * enforced at a different level */
++    case ssl_sig_ecdsa_secp256r1_sha256:
++        algTag = SEC_OID_ANSIX962_ECDSA_SHA256_SIGNATURE;
++        break;
++    case ssl_sig_ecdsa_secp384r1_sha384:
++        algTag = SEC_OID_ANSIX962_ECDSA_SHA384_SIGNATURE;
++        break;
++    case ssl_sig_ecdsa_secp521r1_sha512:
++        algTag = SEC_OID_ANSIX962_ECDSA_SHA512_SIGNATURE;
++        break;
++    case ssl_sig_mldsa44:
++        algTag = SEC_OID_ML_DSA_44;
++        break;
++    case ssl_sig_mldsa65:
++        algTag = SEC_OID_ML_DSA_65;
++        break;
++    case ssl_sig_mldsa87:
++        algTag = SEC_OID_ML_DSA_87;
++        break;
++
++    /* the following is unsupported in tls 1.3 and greater, just break.
++     * We include them here explicitly so we get the compiler warning about
++     * missing enums in the switch statement. default would be a break anyway.
++     * That way we'll know to update this table when new algorithsm are
++     * added */
++
++    /* as of now sig ed is not supported in NSS. That could change, and this
++     * is part the code that would pick up the change (need OIDS for the
++     * hash variants of these signature, and then add them here) */
++    case ssl_sig_ed25519:
++    case ssl_sig_ed448:
++
++    /* sha1 hashes in sigs are explicitly disallowed int TLS 1.3 or greater */
++    case ssl_sig_ecdsa_sha1:
++
++    /* rsa pkcs1 sigs are explicitly disallowed in TLS 1.3 and greater */
++    case ssl_sig_rsa_pkcs1_sha1:
++    case ssl_sig_rsa_pkcs1_sha256:
++    case ssl_sig_rsa_pkcs1_sha384:
++    case ssl_sig_rsa_pkcs1_sha512:
++
++    /* dsa sigs are explicitly disallowed in TLS 1.3 and greater */
++    case ssl_sig_dsa_sha1:
++    case ssl_sig_dsa_sha256:
++    case ssl_sig_dsa_sha384:
++    case ssl_sig_dsa_sha512:
++
++    /* special sig variants that aren't supported in TLS 1.3 or greater */
++    case ssl_sig_rsa_pkcs1_sha1md5:
++    case ssl_sig_none:
++        break;
++    }
++
++    /* the earlier code should have made sure none of the unsupported
++     * algorithms were accepted */
++    PORT_Assert(algTag != SEC_OID_UNKNOWN);
++    if (algTag == SEC_OID_UNKNOWN) {
++        PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
++        return NULL;
++    }
++
++    rv = SECOID_SetAlgorithmID(arena, newAlgID, algTag, params);
++    if (rv != SECSuccess) {
++        return NULL;
++    }
++    return newAlgID;
++}
++
++struct tlsSignOrVerifyContextStr {
++    PRBool sign;
++    union  {
++        SGNContext *sig;
++        VFYContext *vfy;
++    } u;
++};
++
++tlsSignOrVerifyContext *
++tls_SignOrVerifyGetNewContext(SECKEYPrivateKey *privKey,
++                              SECKEYPublicKey *pubKey,
++                              SSLSignatureScheme scheme, PRBool sign,
++                              SECItem *signature, void *pwArg)
++{
++    PLArenaPool *arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
++    SECAlgorithmID *sigAlgID = NULL;
++    tlsSignOrVerifyContext *newCtx = PORT_ZNew(tlsSignOrVerifyContext);
++    SECStatus rv;
++
++    if (!newCtx) {
++        goto loser;
++    }
++
++    if (!arena) {
++        goto loser;
++    }
++
++    if (sign) {
++        PORT_Assert(privKey);
++    } else {
++        PORT_Assert(pubKey);
++    }
++
++    if ((sign && !privKey) || (!sign && !pubKey)) {
++        PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
++        goto loser;
++    }
++
++    newCtx->sign = sign;
++
++    sigAlgID = tls_GetSignatureAlgorithmId(arena, scheme);
++    if (sigAlgID ==  NULL) {
++        goto loser;
++    }
++    if (sign) {
++        newCtx->u.sig= SGN_NewContextWithAlgorithmID(sigAlgID, privKey);
++        if (!newCtx->u.sig) {
++            goto loser;
++        }
++        rv = SGN_Begin(newCtx->u.sig);
++    } else {
++        newCtx->u.vfy = VFY_CreateContextWithAlgorithmID(pubKey, signature,
++                                                         sigAlgID, NULL, pwArg);
++        if (!newCtx->u.vfy) {
++            goto loser;
++        }
++        rv = VFY_Begin(newCtx->u.vfy);
++    }
++    if (rv != SECSuccess) {
++        goto loser;
++    }
++    PORT_FreeArena(arena, PR_FALSE);
++    return (newCtx);
++
++loser:
++    tls_DestroySignOrVerifyContext(newCtx);
++    if (arena) {
++        PORT_FreeArena(arena, PR_FALSE);
++    }
++    return NULL;
++}
++
++
++SECStatus
++tls_SignOrVerifyUpdate(tlsSignOrVerifyContext *ctx, const unsigned char *buf,
++                       int len)
++{
++    SECStatus rv;
++    if (ctx->sign) {
++        rv = SGN_Update(ctx->u.sig, buf, len);
++    } else {
++        rv = VFY_Update(ctx->u.vfy, buf, len);
++    }
++    return rv;
++}
++
++SECStatus
++tls_SignOrVerifyEnd(tlsSignOrVerifyContext *ctx, SECItem *sig)
++{
++    SECStatus rv;
++    if (ctx->sign) {
++        rv = SGN_End(ctx->u.sig,  sig);
++    } else {
++        /* sign is already set in the context */
++        rv = VFY_End(ctx->u.vfy);
++    }
++    return rv;
++}
++
++void
++tls_DestroySignOrVerifyContext(tlsSignOrVerifyContext *ctx)
++{
++    if (!ctx) {
++        return;
++    }
++    if (ctx->sign) {
++        if (ctx->u.sig) {
++            SGN_DestroyContext(ctx->u.sig, PR_TRUE);
++        }
++    } else {
++        if (ctx->u.vfy) {
++            VFY_DestroyContext(ctx->u.vfy, PR_TRUE);
++        }
++    }
++    PORT_Free(ctx);
++}
++
++
+ /* Add context to the hash functions as described in
+    [draft-ietf-tls-tls13; Section 4.9.1] */
+ SECStatus
+-tls13_AddContextToHashes(sslSocket *ss, const SSL3Hashes *hashes,
+-                         SSLHashType algorithm, PRBool sending,
+-                         SSL3Hashes *tbsHash)
++tls13_SignOrVerifyHashWithContext(sslSocket *ss, const SSL3Hashes *hashes,
++                         SECKEYPrivateKey *privKey, SECKEYPublicKey *pubKey,
++                         SSLSignatureScheme scheme, PRBool sending,
++                         SECItem *signature)
+ {
+     SECStatus rv = SECSuccess;
+-    PK11Context *ctx;
++    tlsSignOrVerifyContext *ctx = NULL;
++    void *pwArg = ss->pkcs11PinArg;
+     const unsigned char context_padding[] = {
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20
+     };
+ 
+     const char *client_cert_verify_string = "TLS 1.3, client CertificateVerify";
+     const char *server_cert_verify_string = "TLS 1.3, server CertificateVerify";
+     const char *context_string = (sending ^ ss->sec.isServer) ? client_cert_verify_string
+                                                               : server_cert_verify_string;
+-    unsigned int hashlength;
+ 
+     /* Double check that we are doing the same hash.*/
+     PORT_Assert(hashes->len == tls13_GetHashSize(ss));
+-
+-    ctx = PK11_CreateDigestContext(ssl3_HashTypeToOID(algorithm));
+-    if (!ctx) {
+-        PORT_SetError(SEC_ERROR_NO_MEMORY);
+-        goto loser;
+-    }
+-
+-    PORT_Assert(SECFailure);
+-    PORT_Assert(!SECSuccess);
++    if (hashes->len != tls13_GetHashSize(ss)) {
++        PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
++        return SECFailure;
++    }
+ 
+     PRINT_BUF(50, (ss, "TLS 1.3 hash without context", hashes->u.raw, hashes->len));
+     PRINT_BUF(50, (ss, "Context string", context_string, strlen(context_string)));
+-    rv |= PK11_DigestBegin(ctx);
+-    rv |= PK11_DigestOp(ctx, context_padding, sizeof(context_padding));
+-    rv |= PK11_DigestOp(ctx, (unsigned char *)context_string,
+-                        strlen(context_string) + 1); /* +1 includes the terminating 0 */
+-    rv |= PK11_DigestOp(ctx, hashes->u.raw, hashes->len);
+-    /* Update the hash in-place */
+-    rv |= PK11_DigestFinal(ctx, tbsHash->u.raw, &hashlength, sizeof(tbsHash->u.raw));
+-    PK11_DestroyContext(ctx, PR_TRUE);
+-    PRINT_BUF(50, (ss, "TLS 1.3 hash with context", tbsHash->u.raw, hashlength));
+-
+-    tbsHash->len = hashlength;
+-    tbsHash->hashAlg = algorithm;
+-
++
++    ctx = tls_SignOrVerifyGetNewContext(privKey, pubKey, scheme,
++                                        sending, signature, pwArg);
++    if (ctx == NULL) {
++        goto loser;
++    }
++
++    rv = tls_SignOrVerifyUpdate(ctx, context_padding, sizeof(context_padding));
++    if (rv != SECSuccess) {
++        goto loser;
++    }
++    rv = tls_SignOrVerifyUpdate(ctx, (const unsigned char *)context_string,
++                                /* +1 includes the terminating 0 */
++                                strlen(context_string) + 1);
++    if (rv != SECSuccess) {
++        goto loser;
++    }
++    rv = tls_SignOrVerifyUpdate(ctx, hashes->u.raw, hashes->len);
++    if (rv != SECSuccess) {
++        goto loser;
++    }
++    rv = tls_SignOrVerifyEnd(ctx, signature);
+     if (rv) {
+         ssl_MapLowLevelError(SSL_ERROR_SHA_DIGEST_FAILURE);
+         goto loser;
+     }
++    tls_DestroySignOrVerifyContext(ctx);
++
++    /* if we are server & sending or !server & !sending, update the scheme */
++    /* only update on server cert verify */
++    if (((ss->sec.isServer) ^ sending) == 0){
++        ss->sec.signatureScheme = scheme;
++        ss->sec.authType = ssl_SignatureSchemeToAuthType(scheme);
++    }
++
+     return SECSuccess;
+ 
+ loser:
++    tls_DestroySignOrVerifyContext(ctx);
++
+     return SECFailure;
+ }
+ 
+ /*
+  *    Derive-Secret(Secret, Label, Messages) =
+  *       HKDF-Expand-Label(Secret, Label,
+  *                         Hash(Messages) + Hash(resumption_context), L))
+  */
+@@ -5358,19 +5653,17 @@ loser:
+ }
+ 
+ SECStatus
+ tls13_SendCertificateVerify(sslSocket *ss, SECKEYPrivateKey *privKey)
+ {
+     SECStatus rv = SECFailure;
+     SECItem buf = { siBuffer, NULL, 0 };
+     unsigned int len;
+-    SSLHashType hashAlg;
+     SSL3Hashes hash;
+-    SSL3Hashes tbsHash; /* The hash "to be signed". */
+ 
+     PORT_Assert(ss->opt.noLocks || ssl_HaveXmitBufLock(ss));
+     PORT_Assert(ss->opt.noLocks || ssl_HaveSSL3HandshakeLock(ss));
+ 
+     SSL_TRC(3, ("%d: TLS13[%d]: send certificate_verify handshake",
+                 SSL_GETPID(), ss->fd));
+ 
+     PORT_Assert(ss->ssl3.hs.hashType == handshake_hash_single);
+@@ -5381,41 +5674,37 @@ tls13_SendCertificateVerify(sslSocket *s
+ 
+     /* We should have picked a signature scheme when we received a
+      * CertificateRequest, or when we picked a server certificate. */
+     PORT_Assert(ss->ssl3.hs.signatureScheme != ssl_sig_none);
+     if (ss->ssl3.hs.signatureScheme == ssl_sig_none) {
+         PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+         return SECFailure;
+     }
+-    hashAlg = ssl_SignatureSchemeToHashType(ss->ssl3.hs.signatureScheme);
+-    rv = tls13_AddContextToHashes(ss, &hash, hashAlg,
+-                                  PR_TRUE, &tbsHash);
+-    if (rv != SECSuccess) {
+-        return SECFailure;
+-    }
+-
+-    rv = ssl3_SignHashes(ss, &tbsHash, privKey, &buf);
++
++    rv = tls13_SignOrVerifyHashWithContext(ss, &hash, privKey, NULL,
++                                           ss->ssl3.hs.signatureScheme,
++                                           PR_TRUE, &buf);
+     if (rv == SECSuccess && !ss->sec.isServer) {
+         /* Remember the info about the slot that did the signing.
+          * Later, when doing an SSL restart handshake, verify this.
+          * These calls are mere accessors, and can't fail.
+          */
+         PK11SlotInfo *slot;
+         sslSessionID *sid = ss->sec.ci.sid;
+ 
+         slot = PK11_GetSlotFromPrivateKey(privKey);
+         sid->u.ssl3.clAuthSeries = PK11_GetSlotSeries(slot);
+         sid->u.ssl3.clAuthSlotID = PK11_GetSlotID(slot);
+         sid->u.ssl3.clAuthModuleID = PK11_GetModuleID(slot);
+         sid->u.ssl3.clAuthValid = PR_TRUE;
+         PK11_FreeSlot(slot);
+     }
+     if (rv != SECSuccess) {
+-        goto done; /* err code was set by ssl3_SignHashes */
++        goto done; /* err code was set by tls13_SignOrVerifyHashWithContext */
+     }
+ 
+     len = buf.len + 2 + 2;
+ 
+     rv = ssl3_AppendHandshakeHeader(ss, ssl_hs_certificate_verify, len);
+     if (rv != SECSuccess) {
+         goto done; /* error code set by AppendHandshake */
+     }
+@@ -5446,18 +5735,16 @@ SECStatus
+ tls13_HandleCertificateVerify(sslSocket *ss, PRUint8 *b, PRUint32 length)
+ {
+     sslDelegatedCredential *dc = ss->xtnData.peerDelegCred;
+     CERTSubjectPublicKeyInfo *spki;
+     SECKEYPublicKey *pubKey = NULL;
+     SECItem signed_hash = { siBuffer, NULL, 0 };
+     SECStatus rv;
+     SSLSignatureScheme sigScheme;
+-    SSLHashType hashAlg;
+-    SSL3Hashes tbsHash;
+     SSL3Hashes hashes;
+ 
+     SSL_TRC(3, ("%d: TLS13[%d]: handle certificate_verify handshake",
+                 SSL_GETPID(), ss->fd));
+     PORT_Assert(ss->opt.noLocks || ssl_HaveRecvBufLock(ss));
+     PORT_Assert(ss->opt.noLocks || ssl_HaveSSL3HandshakeLock(ss));
+ 
+     rv = TLS13_CHECK_HS_STATE(ss, SSL_ERROR_RX_UNEXPECTED_CERT_VERIFY,
+@@ -5521,23 +5808,16 @@ tls13_HandleCertificateVerify(sslSocket 
+     }
+ 
+     rv = ssl_CheckSignatureSchemeConsistency(ss, sigScheme, spki);
+     if (rv != SECSuccess) {
+         /* Error set already */
+         FATAL_ERROR(ss, PORT_GetError(), illegal_parameter);
+         return SECFailure;
+     }
+-    hashAlg = ssl_SignatureSchemeToHashType(sigScheme);
+-
+-    rv = tls13_AddContextToHashes(ss, &hashes, hashAlg, PR_FALSE, &tbsHash);
+-    if (rv != SECSuccess) {
+-        FATAL_ERROR(ss, SSL_ERROR_DIGEST_FAILURE, internal_error);
+-        return SECFailure;
+-    }
+ 
+     rv = ssl3_ConsumeHandshakeVariable(ss, &signed_hash, 2, &b, &length);
+     if (rv != SECSuccess) {
+         PORT_SetError(SSL_ERROR_RX_MALFORMED_CERT_VERIFY);
+         return SECFailure;
+     }
+ 
+     if (length != 0) {
+@@ -5545,19 +5825,18 @@ tls13_HandleCertificateVerify(sslSocket 
+         return SECFailure;
+     }
+ 
+     pubKey = SECKEY_ExtractPublicKey(spki);
+     if (pubKey == NULL) {
+         ssl_MapLowLevelError(SSL_ERROR_EXTRACT_PUBLIC_KEY_FAILURE);
+         return SECFailure;
+     }
+-
+-    rv = ssl_VerifySignedHashesWithPubKey(ss, pubKey, sigScheme,
+-                                          &tbsHash, &signed_hash);
++    rv = tls13_SignOrVerifyHashWithContext(ss, &hashes, NULL, pubKey,
++                                           sigScheme, PR_FALSE, &signed_hash);
+     if (rv != SECSuccess) {
+         FATAL_ERROR(ss, PORT_GetError(), decrypt_error);
+         goto loser;
+     }
+ 
+     /* Set the auth type and verify it is what we captured in ssl3_AuthCertificate */
+     if (!ss->sec.isServer) {
+         ss->sec.authType = ssl_SignatureSchemeToAuthType(sigScheme);
+diff --git a/lib/ssl/tls13exthandle.c b/lib/ssl/tls13exthandle.c
+--- a/lib/ssl/tls13exthandle.c
++++ b/lib/ssl/tls13exthandle.c
+@@ -1467,17 +1467,17 @@ tls13_ClientSendDelegatedCredentialsXtn(
+     }
+ 
+     /* Filter the schemes that are enabled and acceptable. Save these in
+      * the "advertised" list, then encode them to be sent. If we receive
+      * a DC in response, validate that it matches one of the advertised
+      * schemes. */
+     SSLSignatureScheme filtered[MAX_SIGNATURE_SCHEMES] = { 0 };
+     unsigned int filteredCount = 0;
+-    SECStatus rv = ssl3_FilterSigAlgs(ss, ss->vrange.max,
++    SECStatus rv = ssl3_FilterSigAlgs(ss, ss->vrange.min, ss->vrange.max,
+                                       PR_TRUE /* disableRsae */,
+                                       PR_FALSE /* forCert */,
+                                       MAX_SIGNATURE_SCHEMES,
+                                       filtered,
+                                       &filteredCount);
+     if (rv != SECSuccess) {
+         return SECFailure;
+     }
+diff --git a/lib/ssl/tls13subcerts.c b/lib/ssl/tls13subcerts.c
+--- a/lib/ssl/tls13subcerts.c
++++ b/lib/ssl/tls13subcerts.c
+@@ -281,30 +281,31 @@ tls13_AppendCredentialSignature(sslBuffe
+         return SECFailure;
+     }
+ 
+     return SECSuccess;
+ }
+ 
+ /* Hashes the message used to sign/verify the DC. */
+ static SECStatus
+-tls13_HashCredentialSignatureMessage(SSL3Hashes *hash,
+-                                     SSLSignatureScheme scheme,
+-                                     const CERTCertificate *cert,
+-                                     const sslBuffer *dcBuf)
++tls13_HashCredentialAndSignOrVerifyMessage(SECKEYPrivateKey *privKey,
++                                           SECKEYPublicKey *pubKey,
++                                           SSLSignatureScheme scheme,
++                                           PRBool signing, 
++                                           const CERTCertificate *cert,
++                                           const sslBuffer *dcBuf,
++                                           SECItem *signature, void *pwArg)
+ {
+     SECStatus rv;
+-    PK11Context *ctx = NULL;
+-    unsigned int hashLen;
++    tlsSignOrVerifyContext *ctx = NULL;
+ 
+-    /* Set up hash context. */
+-    hash->hashAlg = ssl_SignatureSchemeToHashType(scheme);
+-    ctx = PK11_CreateDigestContext(ssl3_HashTypeToOID(hash->hashAlg));
++    /* Set up sign and hash context. */
++    ctx = tls_SignOrVerifyGetNewContext(privKey, pubKey, scheme, signing,
++                                        signature, pwArg);
+     if (!ctx) {
+-        PORT_SetError(SEC_ERROR_NO_MEMORY);
+         goto loser;
+     }
+ 
+     static const PRUint8 kCtxStrPadding[64] = {
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+@@ -312,73 +313,62 @@ tls13_HashCredentialSignatureMessage(SSL
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+         0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20
+     };
+ 
+     static const PRUint8 kCtxStr[] = "TLS, server delegated credentials";
+ 
+     /* Hash the message signed by the peer. */
+-    rv = SECSuccess;
+-    rv |= PK11_DigestBegin(ctx);
+-    rv |= PK11_DigestOp(ctx, kCtxStrPadding, sizeof kCtxStrPadding);
+-    rv |= PK11_DigestOp(ctx, kCtxStr, 1 /* 0-byte */ + strlen((const char *)kCtxStr));
+-    rv |= PK11_DigestOp(ctx, cert->derCert.data, cert->derCert.len);
+-    rv |= PK11_DigestOp(ctx, dcBuf->buf, dcBuf->len);
+-    rv |= PK11_DigestFinal(ctx, hash->u.raw, &hashLen, sizeof hash->u.raw);
+-    if (rv != SECSuccess) {
+-        PORT_SetError(SSL_ERROR_SHA_DIGEST_FAILURE);
+-        goto loser;
+-    }
+-
+-    hash->len = hashLen;
+-    if (ctx) {
+-        PK11_DestroyContext(ctx, PR_TRUE);
+-    }
++    rv = tls_SignOrVerifyUpdate(ctx, kCtxStrPadding, sizeof kCtxStrPadding);
++    if (rv != SECSuccess) goto loser;
++    rv = tls_SignOrVerifyUpdate(ctx, kCtxStr, 
++                                1 /* 0-byte */ + strlen((const char *)kCtxStr));
++    if (rv != SECSuccess) goto loser;
++    rv = tls_SignOrVerifyUpdate(ctx, cert->derCert.data, cert->derCert.len);
++    if (rv != SECSuccess) goto loser;
++    rv = tls_SignOrVerifyUpdate(ctx, dcBuf->buf, dcBuf->len);
++    if (rv != SECSuccess) goto loser;
++    rv = tls_SignOrVerifyEnd(ctx, signature);
++    if (rv != SECSuccess) goto loser;
++    tls_DestroySignOrVerifyContext(ctx);
+     return SECSuccess;
+ 
+ loser:
+-    if (ctx) {
+-        PK11_DestroyContext(ctx, PR_TRUE);
+-    }
++    tls_DestroySignOrVerifyContext(ctx);
+     return SECFailure;
+ }
+ 
+ /* Verifies the DC signature. */
+ static SECStatus
+ tls13_VerifyCredentialSignature(sslSocket *ss, sslDelegatedCredential *dc)
+ {
+     SECStatus rv = SECSuccess;
+-    SSL3Hashes hash;
+     sslBuffer dcBuf = SSL_BUFFER_EMPTY;
+     CERTCertificate *cert = ss->sec.peerCert;
+     SECKEYPublicKey *pubKey = NULL;
++    void *pwArg = ss->pkcs11PinArg;
++
+ 
+     /* Serialize the DC parameters. */
+     rv = tls13_AppendCredentialParams(&dcBuf, dc);
+     if (rv != SECSuccess) {
+         goto loser; /* Error set by caller. */
+     }
+ 
+-    /* Hash the message that was signed by the delegator. */
+-    rv = tls13_HashCredentialSignatureMessage(&hash, dc->alg, cert, &dcBuf);
+-    if (rv != SECSuccess) {
+-        FATAL_ERROR(ss, PORT_GetError(), internal_error);
+-        goto loser;
+-    }
+-
+     pubKey = SECKEY_ExtractPublicKey(&cert->subjectPublicKeyInfo);
+     if (pubKey == NULL) {
+         FATAL_ERROR(ss, SSL_ERROR_EXTRACT_PUBLIC_KEY_FAILURE, internal_error);
+         goto loser;
+     }
+ 
+-    /* Verify the signature of the message. */
+-    rv = ssl_VerifySignedHashesWithPubKey(ss, pubKey, dc->alg,
+-                                          &hash, &dc->signature);
++    /* Verify the signature of the delegaor message. */
++    rv = tls13_HashCredentialAndSignOrVerifyMessage(NULL, pubKey, dc->alg,
++                                                    PR_FALSE, cert, &dcBuf,
++                                                    &dc->signature, pwArg);
+     if (rv != SECSuccess) {
+         FATAL_ERROR(ss, SSL_ERROR_DC_BAD_SIGNATURE, illegal_parameter);
+         goto loser;
+     }
+ 
+     SECOidTag spkiAlg = SECOID_GetAlgorithmTag(&(dc->spki->algorithm));
+     if (spkiAlg == SEC_OID_PKCS1_RSA_ENCRYPTION) {
+         FATAL_ERROR(ss, SSL_ERROR_INCORRECT_SIGNATURE_ALGORITHM, illegal_parameter);
+@@ -651,17 +641,23 @@ tls13_MakeDcSpki(const SECKEYPublicKey *
+                     return NULL;
+             }
+             if (keyScheme != dcCertVerifyAlg) {
+                 PORT_SetError(SSL_ERROR_INCORRECT_SIGNATURE_ALGORITHM);
+                 return NULL;
+             }
+             return SECKEY_CreateSubjectPublicKeyInfo(dcPub);
+         }
+-
++        case mldsaKey: 
++            if (ssl_SignatureSchemeFromPublicKeyOid(dcPub->u.mldsa.params) 
++                    != dcCertVerifyAlg) {
++                PORT_SetError(SSL_ERROR_INCORRECT_SIGNATURE_ALGORITHM);
++                return NULL;
++            }
++            return SECKEY_CreateSubjectPublicKeyInfo(dcPub);
+         default:
+             break;
+     }
+ 
+     PORT_SetError(SEC_ERROR_INVALID_KEY);
+     return NULL;
+ }
+ 
+@@ -683,19 +679,19 @@ SSLExp_DelegateCredential(const CERTCert
+                           const SECKEYPrivateKey *certPriv,
+                           const SECKEYPublicKey *dcPub,
+                           SSLSignatureScheme dcCertVerifyAlg,
+                           PRUint32 dcValidFor,
+                           PRTime now,
+                           SECItem *out)
+ {
+     SECStatus rv;
+-    SSL3Hashes hash;
+     CERTSubjectPublicKeyInfo *spki = NULL;
+     SECKEYPrivateKey *tmpPriv = NULL;
++    void *pwArg = certPriv->wincx;
+     sslDelegatedCredential *dc = NULL;
+     sslBuffer dcBuf = SSL_BUFFER_EMPTY;
+ 
+     if (!cert || !certPriv || !dcPub || !out) {
+         PORT_SetError(SEC_ERROR_INVALID_ARGS);
+         return SECFailure;
+     }
+ 
+@@ -749,30 +745,27 @@ SSLExp_DelegateCredential(const CERTCert
+     }
+     PORT_Assert(dc->alg != ssl_sig_none);
+ 
+     rv = tls13_AppendCredentialParams(&dcBuf, dc);
+     if (rv != SECSuccess) {
+         goto loser;
+     }
+ 
+-    /* Hash signature message. */
+-    rv = tls13_HashCredentialSignatureMessage(&hash, dc->alg, cert, &dcBuf);
+-    if (rv != SECSuccess) {
+-        goto loser;
+-    }
+ 
+     /* Sign the hash with the delegation key.
+      *
+      * The PK11 API discards const qualifiers, so we have to make a copy of
+-     * |certPriv| and pass the copy to |ssl3_SignHashesWithPrivKey|.
++     * |certPriv| and pass the copy to 
++     * |tls3_HashCredentialAndSignOrVerifyMessage|.
+      */
+     tmpPriv = SECKEY_CopyPrivateKey(certPriv);
+-    rv = ssl3_SignHashesWithPrivKey(&hash, tmpPriv, dc->alg,
+-                                    PR_TRUE /* isTls */, &dc->signature);
++    rv = tls13_HashCredentialAndSignOrVerifyMessage(tmpPriv, NULL, dc->alg,
++                                                    PR_TRUE, cert, &dcBuf,
++                                                    &dc->signature, pwArg);
+     if (rv != SECSuccess) {
+         goto loser;
+     }
+ 
+     /* Serialize the DC signature. */
+     rv = tls13_AppendCredentialSignature(&dcBuf, dc);
+     if (rv != SECSuccess) {
+         goto loser;
+diff --git a/tests/cert/cert.sh b/tests/cert/cert.sh
+--- a/tests/cert/cert.sh
++++ b/tests/cert/cert.sh
+@@ -57,24 +57,16 @@ cert_init()
+       Exit 5 "Fatal - Root certs module not found."
+   else
+       html_passed "Looking for root certs module."
+   fi
+ 
+   if [ "${OS_ARCH}" = "WINNT" -a "$OS_NAME" = "CYGWIN_NT" ]; then
+ 	ROOTCERTSFILE=`cygpath -m ${ROOTCERTSFILE}`
+   fi
+-# only enable ml dsa certs if using the sql database. The dbm database does
+-# not support ml_dsa certs
+-  unset NSS_CERT_ENABLE_ML_DSA
+-  if [ -n $"NSS_ENABLE_ML_DSA" ]; then
+-    if using_sql ; then
+-      export NSS_CERT_ENABLE_ML_DSA=1
+-    fi
+-  fi
+ }
+ 
+ cert_log() ######################    write the cert_status file
+ {
+     echo "$SCRIPTNAME $*"
+     echo $* >>${CERT_LOG_FILE}
+ }
+ 
+@@ -291,50 +283,51 @@ cert_create_cert()
+ 
+     CU_ACTION="Import Root CA for $CERTNAME"
+     certu -A -n "TestCA" -t "TC,TC,TC" -f "${R_PWFILE}" -d "${PROFILEDIR}" \
+           -i "${R_CADIR}/TestCA.ca.cert" 2>&1
+     if [ "$RET" -ne 0 ]; then
+         return $RET
+     fi
+ 
++    if [ -z "$NSS_DISABLE_DSA" ]; then
+ 	CU_ACTION="Import DSA Root CA for $CERTNAME"
+ 	certu -A -n "TestCA-dsa" -t "TC,TC,TC" -f "${R_PWFILE}" \
+ 	    -d "${PROFILEDIR}" -i "${R_CADIR}/TestCA-dsa.ca.cert" 2>&1
+ 	if [ "$RET" -ne 0 ]; then
+             return $RET
+ 	fi
+-
+-    if [ -n "$NSS_CERT_ENABLE_ML_DSA" ]; then
+-       CU_ACTION="Import ML-DSA-44 Root CA for $CERTNAME"
+-       certu -A -n "TestCA-ml-dsa-44" -t "TC,TC,TC" -f "${R_PWFILE}" \
+-           -d "${PROFILEDIR}" -i "${R_CADIR}/TestCA-ml-dsa-44.ca.cert" 2>&1
+-       if [ "$RET" -ne 0 ]; then
+-            return $RET
+-       fi
+-       CU_ACTION="Import ML-DSA-65 Root CA for $CERTNAME"
+-       certu -A -n "TestCA-ml-dsa-65" -t "TC,TC,TC" -f "${R_PWFILE}" \
+-           -d "${PROFILEDIR}" -i "${R_CADIR}/TestCA-ml-dsa-65.ca.cert" 2>&1
+-       if [ "$RET" -ne 0 ]; then
++    fi
++    if [ -n "$NSS_ENABLE_ML_DSA" ]; then
++	CU_ACTION="Import ML-DSA-44 Root CA for $CERTNAME"
++	certu -A -n "TestCA-ml-dsa-44" -t "TC,TC,TC" -f "${R_PWFILE}" \
++	    -d "${PROFILEDIR}" -i "${R_CADIR}/TestCA-ml-dsa-44.ca.cert" 2>&1
++	if [ "$RET" -ne 0 ]; then
+             return $RET
+-       fi
+-       CU_ACTION="Import ML-DSA-87 Root CA for $CERTNAME"
+-       certu -A -n "TestCA-ml-dsa-87" -t "TC,TC,TC" -f "${R_PWFILE}" \
+-           -d "${PROFILEDIR}" -i "${R_CADIR}/TestCA-ml-dsa-87.ca.cert" 2>&1
+-       if [ "$RET" -ne 0 ]; then
+-            return $RET
+-       fi
+-    fi
+-
+-	CU_ACTION="Import EC Root CA for $CERTNAME"
+-	certu -A -n "TestCA-ec" -t "TC,TC,TC" -f "${R_PWFILE}" \
+-	    -d "${PROFILEDIR}" -i "${R_CADIR}/TestCA-ec.ca.cert" 2>&1
++	fi
++	CU_ACTION="Import ML-DSA-65 Root CA for $CERTNAME"
++	certu -A -n "TestCA-ml-dsa-65" -t "TC,TC,TC" -f "${R_PWFILE}" \
++	    -d "${PROFILEDIR}" -i "${R_CADIR}/TestCA-ml-dsa-65.ca.cert" 2>&1
+ 	if [ "$RET" -ne 0 ]; then
+             return $RET
+ 	fi
++	CU_ACTION="Import ML-DSA-87 Root CA for $CERTNAME"
++	certu -A -n "TestCA-ml-dsa-87" -t "TC,TC,TC" -f "${R_PWFILE}" \
++	    -d "${PROFILEDIR}" -i "${R_CADIR}/TestCA-ml-dsa-87.ca.cert" 2>&1
++	if [ "$RET" -ne 0 ]; then
++            return $RET
++	fi
++    fi
++
++    CU_ACTION="Import EC Root CA for $CERTNAME"
++    certu -A -n "TestCA-ec" -t "TC,TC,TC" -f "${R_PWFILE}" \
++        -d "${PROFILEDIR}" -i "${R_CADIR}/TestCA-ec.ca.cert" 2>&1
++    if [ "$RET" -ne 0 ]; then
++        return $RET
++    fi
+ 
+     cert_add_cert "$5"
+     return $?
+ }
+ 
+ ############################# cert_add_cert ############################
+ # local shell function to add client certs to an existing CERT DB
+ #     generate request
+@@ -365,16 +358,17 @@ cert_add_cert()
+         return $RET
+     fi
+ 
+     cert_log "SUCCESS: $CERTNAME's Cert Created"
+ 
+ #
+ #   Generate and add DSA cert
+ #
++    if [ -z "$NSS_DISABLE_DSA" ]; then
+ 	CU_ACTION="Generate DSA Cert Request for $CERTNAME"
+ 	CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-dsa@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+ 	certu -R -k dsa -d "${PROFILEDIR}" -f "${R_PWFILE}" \
+ 	    -z "${R_NOISE_FILE}" -o req  2>&1
+ 	if [ "$RET" -ne 0 ]; then
+             return $RET
+ 	fi
+ 
+@@ -415,90 +409,89 @@ cert_add_cert()
+ 
+ 	CU_ACTION="Import $CERTNAME's mixed DSA Cert"
+ 	certu -A -n "${CERTNAME}-dsamixed" -t "u,u,u" -d "${PROFILEDIR}" \
+ 	    -f "${R_PWFILE}" -i "${CERTNAME}-dsamixed.cert" 2>&1
+ 	if [ "$RET" -ne 0 ]; then
+             return $RET
+ 	fi
+ 	cert_log "SUCCESS: $CERTNAME's mixed DSA Cert Created"
+-
+-    if [ -n "$NSS_CERT_ENABLE_ML_DSA" ]; then
+-       CU_ACTION="Generate ML-DSA-44 Cert Request for $CERTNAME"
+-       CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-44@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+-       certu -R -k mldsa -q ml-dsa-44 -d "${PROFILEDIR}" -f "${R_PWFILE}" \
+-           -z "${R_NOISE_FILE}" -o req  2>&1
+-       if [ "$RET" -ne 0 ]; then
++    fi
++    if [ -n "$NSS_ENABLE_ML_DSA" ]; then
++	CU_ACTION="Generate ML-DSA-44 Cert Request for $CERTNAME"
++	CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-44@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++	certu -R -k mldsa -q ml-dsa-44 -d "${PROFILEDIR}" -f "${R_PWFILE}" \
++	    -z "${R_NOISE_FILE}" -o req  2>&1
++	if [ "$RET" -ne 0 ]; then
+             return $RET
+-       fi
+-
+-       CU_ACTION="Sign ${CERTNAME}'s ML-DSA-44 Request"
+-       certu -C -c "TestCA-ml-dsa-44" -m "$CERTSERIAL" -v 60 -d "${P_R_CADIR}" \
++	fi
++
++	CU_ACTION="Sign ${CERTNAME}'s ML-DSA-44 Request"
++	certu -C -c "TestCA-ml-dsa-44" -m "$CERTSERIAL" -v 60 -d "${P_R_CADIR}" \
+             -i req -o "${CERTNAME}-ml-dsa-44.cert" -f "${R_PWFILE}" "$1" 2>&1
+-       if [ "$RET" -ne 0 ]; then
++	if [ "$RET" -ne 0 ]; then
+             return $RET
+-       fi
+-
+-       CU_ACTION="Import $CERTNAME's ML-DSA-44 Cert"
+-       certu -A -n "${CERTNAME}-ml-dsa-44" -t "u,u,u" -d "${PROFILEDIR}" \
+-           -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-44.cert" 2>&1
+-       if [ "$RET" -ne 0 ]; then
++	fi
++
++	CU_ACTION="Import $CERTNAME's ML-DSA-44 Cert"
++	certu -A -n "${CERTNAME}-ml-dsa-44" -t "u,u,u" -d "${PROFILEDIR}" \
++	    -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-44.cert" 2>&1
++	if [ "$RET" -ne 0 ]; then
+             return $RET
+-       fi
+-       cert_log "SUCCESS: $CERTNAME's ML-DSA-44 Cert Created"
+-
+-       CU_ACTION="Generate ML-DSA-65 Cert Request for $CERTNAME"
+-       CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-65@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+-       certu -R -k mldsa -q ml-dsa-65 -d "${PROFILEDIR}" -f "${R_PWFILE}" \
+-           -z "${R_NOISE_FILE}" -o req  2>&1
+-       if [ "$RET" -ne 0 ]; then
++	fi
++	cert_log "SUCCESS: $CERTNAME's ML-DSA-44 Cert Created"
++
++	CU_ACTION="Generate ML-DSA-65 Cert Request for $CERTNAME"
++	CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-65@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++	certu -R -k mldsa -q ml-dsa-65 -d "${PROFILEDIR}" -f "${R_PWFILE}" \
++	    -z "${R_NOISE_FILE}" -o req  2>&1
++	if [ "$RET" -ne 0 ]; then
+             return $RET
+-       fi
+-
+-       CU_ACTION="Sign ${CERTNAME}'s ML-DSA-65 Request"
+-       certu -C -c "TestCA-ml-dsa-65" -m "$CERTSERIAL" -v 60 -d "${P_R_CADIR}" \
++	fi
++
++	CU_ACTION="Sign ${CERTNAME}'s ML-DSA-65 Request"
++	certu -C -c "TestCA-ml-dsa-65" -m "$CERTSERIAL" -v 60 -d "${P_R_CADIR}" \
+             -i req -o "${CERTNAME}-ml-dsa-65.cert" -f "${R_PWFILE}" "$1" 2>&1
+-       if [ "$RET" -ne 0 ]; then
+-            return $RET
+-       fi
+-
+-       CU_ACTION="Import $CERTNAME's ML-DSA-65 Cert"
+-       certu -A -n "${CERTNAME}-ml-dsa-65" -t "u,u,u" -d "${PROFILEDIR}" \
+-           -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-65.cert" 2>&1
+-       if [ "$RET" -ne 0 ]; then
++	if [ "$RET" -ne 0 ]; then
+             return $RET
+-       fi
+-       cert_log "SUCCESS: $CERTNAME's ML-DSA-65 Cert Created"
+-
+-       CU_ACTION="Generate ML-DSA-87 Cert Request for $CERTNAME"
+-       CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-87@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+-       cert_log "SUCCESS: $CERTNAME's ML-DSA-87 Cert Created"
+-       certu -R -k mldsa -q ml-dsa-87 -d "${PROFILEDIR}" -f "${R_PWFILE}" \
+-           -z "${R_NOISE_FILE}" -o req  2>&1
+-       if [ "$RET" -ne 0 ]; then
++	fi
++
++	CU_ACTION="Import $CERTNAME's ML-DSA-65 Cert"
++	certu -A -n "${CERTNAME}-ml-dsa-65" -t "u,u,u" -d "${PROFILEDIR}" \
++	    -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-65.cert" 2>&1
++	if [ "$RET" -ne 0 ]; then
+             return $RET
+-       fi
+-
+-       CU_ACTION="Sign ${CERTNAME}'s ML-DSA-87 Request"
+-       certu -C -c "TestCA-ml-dsa-87" -m "$CERTSERIAL" -v 60 -d "${P_R_CADIR}" \
+-            -i req -o "${CERTNAME}-ml-dsa-87.cert" -f "${R_PWFILE}" "$1" 2>&1
+-       if [ "$RET" -ne 0 ]; then
++	fi
++	cert_log "SUCCESS: $CERTNAME's ML-DSA-65 Cert Created"
++
++	CU_ACTION="Generate ML-DSA-87 Cert Request for $CERTNAME"
++	CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-87@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++	cert_log "SUCCESS: $CERTNAME's ML-DSA-87 Cert Created"
++	certu -R -k mldsa -q ml-dsa-87 -d "${PROFILEDIR}" -f "${R_PWFILE}" \
++	    -z "${R_NOISE_FILE}" -o req  2>&1
++	if [ "$RET" -ne 0 ]; then
+             return $RET
+-       fi
+-
+-       CU_ACTION="Import $CERTNAME's ML-DSA-87 Cert"
+-       certu -A -n "${CERTNAME}-ml-dsa-87" -t "u,u,u" -d "${PROFILEDIR}" \
+-           -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-87.cert" 2>&1
+-       if [ "$RET" -ne 0 ]; then
++	fi
++
++	CU_ACTION="Sign ${CERTNAME}'s ML-DSA-87 Request"
++	certu -C -c "TestCA-ml-dsa-87" -m "$CERTSERIAL" -v 60 -d "${P_R_CADIR}" \
++            -i req -o "${CERTNAME}-ml-dsa-87.cert" -f "${R_PWFILE}" "$1" 2>&1
++	if [ "$RET" -ne 0 ]; then
+             return $RET
+-       fi
+-       cert_log "SUCCESS: $CERTNAME's ML-DSA-87 Cert Created"
++	fi
++
++	CU_ACTION="Import $CERTNAME's ML-DSA-87 Cert"
++	certu -A -n "${CERTNAME}-ml-dsa-87" -t "u,u,u" -d "${PROFILEDIR}" \
++	    -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-87.cert" 2>&1
++	if [ "$RET" -ne 0 ]; then
++            return $RET
++	fi
++	cert_log "SUCCESS: $CERTNAME's ML-DSA-87 Cert Created"
+     fi
+ 
+-
+ #
+ #   Generate and add EC cert
+ #
+ 	CURVE="secp384r1"
+ 	CU_ACTION="Generate EC Cert Request for $CERTNAME"
+ 	CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ec@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+ 	certu -R -k ec -q "${CURVE}" -d "${PROFILEDIR}" -f "${R_PWFILE}" \
+ 	    -z "${R_NOISE_FILE}" -o req  2>&1
+@@ -600,16 +593,17 @@ cert_all_CA()
+     cert_CA $CLIENT_CADIR chain-2-clientCA "-c chain-1-clientCA" "u,u,u" ${D_CLIENT_CA} "7"
+ 
+     rm $CLIENT_CADIR/root.cert $SERVER_CADIR/root.cert
+ 
+     # root.cert in $CLIENT_CADIR and in $SERVER_CADIR is one of the last 
+     # in the chain
+ 
+ 
++    if [ -z "$NSS_DISABLE_DSA" ]; then
+ #
+ #       Create DSA version of TestCA
+ 	ALL_CU_SUBJECT="CN=NSS Test CA (DSA), O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+ 	cert_dsa_CA $CADIR TestCA-dsa -x "CTu,CTu,CTu" ${D_CA} "1"
+ #
+ #       Create DSA versions of the intermediate CA certs
+ 	ALL_CU_SUBJECT="CN=NSS Server Test CA (DSA), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
+ 	cert_dsa_CA $SERVER_CADIR serverCA-dsa -x "Cu,Cu,Cu" ${D_SERVER_CA} "2"
+@@ -623,51 +617,77 @@ cert_all_CA()
+ 	ALL_CU_SUBJECT="CN=NSS Chain1 Client Test CA (DSA), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
+ 	cert_dsa_CA $CLIENT_CADIR chain-1-clientCA-dsa "-c clientCA-dsa" "u,u,u" ${D_CLIENT_CA} "6"
+ 	ALL_CU_SUBJECT="CN=NSS Chain2 Client Test CA (DSA), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
+ 	cert_dsa_CA $CLIENT_CADIR chain-2-clientCA-dsa "-c chain-1-clientCA-dsa" "u,u,u" ${D_CLIENT_CA} "7"
+ 
+ 	rm $CLIENT_CADIR/dsaroot.cert $SERVER_CADIR/dsaroot.cert
+ #	dsaroot.cert in $CLIENT_CADIR and in $SERVER_CADIR is one of the last 
+ #	in the chain
+-
+-    if [ -n "$NSS_CERT_ENABLE_ML_DSA" ]; then
++    fi
++    if [ -n "$NSS_ENABLE_ML_DSA" ]; then
+ #
+ #       Create ML-DSA-44 version of TestCA
+-       ALL_CU_SUBJECT="CN=NSS Test CA (ML-DSA-44), O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+-       cert_ml_dsa_CA ml-dsa-44 $CADIR TestCA-ml-dsa-44 -x "CTu,CTu,CTu" ${D_CA} "1"
++	ALL_CU_SUBJECT="CN=NSS Test CA (ML-DSA-44), O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-44 $CADIR TestCA-ml-dsa-44 -x "CTu,CTu,CTu" ${D_CA} "1"
+ #
+ #       Create ML-DSA-44 versions of the intermediate CA certs
+-       ALL_CU_SUBJECT="CN=NSS Server Test CA (ML-DSA-44), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
+-       cert_ml_dsa_CA ml-dsa-44 $SERVER_CADIR serverCA-ml-dsa-44 -x "Cu,Cu,Cu" ${D_SERVER_CA} "2"
+-
+-       ALL_CU_SUBJECT="CN=NSS Client Test CA (ML-DSA-44), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
+-       cert_m_ldsa_CA ml-dsa-44 $CLIENT_CADIR clientCA-dsa -x "Tu,Cu,Cu" ${D_CLIENT_CA} "5"
++	ALL_CU_SUBJECT="CN=NSS Server Test CA (ML-DSA-44), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-44 $SERVER_CADIR serverCA-ml-dsa-44 -x "Cu,Cu,Cu" ${D_SERVER_CA} "2"
++	ALL_CU_SUBJECT="CN=NSS Chain1 Server Test CA (ML-DSA-44), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-44 $SERVER_CADIR chain-1-serverCA-ml-dsa-44 "-c serverCA-ml-dsa-44" "u,u,u" ${D_SERVER_CA} "3"
++	ALL_CU_SUBJECT="CN=NSS Chain2 Server Test CA (ML-DSA-44), O=BOGUS NSS, L=Santa Clara, ST=California, C=US" 
++	cert_ml_dsa_CA ml-dsa-44 $SERVER_CADIR chain-2-serverCA-ml-dsa-44 "-c chain-1-serverCA-ml-dsa-44" "u,u,u" ${D_SERVER_CA} "4"
++
++	ALL_CU_SUBJECT="CN=NSS Client Test CA (ML-DSA-44), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-44 $CLIENT_CADIR clientCA-ml-dsa-44 -x "Tu,Cu,Cu" ${D_CLIENT_CA} "5"
++	ALL_CU_SUBJECT="CN=NSS Chain1 Client Test CA (ML-DSA-44), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-44 $CLIENT_CADIR chain-1-clientCA-ml-dsa-44 "-c clientCA-ml-dsa-44" "u,u,u" ${D_CLIENT_CA} "6"
++	ALL_CU_SUBJECT="CN=NSS Chain2 Client Test CA (ML-DSA-44), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-44 $CLIENT_CADIR chain-2-clientCA-ml-dsa-44 "-c chain-1-clientCA-ml-dsa-44" "u,u,u" ${D_CLIENT_CA} "7"
++
+ #
+ #       Create ML-DSA-65 version of TestCA
+-       ALL_CU_SUBJECT="CN=NSS Test CA (ML-DSA-65), O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+-       cert_ml_dsa_CA ml-dsa-65 $CADIR TestCA-ml-dsa-65 -x "CTu,CTu,CTu" ${D_CA} "1"
+-#
++	ALL_CU_SUBJECT="CN=NSS Test CA (ML-DSA-65), O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-65 $CADIR TestCA-ml-dsa-65 -x "CTu,CTu,CTu" ${D_CA} "1"
+ #       Create ML-DSA-65 versions of the intermediate CA certs
+-       ALL_CU_SUBJECT="CN=NSS Server Test CA (ML-DSA-65), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
+-       cert_ml_dsa_CA ml-dsa-65 $SERVER_CADIR serverCA-ml-dsa-65 -x "Cu,Cu,Cu" ${D_SERVER_CA} "2"
+-
+-       ALL_CU_SUBJECT="CN=NSS Client Test CA (ML-DSA-65), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
+-       cert_m_ldsa_CA ml-dsa-44 $CLIENT_CADIR clientCA-dsa -x "Tu,Cu,Cu" ${D_CLIENT_CA} "5"
++	ALL_CU_SUBJECT="CN=NSS Server Test CA (ML-DSA-65), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-65 $SERVER_CADIR serverCA-ml-dsa-65 -x "Cu,Cu,Cu" ${D_SERVER_CA} "2"
++	ALL_CU_SUBJECT="CN=NSS Chain1 Server Test CA (ML-DSA-65), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-65 $SERVER_CADIR chain-1-serverCA-ml-dsa-65 "-c serverCA-ml-dsa-65" "u,u,u" ${D_SERVER_CA} "3"
++	ALL_CU_SUBJECT="CN=NSS Chain2 Server Test CA (ML-DSA-65), O=BOGUS NSS, L=Santa Clara, ST=California, C=US" 
++	cert_ml_dsa_CA ml-dsa-65 $SERVER_CADIR chain-2-serverCA-ml-dsa-65 "-c chain-1-serverCA-ml-dsa-65" "u,u,u" ${D_SERVER_CA} "4"
++#
++
++	ALL_CU_SUBJECT="CN=NSS Client Test CA (ML-DSA-65), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-65 $CLIENT_CADIR clientCA-ml-dsa-65 -x "Tu,Cu,Cu" ${D_CLIENT_CA} "5"
++	ALL_CU_SUBJECT="CN=NSS Chain1 Client Test CA (ML-DSA-65), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-65 $CLIENT_CADIR chain-1-clientCA-ml-dsa-65 "-c clientCA-ml-dsa-65" "u,u,u" ${D_CLIENT_CA} "6"
++	ALL_CU_SUBJECT="CN=NSS Chain2 Client Test CA (ML-DSA-65), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-65 $CLIENT_CADIR chain-2-clientCA-ml-dsa-65 "-c chain-1-clientCA-ml-dsa-65" "u,u,u" ${D_CLIENT_CA} "7"
+ #
+ #       Create ML-DSA-87 version of TestCA
+-       ALL_CU_SUBJECT="CN=NSS Test CA (ML-DSA-87), O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+-       cert_ml_dsa_CA ml-dsa-87 $CADIR TestCA-ml-dsa-87 -x "CTu,CTu,CTu" ${D_CA} "1"
++	ALL_CU_SUBJECT="CN=NSS Test CA (ML-DSA-87), O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-87 $CADIR TestCA-ml-dsa-87 -x "CTu,CTu,CTu" ${D_CA} "1"
+ #
+ #       Create ML-DSA-87 versions of the intermediate CA certs
+-       ALL_CU_SUBJECT="CN=NSS Server Test CA (ML-DSA-87), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
+-       cert_ml_dsa_CA ml-dsa-87 $SERVER_CADIR serverCA-ml-dsa-87 -x "Cu,Cu,Cu" ${D_SERVER_CA} "2"
+-
+-       ALL_CU_SUBJECT="CN=NSS Client Test CA (ML-DSA-87), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
+-       cert_m_ldsa_CA ml-dsa-87 $CLIENT_CADIR clientCA-dsa -x "Tu,Cu,Cu" ${D_CLIENT_CA} "5"
++	ALL_CU_SUBJECT="CN=NSS Server Test CA (ML-DSA-87), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-87 $SERVER_CADIR serverCA-ml-dsa-87 -x "Cu,Cu,Cu" ${D_SERVER_CA} "2"
++	ALL_CU_SUBJECT="CN=NSS Chain1 Server Test CA (ML-DSA-87), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-87 $SERVER_CADIR chain-1-serverCA-ml-dsa-87 "-c serverCA-ml-dsa-87" "u,u,u" ${D_SERVER_CA} "3"
++	ALL_CU_SUBJECT="CN=NSS Chain2 Server Test CA (ML-DSA-87), O=BOGUS NSS, L=Santa Clara, ST=California, C=US" 
++	cert_ml_dsa_CA ml-dsa-87 $SERVER_CADIR chain-2-serverCA-ml-dsa-87 "-c chain-1-serverCA-ml-dsa-87" "u,u,u" ${D_SERVER_CA} "4"
++#
++
++	ALL_CU_SUBJECT="CN=NSS Client Test CA (ML-DSA-87), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-87 $CLIENT_CADIR clientCA-ml-dsa-87 -x "Tu,Cu,Cu" ${D_CLIENT_CA} "5"
++	ALL_CU_SUBJECT="CN=NSS Chain1 Client Test CA (ML-DSA-87), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-87 $CLIENT_CADIR chain-1-clientCA-ml-dsa-87 "-c clientCA-ml-dsa-87" "u,u,u" ${D_CLIENT_CA} "6"
++	ALL_CU_SUBJECT="CN=NSS Chain2 Client Test CA (ML-DSA-87), O=BOGUS NSS, L=Santa Clara, ST=California, C=US"
++	cert_ml_dsa_CA ml-dsa-87 $CLIENT_CADIR chain-2-clientCA-ml-dsa-87 "-c chain-1-clientCA-ml-dsa-87" "u,u,u" ${D_CLIENT_CA} "7"
+ 
+     fi
+ 
+ #
+ #       Create RSA-PSS version of TestCA
+ 	ALL_CU_SUBJECT="CN=NSS Test CA (RSA-PSS), O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+ 	cert_rsa_pss_CA $CADIR TestCA-rsa-pss -x "CTu,CTu,CTu" ${D_CA} "1" SHA256
+ 	rm $CADIR/rsapssroot.cert
+@@ -1184,16 +1204,17 @@ cert_extended_ssl()
+   CU_ACTION="Import $CERTNAME's Cert  -t u,u,u (ext)"
+   certu -A -n "$CERTNAME" -t "u,u,u" -d "${PROFILEDIR}" -f "${R_PWFILE}" \
+         -i "${CERTNAME}.cert" 2>&1
+ 
+   CU_ACTION="Import Client Root CA -t T,, for $CERTNAME (ext.)"
+   certu -A -n "clientCA" -t "T,," -f "${R_PWFILE}" -d "${PROFILEDIR}" \
+           -i "${CLIENT_CADIR}/clientCA.ca.cert" 2>&1
+ 
++    if [ -z "$NSS_DISABLE_DSA" ]; then
+ #
+ #     Repeat the above for DSA certs
+ #
+       CU_ACTION="Generate DSA Cert Request for $CERTNAME (ext)"
+       CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-dsa@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+       certu -R -d "${PROFILEDIR}" -k dsa -f "${R_PWFILE}" \
+ 	  -z "${R_NOISE_FILE}" -o req 2>&1
+ 
+@@ -1227,16 +1248,82 @@ cert_extended_ssl()
+       CU_ACTION="Import $CERTNAME's mixed DSA Cert  -t u,u,u (ext)"
+       certu -A -n "${CERTNAME}-dsamixed" -t "u,u,u" -d "${PROFILEDIR}" \
+ 	  -f "${R_PWFILE}" -i "${CERTNAME}-dsamixed.cert" 2>&1
+ 
+ #      CU_ACTION="Import Client mixed DSA Root CA -t T,, for $CERTNAME (ext.)"
+ #      certu -A -n "clientCA-dsamixed" -t "T,," -f "${R_PWFILE}" \
+ #	  -d "${PROFILEDIR}" -i "${CLIENT_CADIR}/clientCA-dsamixed.ca.cert" \
+ #	  2>&1
++     fi
++    if [ -n "$NSS_ENABLE_ML_DSA" ]; then
++#
++#     Repeat the above for ML-DSA-44 certs
++#
++      CU_ACTION="Generate ML-DSA-44 Cert Request for $CERTNAME (ext)"
++      CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-44@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++      certu -R -d "${PROFILEDIR}" -k mldsa -q ml-dsa-44 -f "${R_PWFILE}" \
++	  -z "${R_NOISE_FILE}" -o req 2>&1
++
++      CU_ACTION="Sign ${CERTNAME}'s ML-DSA-44 Request (ext)"
++      cp ${CERTDIR}/req ${SERVER_CADIR}
++      certu -C -c "chain-2-serverCA-ml-dsa-44" -m 200 -v 60 -d "${P_SERVER_CADIR}" \
++          -i req -o "${CERTNAME}-ml-dsa-44.cert" -f "${R_PWFILE}" 2>&1
++
++      CU_ACTION="Import $CERTNAME's ML-DSA-44 Cert  -t u,u,u (ext)"
++      certu -A -n "${CERTNAME}-ml-dsa-44" -t "u,u,u" -d "${PROFILEDIR}" \
++	  -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-44.cert" 2>&1
++
++      CU_ACTION="Import Client ML-DSA-44 Root CA -t T,, for $CERTNAME (ext.)"
++      certu -A -n "clientCA-ml-dsa-44" -t "T,," -f "${R_PWFILE}" -d "${PROFILEDIR}" \
++          -i "${CLIENT_CADIR}/clientCA-ml-dsa-44.ca.cert" 2>&1
++#
++#     Repeat the above for ML-DSA-65 certs
++#
++      CU_ACTION="Generate ML-DSA-65 Cert Request for $CERTNAME (ext)"
++      CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-65@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++      certu -R -d "${PROFILEDIR}" -k mldsa -q ml-dsa-65 -f "${R_PWFILE}" \
++	  -z "${R_NOISE_FILE}" -o req 2>&1
++
++      CU_ACTION="Sign ${CERTNAME}'s ML-DSA-65 Request (ext)"
++      cp ${CERTDIR}/req ${SERVER_CADIR}
++      certu -C -c "chain-2-serverCA-ml-dsa-65" -m 200 -v 60 -d "${P_SERVER_CADIR}" \
++          -i req -o "${CERTNAME}-ml-dsa-65.cert" -f "${R_PWFILE}" 2>&1
++
++      CU_ACTION="Import $CERTNAME's ML-DSA-65 Cert  -t u,u,u (ext)"
++      certu -A -n "${CERTNAME}-ml-dsa-65" -t "u,u,u" -d "${PROFILEDIR}" \
++	  -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-65.cert" 2>&1
++
++      CU_ACTION="Import Client ML-DSA-65 Root CA -t T,, for $CERTNAME (ext.)"
++      certu -A -n "clientCA-ml-dsa-65" -t "T,," -f "${R_PWFILE}" -d "${PROFILEDIR}" \
++          -i "${CLIENT_CADIR}/clientCA-ml-dsa-65.ca.cert" 2>&1
++#
++#     Repeat the above for ML-DSA-87 certs
++#
++      CU_ACTION="Generate ML-DSA-87 Cert Request for $CERTNAME (ext)"
++      CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-87@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++      certu -R -d "${PROFILEDIR}" -k mldsa -q ml-dsa-87 -f "${R_PWFILE}" \
++	  -z "${R_NOISE_FILE}" -o req 2>&1
++
++      CU_ACTION="Sign ${CERTNAME}'s ML-DSA-87 Request (ext)"
++      cp ${CERTDIR}/req ${SERVER_CADIR}
++      certu -C -c "chain-2-serverCA-ml-dsa-87" -m 200 -v 60 -d "${P_SERVER_CADIR}" \
++          -i req -o "${CERTNAME}-ml-dsa-87.cert" -f "${R_PWFILE}" 2>&1
++
++      CU_ACTION="Import $CERTNAME's ML-DSA-87 Cert  -t u,u,u (ext)"
++      certu -A -n "${CERTNAME}-ml-dsa-87" -t "u,u,u" -d "${PROFILEDIR}" \
++	  -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-87.cert" 2>&1
++
++      CU_ACTION="Import Client ML-DSA-87 Root CA -t T,, for $CERTNAME (ext.)"
++      certu -A -n "clientCA-ml-dsa-87" -t "T,," -f "${R_PWFILE}" -d "${PROFILEDIR}" \
++          -i "${CLIENT_CADIR}/clientCA-ml-dsa-87.ca.cert" 2>&1
++#
++#     done with ML-DSA certs
++#
++     fi
+ 
+ #
+ #     Repeat the above for EC certs
+ #
+       EC_CURVE="secp256r1"
+       CU_ACTION="Generate EC Cert Request for $CERTNAME (ext)"
+       CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ec@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+       certu -R -d "${PROFILEDIR}" -k ec -q "${EC_CURVE}" -f "${R_PWFILE}" \
+@@ -1280,34 +1367,34 @@ cert_extended_ssl()
+ #	  2>&1
+ 
+   # Check that a repeated import with a different nickname doesn't change the
+   # nickname of the existing cert (bug 1458518).
+   # We want to search for the results using grep, to avoid subset matches,
+   # we'll use one of the longer nicknames for testing.
+   # (Because "grep -w hostname" matches "grep -w hostname-dsamixed")
+   MYDBPASS="-d ${PROFILEDIR} -f ${R_PWFILE}"
+-  TESTNAME="Ensure there's exactly one match for ${CERTNAME}-dsamixed"
+-  cert_check_nickname_exists "$MYDBPASS" "${CERTNAME}-dsamixed" 0 1 "${TESTNAME}"
+-
+-  CU_ACTION="Repeated import of $CERTNAME's mixed DSA Cert with different nickname"
+-  certu -A -n "${CERTNAME}-repeated-dsamixed" -t "u,u,u" -d "${PROFILEDIR}" \
+-        -f "${R_PWFILE}" -i "${CERTNAME}-dsamixed.cert" 2>&1
+-
+-  TESTNAME="Ensure there's still exactly one match for ${CERTNAME}-dsamixed"
+-  cert_check_nickname_exists "$MYDBPASS" "${CERTNAME}-dsamixed" 0 1 "${TESTNAME}"
+-
+-  TESTNAME="Ensure there's zero matches for ${CERTNAME}-repeated-dsamixed"
+-  cert_check_nickname_exists "$MYDBPASS" "${CERTNAME}-repeated-dsamixed" 0 0 "${TESTNAME}"
++  TESTNAME="Ensure there's exactly one match for ${CERTNAME}-ecmixed"
++  cert_check_nickname_exists "$MYDBPASS" "${CERTNAME}-ecmixed" 0 1 "${TESTNAME}"
++
++  CU_ACTION="Repeated import of $CERTNAME's mixed EC Cert with different nickname"
++  certu -A -n "${CERTNAME}-repeated-ecmixed" -t "u,u,u" -d "${PROFILEDIR}" \
++        -f "${R_PWFILE}" -i "${CERTNAME}-ecmixed.cert" 2>&1
++
++  TESTNAME="Ensure there's still exactly one match for ${CERTNAME}-ecmixed"
++  cert_check_nickname_exists "$MYDBPASS" "${CERTNAME}-ecmixed" 0 1 "${TESTNAME}"
++
++  TESTNAME="Ensure there's zero matches for ${CERTNAME}-repeated-ecmixed"
++  cert_check_nickname_exists "$MYDBPASS" "${CERTNAME}-repeated-ecmixed" 0 0 "${TESTNAME}"
+ 
+   echo "Importing all the server's own CA chain into the servers DB"
+   for CA in `find ${SERVER_CADIR} -name "?*.ca.cert"` ;
+   do
+       N=`basename $CA | sed -e "s/.ca.cert//"`
+-      if [ $N = "serverCA" -o $N = "serverCA-ec" -o $N = "serverCA-dsa" ] ; then
++      if [ $N = "serverCA" -o $N = "serverCA-ec" -o $N = "serverCA-dsa" -o $N = "serverCA-ml-dsa-44" -o $N = "serverCA-ml-dsa-65" -o $N = "serverCA-ml-dsa-87"  ] ; then
+           T="-t C,C,C"
+       else
+           T="-t u,u,u"
+       fi
+       CU_ACTION="Import $N CA $T for $CERTNAME (ext.) "
+       certu -A -n $N  $T -f "${R_PWFILE}" -d "${PROFILEDIR}" \
+           -i "${CA}" 2>&1
+   done
+@@ -1336,16 +1423,17 @@ cert_extended_ssl()
+         -i "${CERTNAME}.cert" 2>&1
+   CU_ACTION="Import Server Root CA -t C,C,C for $CERTNAME (ext.)"
+   certu -A -n "serverCA" -t "C,C,C" -f "${R_PWFILE}" -d "${PROFILEDIR}" \
+           -i "${SERVER_CADIR}/serverCA.ca.cert" 2>&1
+ 
+ #
+ #     Repeat the above for DSA certs
+ #
++  if [ -z "$NSS_DISABLE_DSA" ]; then
+       CU_ACTION="Generate DSA Cert Request for $CERTNAME (ext)"
+       CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-dsa@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+       certu -R -d "${PROFILEDIR}" -k dsa -f "${R_PWFILE}" \
+ 	  -z "${R_NOISE_FILE}" -o req 2>&1
+ 
+       CU_ACTION="Sign ${CERTNAME}'s DSA Request (ext)"
+       cp ${CERTDIR}/req ${CLIENT_CADIR}
+       certu -C -c "chain-2-clientCA-dsa" -m 300 -v 60 -d "${P_CLIENT_CADIR}" \
+@@ -1379,16 +1467,80 @@ cert_extended_ssl()
+ 	  -f "${R_PWFILE}" -i "${CERTNAME}-dsamixed.cert" 2>&1
+ 
+ #      CU_ACTION="Import Server DSA Root CA -t C,C,C for $CERTNAME (ext.)"
+ #      certu -A -n "serverCA-dsa" -t "C,C,C" -f "${R_PWFILE}" \
+ #	  -d "${PROFILEDIR}" -i "${SERVER_CADIR}/serverCA-dsa.ca.cert" 2>&1
+ #
+ # done with mixed DSA certs
+ #
++    fi
++#
++#     Repeat the above for ML-DSA certs
++#
++  if [ -n "$NSS_ENABLE_ML_DSA" ]; then
++#     ML-DSA-44 certs
++      CU_ACTION="Generate ML-DSA-44 Cert Request for $CERTNAME (ext)"
++      CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-44@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++      certu -R -d "${PROFILEDIR}" -k mldsa -q ml-dsa-44 -f "${R_PWFILE}" \
++	  -z "${R_NOISE_FILE}" -o req 2>&1
++
++      CU_ACTION="Sign ${CERTNAME}'s ML-DSA-44 Request (ext)"
++      cp ${CERTDIR}/req ${CLIENT_CADIR}
++      certu -C -c "chain-2-clientCA-ml-dsa-44" -m 300 -v 60 -d "${P_CLIENT_CADIR}" \
++          -i req -o "${CERTNAME}-ml-dsa-44.cert" -f "${R_PWFILE}" 2>&1
++
++      CU_ACTION="Import $CERTNAME's ML-DSA-44 Cert -t u,u,u (ext)"
++      certu -A -n "${CERTNAME}-ml-dsa-44" -t "u,u,u" -d "${PROFILEDIR}" \
++	  -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-44.cert" 2>&1
++
++      CU_ACTION="Import Server ML-DSA-44 Root CA -t C,C,C for $CERTNAME (ext.)"
++      certu -A -n "serverCA-ml-dsa-44" -t "C,C,C" -f "${R_PWFILE}" \
++	  -d "${PROFILEDIR}" -i "${SERVER_CADIR}/serverCA-ml-dsa-44.ca.cert" 2>&1
++#     ML-DSA-65 certs
++      CU_ACTION="Generate ML-DSA-65 Cert Request for $CERTNAME (ext)"
++      CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-65@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++      certu -R -d "${PROFILEDIR}" -k mldsa -q ml-dsa-65 -f "${R_PWFILE}" \
++	  -z "${R_NOISE_FILE}" -o req 2>&1
++
++      CU_ACTION="Sign ${CERTNAME}'s ML-DSA-65 Request (ext)"
++      cp ${CERTDIR}/req ${CLIENT_CADIR}
++      certu -C -c "chain-2-clientCA-ml-dsa-65" -m 300 -v 60 -d "${P_CLIENT_CADIR}" \
++          -i req -o "${CERTNAME}-ml-dsa-65.cert" -f "${R_PWFILE}" 2>&1
++
++      CU_ACTION="Import $CERTNAME's ML-DSA-65 Cert -t u,u,u (ext)"
++      certu -A -n "${CERTNAME}-ml-dsa-65" -t "u,u,u" -d "${PROFILEDIR}" \
++	  -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-65.cert" 2>&1
++
++      CU_ACTION="Import Server ML-DSA-65 Root CA -t C,C,C for $CERTNAME (ext.)"
++      certu -A -n "serverCA-ml-dsa-65" -t "C,C,C" -f "${R_PWFILE}" \
++	  -d "${PROFILEDIR}" -i "${SERVER_CADIR}/serverCA-ml-dsa-65.ca.cert" 2>&1
++#     ML-DSA-87 certs
++      CU_ACTION="Generate ML-DSA-87 Cert Request for $CERTNAME (ext)"
++      CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ml-dsa-87@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
++      certu -R -d "${PROFILEDIR}" -k mldsa -q ml-dsa-87 -f "${R_PWFILE}" \
++	  -z "${R_NOISE_FILE}" -o req 2>&1
++
++      CU_ACTION="Sign ${CERTNAME}'s ML-DSA-87 Request (ext)"
++      cp ${CERTDIR}/req ${CLIENT_CADIR}
++      certu -C -c "chain-2-clientCA-ml-dsa-87" -m 300 -v 60 -d "${P_CLIENT_CADIR}" \
++          -i req -o "${CERTNAME}-ml-dsa-87.cert" -f "${R_PWFILE}" 2>&1
++
++      CU_ACTION="Import $CERTNAME's ML-DSA-87 Cert -t u,u,u (ext)"
++      certu -A -n "${CERTNAME}-ml-dsa-87" -t "u,u,u" -d "${PROFILEDIR}" \
++	  -f "${R_PWFILE}" -i "${CERTNAME}-ml-dsa-87.cert" 2>&1
++
++      CU_ACTION="Import Server ML-DSA-87 Root CA -t C,C,C for $CERTNAME (ext.)"
++      certu -A -n "serverCA-ml-dsa-87" -t "C,C,C" -f "${R_PWFILE}" \
++	  -d "${PROFILEDIR}" -i "${SERVER_CADIR}/serverCA-ml-dsa-87.ca.cert" 2>&1
++#
++# done with ML-DSA certs
++#
++#
++    fi
+ 
+ #
+ #     Repeat the above for EC certs
+ #
+       CU_ACTION="Generate EC Cert Request for $CERTNAME (ext)"
+       CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}-ec@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+       certu -R -d "${PROFILEDIR}" -k ec -q "${EC_CURVE}" -f "${R_PWFILE}" \
+ 	  -z "${R_NOISE_FILE}" -o req 2>&1
+@@ -1431,17 +1583,17 @@ cert_extended_ssl()
+ #
+ # done with mixed EC certs
+ #
+ 
+   echo "Importing all the client's own CA chain into the servers DB"
+   for CA in `find ${CLIENT_CADIR} -name "?*.ca.cert"` ;
+   do
+       N=`basename $CA | sed -e "s/.ca.cert//"`
+-      if [ $N = "clientCA" -o $N = "clientCA-ec" -o $N = "clientCA-dsa" ] ; then
++      if [ $N = "clientCA" -o $N = "clientCA-ec" -o $N = "clientCA-dsa" -o $N = "clientCA-ml-dsa-44" -o $N = "clientCA-ml-dsa-65" -o $N = "clientCA-ml-dsa-87" ] ; then
+           T="-t T,C,C"
+       else
+           T="-t u,u,u"
+       fi
+       CU_ACTION="Import $N CA $T for $CERTNAME (ext.)"
+       certu -A -n $N  $T -f "${R_PWFILE}" -d "${PROFILEDIR}" \
+           -i "${CA}" 2>&1
+   done
+@@ -1469,20 +1621,22 @@ cert_ssl()
+   echo "$SCRIPTNAME: Creating Server CA Issued Certificate for \\"
+   echo "             ${HOSTADDR}-sni --------------------------------"
+   CERTSERIAL=101
+   CERTNAME="${HOST}-sni${sniCertCount}.${DOMSUF}"
+   cert_add_cert 
+   CU_ACTION="Modify trust attributes of Root CA -t TC,TC,TC"
+   certu -M -n "TestCA" -t "TC,TC,TC" -d ${PROFILEDIR} -f "${R_PWFILE}"
+ 
++  if [ -z "$NSS_DISABLE_DSA" ]; then
+   CU_ACTION="Modify trust attributes of DSA Root CA -t TC,TC,TC"
+   certu -M -n "TestCA-dsa" -t "TC,TC,TC" -d ${PROFILEDIR} -f "${R_PWFILE}"
+-
+-  if [ -n "$NSS_CERT_ENABLE_ML_DSA" ]; then
++  fi
++
++  if [ -n "$NSS_ENABLE_ML_DSA" ]; then
+   CU_ACTION="Modify trust attributes of ML-DSA-44 Root CA -t TC,TC,TC"
+   certu -M -n "TestCA-ml-dsa-44" -t "TC,TC,TC" -d ${PROFILEDIR} -f "${R_PWFILE}"
+   CU_ACTION="Modify trust attributes of ML-DSA-65 Root CA -t TC,TC,TC"
+   certu -M -n "TestCA-ml-dsa-65" -t "TC,TC,TC" -d ${PROFILEDIR} -f "${R_PWFILE}"
+   CU_ACTION="Modify trust attributes of ML-DSA-87 Root CA -t TC,TC,TC"
+   certu -M -n "TestCA-ml-dsa-87" -t "TC,TC,TC" -d ${PROFILEDIR} -f "${R_PWFILE}"
+   fi
+ 
+@@ -1588,19 +1742,26 @@ MODSCRIPT
+   RETEXPECTED=255
+   certu -W -d "${PROFILEDIR}" -f "${R_FIPSPWFILE}" -@ "${R_FIPSBADPWFILE}" 2>&1
+   CU_ACTION="Attempt to generate a key with exponent of 3 (too small)"
+   certu -G -k rsa -g 2048 -y 3 -d "${PROFILEDIR}" -z ${R_NOISE_FILE} -f "${R_FIPSPWFILE}" 
+   CU_ACTION="Attempt to generate a key with exponent of 17 (too small)"
+   certu -G -k rsa -g 2048 -y 17 -d "${PROFILEDIR}" -z ${R_NOISE_FILE} -f "${R_FIPSPWFILE}" 
+   RETEXPECTED=0
+ 
++  if [ -z "$NSS_DISABLE_DSA" ]; then
++      FIPS_KEY="-k dsa"
++  elif [ -n "$NSS_ENABLE_ML_DSA" ]; then
++      FIPS_KEY="-k mldsa -q ml-dsa-44"
++  else
++      FIPS_KEY="-k ec -q nistp256"
++  fi
+   CU_ACTION="Generate Certificate for ${CERTNAME}"
+   CU_SUBJECT="CN=${CERTNAME}, E=fips@example.com, O=BOGUS NSS, OU=FIPS PUB 140, L=Mountain View, ST=California, C=US"
+-  certu -S -n ${FIPSCERTNICK} -x -t "Cu,Cu,Cu" -d "${PROFILEDIR}" -f "${R_FIPSPWFILE}" -k dsa -v 600 -m 500 -z "${R_NOISE_FILE}" 2>&1
++  certu -S -n ${FIPSCERTNICK} -x -t "Cu,Cu,Cu" -d "${PROFILEDIR}" -f "${R_FIPSPWFILE}" ${FIPS_KEY} -v 600 -m 500 -z "${R_NOISE_FILE}" 2>&1
+   if [ "$RET" -eq 0 ]; then
+     cert_log "SUCCESS: FIPS passed"
+   fi
+ 
+ }
+ 
+ ########################## cert_rsa_exponent #################################
+ # local shell function to verify small rsa exponent can be used (only
+@@ -2022,30 +2183,68 @@ addext reasonCode 0 4
+ addext issuerAltNames 0 "rfc822Name:caemail@ca.com|dnsName:ca.com|directoryName:CN=NSS Test CA,O=BOGUS NSS,L=Mountain View,ST=California,C=US|URI:http://ca.com|ipAddress:192.168.0.1|registerID=reg CA"
+ EOF_CRLINI
+ # This extension should be added to the list, but currently nss has bug
+ #addext authKeyId 0 "CN=NSS Test CA,O=BOGUS NSS,L=Mountain View,ST=California,C=US" 1
+   CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
+   chmod 600 ${CRL_FILE_GRP_1}_or
+ 
+ 
++  if [ -z "$NSS_DISABLE_DSA" ]; then
+       CU_ACTION="Generating CRL (DSA) for range ${CRL_GRP_1_BEGIN}-${CRL_GRP_END} TestCA-dsa authority"
+ 
+ #     Until Bug 292285 is resolved, do not encode x400 Addresses. After
+ #     the bug is resolved, reintroduce "x400Address:x400Address" within
+ #     addext issuerAltNames ...
+       crlu -q -d $CADIR -G -n "TestCA-dsa" -f ${R_PWFILE} \
+ 	  -o ${CRL_FILE_GRP_1}_or-dsa <<EOF_CRLINI
+ update=$CRLUPDATE
+ addcert ${CRL_GRP_1_BEGIN}-${CRL_GRP_END_} $CRL_GRP_DATE
+ addext reasonCode 0 4
+ addext issuerAltNames 0 "rfc822Name:ca-dsaemail@ca.com|dnsName:ca-dsa.com|directoryName:CN=NSS Test CA (DSA),O=BOGUS NSS,L=Mountain View,ST=California,C=US|URI:http://ca-dsa.com|ipAddress:192.168.0.1|registerID=reg CA (DSA)"
+ EOF_CRLINI
+       CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
+       chmod 600 ${CRL_FILE_GRP_1}_or-dsa
++  fi
++
++if [ -n "$NSS_ENABLE_ML_DSA" ]; then
++      CU_ACTION="Generating CRL (ML-DSA-44) for range ${CRL_GRP_1_BEGIN}-${CRL_GRP_END} TestCA-ml-dsa-44 authority"
++#     Until Bug 292285 is resolved, do not encode x400 Addresses. After
++#     the bug is resolved, reintroduce "x400Address:x400Address" within
++#     addext issuerAltNames ...
++      crlu -q -d $CADIR -G -n "TestCA-ml-dsa-44" -f ${R_PWFILE} \
++	  -o ${CRL_FILE_GRP_1}_or-ml-dsa-44 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_1_BEGIN}-${CRL_GRP_END_} $CRL_GRP_DATE
++addext reasonCode 0 4
++addext issuerAltNames 0 "rfc822Name:ca-ml-dsa-44email@ca.com|dnsName:ca-ml-dsa-44.com|directoryName:CN=NSS Test CA (ML-DSA-44),O=BOGUS NSS,L=Mountain View,ST=California,C=US|URI:http://ca-dsa.com|ipAddress:192.168.0.1|registerID=reg CA (ML-DSA-44)"
++EOF_CRLINI
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      chmod 600 ${CRL_FILE_GRP_1}_or-ml-dsa-44
++      CU_ACTION="Generating CRL (ML-DSA-65) for range ${CRL_GRP_1_BEGIN}-${CRL_GRP_END} TestCA-ml-dsa-65 authority"
++      crlu -q -d $CADIR -G -n "TestCA-ml-dsa-65" -f ${R_PWFILE} \
++	  -o ${CRL_FILE_GRP_1}_or-ml-dsa-65 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_1_BEGIN}-${CRL_GRP_END_} $CRL_GRP_DATE
++addext reasonCode 0 4
++addext issuerAltNames 0 "rfc822Name:ca-ml-dsa-65email@ca.com|dnsName:ca-ml-dsa-65.com|directoryName:CN=NSS Test CA (ML-DSA-65),O=BOGUS NSS,L=Mountain View,ST=California,C=US|URI:http://ca-dsa.com|ipAddress:192.168.0.1|registerID=reg CA (ML-DSA-65)"
++EOF_CRLINI
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      chmod 600 ${CRL_FILE_GRP_1}_or-ml-dsa-65
++      CU_ACTION="Generating CRL (ML-DSA-87) for range ${CRL_GRP_1_BEGIN}-${CRL_GRP_END} TestCA-ml-dsa-87 authority"
++      crlu -q -d $CADIR -G -n "TestCA-ml-dsa-87" -f ${R_PWFILE} \
++	  -o ${CRL_FILE_GRP_1}_or-ml-dsa-87 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_1_BEGIN}-${CRL_GRP_END_} $CRL_GRP_DATE
++addext reasonCode 0 4
++addext issuerAltNames 0 "rfc822Name:ca-ml-dsa-87email@ca.com|dnsName:ca-ml-dsa-87.com|directoryName:CN=NSS Test CA (ML-DSA-87),O=BOGUS NSS,L=Mountain View,ST=California,C=US|URI:http://ca-dsa.com|ipAddress:192.168.0.1|registerID=reg CA (ML-DSA-87)"
++EOF_CRLINI
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      chmod 600 ${CRL_FILE_GRP_1}_or-ml-dsa-87
++fi
+ 
+ 
+ 
+       CU_ACTION="Generating CRL (ECC) for range ${CRL_GRP_1_BEGIN}-${CRL_GRP_END} TestCA-ec authority"
+ 
+ #     Until Bug 292285 is resolved, do not encode x400 Addresses. After
+ #     the bug is resolved, reintroduce "x400Address:x400Address" within
+ #     addext issuerAltNames ...
+@@ -2072,25 +2271,65 @@ EOF_CRLINI
+ update=$CRLUPDATE
+ addcert ${CRL_GRP_END} $CRL_GRP_DATE
+ EOF_CRLINI
+   CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
+   chmod 600 ${CRL_FILE_GRP_1}_or1
+   TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or"
+ 
+ 
++  if [ -z "$NSS_DISABLE_DSA" ]; then
+   CU_ACTION="Modify CRL (DSA) by adding one more cert"
+   crlu -d $CADIR -M -n "TestCA-dsa" -f ${R_PWFILE} -o ${CRL_FILE_GRP_1}_or1-dsa \
+       -i ${CRL_FILE_GRP_1}_or-dsa <<EOF_CRLINI
+ update=$CRLUPDATE
+ addcert ${CRL_GRP_END} $CRL_GRP_DATE
+ EOF_CRLINI
+   CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
+   chmod 600 ${CRL_FILE_GRP_1}_or1-dsa
+   TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or-dsa"
++  fi
++if [ -n "$NSS_ENABLE_ML_DSA" ]; then
++      CU_ACTION="Modify CRL (ML-DSA-44) by adding one more cert"
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-44" -f ${R_PWFILE} \
++           -o ${CRL_FILE_GRP_1}_or1-ml-dsa-44 \
++           -i ${CRL_FILE_GRP_1}_or-ml-dsa-44 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_END} $CRL_GRP_DATE
++EOF_CRLINI
++     CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++     chmod 600 ${CRL_FILE_GRP_1}_or1-ml-dsa-44
++     TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or-ml-dsa-44"
++     CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++     chmod 600 ${CRL_FILE_GRP_1}_or1-ml-dsa-65
++     TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or-ml-dsa-65"
++      CU_ACTION="Modify CRL (ML-DSA-65) by adding one more cert"
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-65" -f ${R_PWFILE} \
++           -o ${CRL_FILE_GRP_1}_or1-ml-dsa-65 \
++           -i ${CRL_FILE_GRP_1}_or-ml-dsa-65 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_END} $CRL_GRP_DATE
++EOF_CRLINI
++     CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++     chmod 600 ${CRL_FILE_GRP_1}_or1-ml-dsa-65
++     TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or-ml-dsa-65"
++     CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++     chmod 600 ${CRL_FILE_GRP_1}_or1-ml-dsa-87
++     TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or-ml-dsa-87"
++      CU_ACTION="Modify CRL (ML-DSA-87) by adding one more cert"
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-87" -f ${R_PWFILE} \
++           -o ${CRL_FILE_GRP_1}_or1-ml-dsa-87 \
++           -i ${CRL_FILE_GRP_1}_or-ml-dsa-87 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_END} $CRL_GRP_DATE
++EOF_CRLINI
++     CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++     chmod 600 ${CRL_FILE_GRP_1}_or1-ml-dsa-87
++     TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or-ml-dsa-87"
++fi
+ 
+ 
+       CU_ACTION="Modify CRL (ECC) by adding one more cert"
+       crlu -d $CADIR -M -n "TestCA-ec" -f ${R_PWFILE} \
+ 	  -o ${CRL_FILE_GRP_1}_or1-ec -i ${CRL_FILE_GRP_1}_or-ec <<EOF_CRLINI
+ update=$CRLUPDATE
+ addcert ${CRL_GRP_END} $CRL_GRP_DATE
+ EOF_CRLINI
+@@ -2107,27 +2346,61 @@ EOF_CRLINI
+       -i ${CRL_FILE_GRP_1}_or1 <<EOF_CRLINI
+ update=$CRLUPDATE
+ rmcert  ${UNREVOKED_CERT_GRP_1}
+ EOF_CRLINI
+   chmod 600 ${CRL_FILE_GRP_1}
+   TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or1"
+ 
+ 
++  if [ -z "$NSS_DISABLE_DSA" ]; then
+   CU_ACTION="Modify CRL (DSA) by removing one cert"
+   sleep 2
+   CRLUPDATE=`date -u "+%Y%m%d%H%M%SZ"`
+-  crlu -d $CADIR -M -n "TestCA-dsa" -f ${R_PWFILE} -o ${CRL_FILE_GRP_1} \
+-      -i ${CRL_FILE_GRP_1}_or1 <<EOF_CRLINI
++  crlu -d $CADIR -M -n "TestCA-dsa" -f ${R_PWFILE} -o ${CRL_FILE_GRP_1}-dsa \
++      -i ${CRL_FILE_GRP_1}_or1-dsa <<EOF_CRLINI
++update=$CRLUPDATE
++rmcert  ${UNREVOKED_CERT_GRP_1}
++EOF_CRLINI
++  chmod 600 ${CRL_FILE_GRP_1}-dsa
++  TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or1-dsa"
++  fi
++
++if [ -n "$NSS_ENABLE_ML_DSA" ]; then
++      CU_ACTION="Modify CRL (ML-DSA-44) by removing one cert"
++      sleep 2
++      CRLUPDATE=`date -u "+%Y%m%d%H%M%SZ"`
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-44" -f ${R_PWFILE} -o ${CRL_FILE_GRP_1}-ml-dsa-44 \
++           -i ${CRL_FILE_GRP_1}_or1-ml-dsa-44 <<EOF_CRLINI
+ update=$CRLUPDATE
+ rmcert  ${UNREVOKED_CERT_GRP_1}
+ EOF_CRLINI
+-  chmod 600 ${CRL_FILE_GRP_1}
+-  TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or1-dsa"
+-
++      chmod 600 ${CRL_FILE_GRP_1}-ml-dsa-44
++      TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or1-ml-dsa-44"
++      CU_ACTION="Modify CRL (ML-DSA-65) by removing one cert"
++      sleep 2
++      CRLUPDATE=`date -u "+%Y%m%d%H%M%SZ"`
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-65" -f ${R_PWFILE} -o ${CRL_FILE_GRP_1}-ml-dsa-65 \
++           -i ${CRL_FILE_GRP_1}_or1-ml-dsa-65 <<EOF_CRLINI
++update=$CRLUPDATE
++rmcert  ${UNREVOKED_CERT_GRP_1}
++EOF_CRLINI
++      chmod 600 ${CRL_FILE_GRP_1}-ml-dsa-65
++      TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or1-ml-dsa-65"
++      CU_ACTION="Modify CRL (ML-DSA-87) by removing one cert"
++      sleep 2
++      CRLUPDATE=`date -u "+%Y%m%d%H%M%SZ"`
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-87" -f ${R_PWFILE} -o ${CRL_FILE_GRP_1}-ml-dsa-87 \
++           -i ${CRL_FILE_GRP_1}_or1-ml-dsa-87 <<EOF_CRLINI
++update=$CRLUPDATE
++rmcert  ${UNREVOKED_CERT_GRP_1}
++EOF_CRLINI
++      chmod 600 ${CRL_FILE_GRP_1}-ml-dsa-87
++      TEMPFILES="$TEMPFILES ${CRL_FILE_GRP_1}_or1-ml-dsa-87"
++fi
+ 
+ 
+       CU_ACTION="Modify CRL (ECC) by removing one cert"
+       crlu -d $CADIR -M -n "TestCA-ec" -f ${R_PWFILE} -o ${CRL_FILE_GRP_1}-ec \
+ 	  -i ${CRL_FILE_GRP_1}_or1-ec <<EOF_CRLINI
+ update=$CRLUPDATE
+ rmcert  ${UNREVOKED_CERT_GRP_1}
+ EOF_CRLINI
+@@ -2147,16 +2420,53 @@ EOF_CRLINI
+           -i ${CRL_FILE_GRP_1} <<EOF_CRLINI
+ update=$CRLUPDATE
+ addcert ${CRL_GRP_2_BEGIN}-${CRL_GRP_END} $CRL_GRP_DATE
+ addext invalidityDate 0 $CRLUPDATE
+ rmcert  ${UNREVOKED_CERT_GRP_2}
+ EOF_CRLINI
+   CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
+   chmod 600 ${CRL_FILE_GRP_2}
++
++if [ -n "${NSS_ENABLE_ML_DSA}" ]; then
++      CU_ACTION="Creating CRL (ML_DSA-44) for groups 1 and 2"
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-44" -f ${R_PWFILE} \
++          -o ${CRL_FILE_GRP_2}-ml-dsa-44 \
++          -i ${CRL_FILE_GRP_1}-ml-dsa-44 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_2_BEGIN}-${CRL_GRP_END} $CRL_GRP_DATE
++addext invalidityDate 0 $CRLUPDATE
++rmcert  ${UNREVOKED_CERT_GRP_2}
++EOF_CRLINI
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      chmod 600 ${CRL_FILE_GRP_2}-ml-dsa-65
++      CU_ACTION="Creating CRL (ML_DSA-65) for groups 1 and 2"
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-65" -f ${R_PWFILE} \
++          -o ${CRL_FILE_GRP_2}-ml-dsa-65 \
++          -i ${CRL_FILE_GRP_1}-ml-dsa-65 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_2_BEGIN}-${CRL_GRP_END} $CRL_GRP_DATE
++addext invalidityDate 0 $CRLUPDATE
++rmcert  ${UNREVOKED_CERT_GRP_2}
++EOF_CRLINI
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      chmod 600 ${CRL_FILE_GRP_2}-ml-dsa-65
++      CU_ACTION="Creating CRL (ML_DSA-87) for groups 1 and 2"
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-87" -f ${R_PWFILE} \
++          -o ${CRL_FILE_GRP_2}-ml-dsa-87 \
++          -i ${CRL_FILE_GRP_1}-ml-dsa-87 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_2_BEGIN}-${CRL_GRP_END} $CRL_GRP_DATE
++addext invalidityDate 0 $CRLUPDATE
++rmcert  ${UNREVOKED_CERT_GRP_2}
++EOF_CRLINI
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      chmod 600 ${CRL_FILE_GRP_2}-ml-dsa-87
++fi
++
+       CU_ACTION="Creating CRL (ECC) for groups 1 and 2"
+       crlu -d $CADIR -M -n "TestCA-ec" -f ${R_PWFILE} -o ${CRL_FILE_GRP_2}-ec \
+           -i ${CRL_FILE_GRP_1}-ec <<EOF_CRLINI
+ update=$CRLUPDATE
+ addcert ${CRL_GRP_2_BEGIN}-${CRL_GRP_END} $CRL_GRP_DATE
+ addext invalidityDate 0 $CRLUPDATE
+ rmcert  ${UNREVOKED_CERT_GRP_2}
+ EOF_CRLINI
+@@ -2178,16 +2488,49 @@ EOF_CRLINI
+             -i ${CRL_FILE_GRP_2} <<EOF_CRLINI
+ update=$CRLUPDATE
+ addcert ${CRL_GRP_3_BEGIN}-${CRL_GRP_END} $CRL_GRP_DATE
+ rmcert  ${UNREVOKED_CERT_GRP_3}
+ addext crlNumber 0 2
+ EOF_CRLINI
+   CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
+   chmod 600 ${CRL_FILE_GRP_3}
++
++if [ -n "${NSS_ENABLE_ML_DSA}" ]; then
++      CU_ACTION="Creating CRL (ML-DSA-44) for groups 1, 2 and 3"
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-44" -f ${R_PWFILE} -o ${CRL_FILE_GRP_3}-ml-dsa-44 \
++          -i ${CRL_FILE_GRP_2}-ml-dsa-44 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_3_BEGIN}-${CRL_GRP_END} $CRL_GRP_DATE
++rmcert  ${UNREVOKED_CERT_GRP_3}
++addext crlNumber 0 2
++EOF_CRLINI
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      chmod 600 ${CRL_FILE_GRP_3}-ml-dsa-44
++      CU_ACTION="Creating CRL (ML-DSA-65) for groups 1, 2 and 3"
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-65" -f ${R_PWFILE} -o ${CRL_FILE_GRP_3}-ml-dsa-65 \
++          -i ${CRL_FILE_GRP_2}-ml-dsa-65 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_3_BEGIN}-${CRL_GRP_END} $CRL_GRP_DATE
++rmcert  ${UNREVOKED_CERT_GRP_3}
++addext crlNumber 0 2
++EOF_CRLINI
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      chmod 600 ${CRL_FILE_GRP_3}-ml-dsa-65
++      CU_ACTION="Creating CRL (ML-DSA-87) for groups 1, 2 and 3"
++      crlu -d $CADIR -M -n "TestCA-ml-dsa-87" -f ${R_PWFILE} -o ${CRL_FILE_GRP_3}-ml-dsa-87 \
++          -i ${CRL_FILE_GRP_2}-ml-dsa-87 <<EOF_CRLINI
++update=$CRLUPDATE
++addcert ${CRL_GRP_3_BEGIN}-${CRL_GRP_END} $CRL_GRP_DATE
++rmcert  ${UNREVOKED_CERT_GRP_3}
++addext crlNumber 0 2
++EOF_CRLINI
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      chmod 600 ${CRL_FILE_GRP_3}-ml-dsa-87
++fi
+       CU_ACTION="Creating CRL (ECC) for groups 1, 2 and 3"
+       crlu -d $CADIR -M -n "TestCA-ec" -f ${R_PWFILE} -o ${CRL_FILE_GRP_3}-ec \
+           -i ${CRL_FILE_GRP_2}-ec <<EOF_CRLINI
+ update=$CRLUPDATE
+ addcert ${CRL_GRP_3_BEGIN}-${CRL_GRP_END} $CRL_GRP_DATE
+ rmcert  ${UNREVOKED_CERT_GRP_3}
+ addext crlNumber 0 2
+ EOF_CRLINI
+@@ -2196,16 +2539,35 @@ EOF_CRLINI
+ 
+   ############ Importing Server CA Issued CRL for certs of first group #######
+ 
+   echo "$SCRIPTNAME: Importing Server CA Issued CRL for certs ${CRL_GRP_BEGIN} trough ${CRL_GRP_END}"
+   CU_ACTION="Importing CRL for groups 1"
+   crlu -D -n TestCA  -f "${R_PWFILE}" -d "${R_SERVERDIR}"
+   crlu -I -i ${CRL_FILE} -n "TestCA" -f "${R_PWFILE}" -d "${R_SERVERDIR}"
+   CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++
++if [ -n "${NSS_ENABLE_ML_DSA}" ]; then
++      CU_ACTION="Importing CRL (ML-DSA-44) for groups 1"
++      crlu -D -n TestCA-ml-dsa-44  -f "${R_PWFILE}" -d "${R_SERVERDIR}"
++      crlu -I -i ${CRL_FILE}-ml-dsa-44 -n "TestCA-ml-dsa-44" -f "${R_PWFILE}" \
++	  -d "${R_SERVERDIR}"
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      CU_ACTION="Importing CRL (ML-DSA-65) for groups 1"
++      crlu -D -n TestCA-ml-dsa-65  -f "${R_PWFILE}" -d "${R_SERVERDIR}"
++      crlu -I -i ${CRL_FILE}-ml-dsa-65 -n "TestCA-ml-dsa-65" -f "${R_PWFILE}" \
++	  -d "${R_SERVERDIR}"
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++      CU_ACTION="Importing CRL (ML-DSA-87) for groups 1"
++      crlu -D -n TestCA-ml-dsa-87  -f "${R_PWFILE}" -d "${R_SERVERDIR}"
++      crlu -I -i ${CRL_FILE}-ml-dsa-87 -n "TestCA-ml-dsa-87" -f "${R_PWFILE}" \
++	  -d "${R_SERVERDIR}"
++      CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
++fi
++
+       CU_ACTION="Importing CRL (ECC) for groups 1"
+       crlu -D -n TestCA-ec  -f "${R_PWFILE}" -d "${R_SERVERDIR}"
+       crlu -I -i ${CRL_FILE}-ec -n "TestCA-ec" -f "${R_PWFILE}" \
+ 	  -d "${R_SERVERDIR}"
+       CRL_GEN_RES=`expr $? + $CRL_GEN_RES`
+ 
+   if [ "$CERTFAILED" != 0 -o "$CRL_GEN_RES" != 0 ] ; then
+       cert_log "ERROR: SSL CRL prep failed $CERTFAILED : $CRL_GEN_RES"
+diff --git a/tests/common/certsetup.sh b/tests/common/certsetup.sh
+--- a/tests/common/certsetup.sh
++++ b/tests/common/certsetup.sh
+@@ -32,25 +32,49 @@ make_cert() {
+     dsa) type_args=(-g 1024) ;;
+     rsa) type_args=(-g 1024) ;;
+     rsa2048) type_args=(-g 2048);type=rsa ;;
+     rsa8192) type_args=(-g 8192);type=rsa ;;
+     rsapss) type_args=(-g 1024 --pss);type=rsa ;;
+     rsapss384) type_args=(-g 1024 --pss);type=rsa;sighash=(-Z SHA384) ;;
+     rsapss512) type_args=(-g 2048 --pss);type=rsa;sighash=(-Z SHA512) ;;
+     rsapss_noparam) type_args=(-g 2048 --pss);type=rsa;sighash=() ;;
++    mldsa44) type_args=(-q ml-dsa-44);type=mldsa;sighash=() ;;
++    mldsa65) type_args=(-q ml-dsa-65);type=mldsa;sighash=() ;;
++    mldsa87) type_args=(-q ml-dsa-87);type=mldsa;sighash=() ;;
+     p256) type_args=(-q nistp256);type=ec ;;
+     p384) type_args=(-q secp384r1);type=ec ;;
+     p521) type_args=(-q secp521r1);type=ec ;;
+     rsa_ca) type_args=(-g 1024);trust='CT,CT,CT';type=rsa ;;
++    mldsa44_ca) type_args=(-q ml-dsa-44);trust='CT,CT,CT';type=mldsa ;;
++    mldsa65_ca) type_args=(-q ml-dsa-65);trust='CT,CT,CT';type=mldsa ;;
++    mldsa87_ca) type_args=(-q ml-dsa-87);trust='CT,CT,CT';type=mldsa ;;
+     rsa_chain) type_args=(-g 1024);sign=(-c rsa_ca);type=rsa;;
+     rsapss_ca) type_args=(-g 1024 --pss);trust='CT,CT,CT';type=rsa ;;
+     rsapss_chain) type_args=(-g 1024);sign=(-c rsa_pss_ca);type=rsa;;
+     rsa_ca_rsapss_chain) type_args=(-g 1024 --pss-sign);sign=(-c rsa_ca);type=rsa;;
++    mldsa44_chain) type_args=(-q ml-dsa-44);sign=(-c mldsa44_ca);type=mldsa;;
++    mldsa65_chain) type_args=(-q ml-dsa-65);sign=(-c mldsa65_ca);type=mldsa;;
++    mldsa87_chain) type_args=(-q ml-dsa-87);sign=(-c mldsa87_ca);type=mldsa;;
+     ecdh_rsa) type_args=(-q nistp256);sign=(-c rsa_ca);type=ec ;;
++    delegator_mldsa44)
++        touch empty.txt
++        type_args=(-q ml-dsa-44 --extGeneric 1.3.6.1.4.1.44363.44:not-critical:empty.txt)
++        type=mldsa
++        ;;
++    delegator_mldsa65)
++        touch empty.txt
++        type_args=(-q ml-dsa-65 --extGeneric 1.3.6.1.4.1.44363.44:not-critical:empty.txt)
++        type=mldsa
++        ;;
++    delegator_mldsa87)
++        touch empty.txt
++        type_args=(-q ml-dsa-87 --extGeneric 1.3.6.1.4.1.87363.87:not-critical:empty.txt)
++        type=mldsa
++        ;;
+     delegator_p256)
+         touch empty.txt
+         type_args=(-q nistp256 --extGeneric 1.3.6.1.4.1.44363.44:not-critical:empty.txt)
+         type=ec
+         ;;
+     delegator_rsae2048)
+         touch empty.txt
+         type_args=(-g 2048 --extGeneric 1.3.6.1.4.1.44363.44:not-critical:empty.txt)
+diff --git a/tests/ssl/ssl.sh b/tests/ssl/ssl.sh
+--- a/tests/ssl/ssl.sh
++++ b/tests/ssl/ssl.sh
+@@ -241,39 +241,54 @@ kill_selfserv()
+ # also: wait until the server is up and running
+ ########################################################################
+ start_selfserv()
+ {
+   if [ -n "$testname" ] ; then
+       echo "$SCRIPTNAME: $testname ----"
+   fi
+   if [ -z "$NO_ECC_CERTS" -o "$NO_ECC_CERTS" != "1" ] ; then
+-      ECC_OPTIONS="-e ${HOSTADDR}-ecmixed -e ${HOSTADDR}-ec"
++      ECC_OPTIONS="-e ${HOSTADDR}-ecmixed -e ${HOSTADDR}-ec "
+   else
+       ECC_OPTIONS=""
+   fi
+   if [ -z "$RSA_PSS_CERT" -o "$RSA_PSS_CERT" != "1" ] ; then
+       RSA_OPTIONS="-n ${HOSTADDR}"
+   else
+       RSA_OPTIONS="-n ${HOSTADDR}-rsa-pss"
+   fi
++  if [ -z "$NSS_DISABLE_DSA" ]; then
++      DSA_OPTIONS="-S ${HOSTADDR}-dsa "
++  else
++      DSA_OPTIONS=""
++  fi
++  # There are no differences any more between -e, and -S. They both do
++  # exactly the same thing. SSL looks at the certificate itself and decides
++  # how to use it. The -n is expecting a single value, using it here will mess
++  # up SNI test. So use -e as the most generic.
++  if [ -n "$NSS_ENABLE_ML_DSA" ]; then
++      ML_DSA_OPTIONS="-e ${HOSTADDR}-ml-dsa-44 -e ${HOSTADDR}-ml-dsa-65 -e ${HOSTADDR}-ml-dsa-87 "
++  else
++      ML_DSA_OPTIONS=""
++  fi
++
+   SERVER_VMIN=${SERVER_VMIN-ssl3}
+   SERVER_VMAX=${SERVER_VMAX-tls1.2}
+   echo "selfserv starting at `date`"
+   echo "selfserv -D -p ${PORT} -d ${P_R_SERVERDIR} ${RSA_OPTIONS} ${SERVER_OPTIONS} \\"
+-  echo "         ${ECC_OPTIONS} -S ${HOSTADDR}-dsa -w nss "$@" -i ${R_SERVERPID}\\"
++  echo "         ${ECC_OPTIONS}${DSA_OPTIONS}${ML_DSA_OPTIONS}-w nss "$@" -i ${R_SERVERPID}\\"
+   echo "         -V ${SERVER_VMIN}:${SERVER_VMAX} $verbose -H 1 &"
+   if [ ${fileout} -eq 1 ]; then
+       ${PROFTOOL} ${BINDIR}/selfserv -D -p ${PORT} -d ${P_R_SERVERDIR} ${RSA_OPTIONS} ${SERVER_OPTIONS} \
+-               ${ECC_OPTIONS} -S ${HOSTADDR}-dsa -w nss "$@" -i ${R_SERVERPID} -V ${SERVER_VMIN}:${SERVER_VMAX} $verbose -H 1 \
++               ${ECC_OPTIONS}${DSA_OPTIONS}${ML_DSA_OPTIONS}-w nss "$@" -i ${R_SERVERPID} -V ${SERVER_VMIN}:${SERVER_VMAX} $verbose -H 1 \
+                > ${SERVEROUTFILE} 2>&1 &
+       RET=$?
+   else
+       ${PROFTOOL} ${BINDIR}/selfserv -D -p ${PORT} -d ${P_R_SERVERDIR} ${RSA_OPTIONS} ${SERVER_OPTIONS} \
+-               ${ECC_OPTIONS} -S ${HOSTADDR}-dsa -w nss "$@" -i ${R_SERVERPID} -V ${SERVER_VMIN}:${SERVER_VMAX} $verbose -H 1 &
++               ${ECC_OPTIONS}${DSA_OPTIONS}${ML_DSA_OPTIONS}-w nss "$@" -i ${R_SERVERPID} -V ${SERVER_VMIN}:${SERVER_VMAX} $verbose -H 1 &
+       RET=$?
+   fi
+ 
+   # The PID $! returned by the MKS or Cygwin shell is not the PID of
+   # the real background process, but rather the PID of a helper
+   # process (sh.exe).  MKS's kill command has a bug: invoking kill
+   # on the helper process does not terminate the real background
+   # process.  Our workaround has been to have selfserv save its PID
+@@ -371,30 +386,36 @@ ssl_cov()
+       # restart it to enable ssl3
+       if [ "$VMAX" = "ssl3" -a "$VMIN" = "tls1.1" ]; then
+               kill_selfserv
+               start_selfserv $CIPHER_SUITES
+               VMIN="ssl3"
+       fi
+ 
+       TLS_GROUPS=${CLIENT_GROUPS}
++      TLS_SIG_SCHEMES=""
+       if [ "$ectype" = "MLKEM256" ]; then
+           TLS_GROUPS="secp256r1mlkem768"
++          TLS_SIG_SCHEMES="-J mldsa65"
+       elif [ "$ectype" = "MLKEM219" ]; then
+           TLS_GROUPS="x25519mlkem768"
++          TLS_SIG_SCHEMES="-J mldsa44"
+       elif [ "$ectype" = "MLKEM384" ]; then
+           TLS_GROUPS="secp384r1mlkem1024"
++          TLS_SIG_SCHEMES="-J mldsa87"
++      elif [ "$ectype" = "MLDSAECC" ]; then
++          TLS_SIG_SCHEMES="-J mldsa44"
+       fi
+       echo "TLS_GROUPS=${TLS_GROUPS}"
+ 
+-      echo "tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -I \"${TLS_GROUPS}\" -V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} \\"
++      echo "tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -I \"${TLS_GROUPS}\" ${TLS_SIG_SCHEMES} -V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} \\"
+       echo "        -f -d ${P_R_CLIENTDIR} $verbose -w nss < ${REQUEST_FILE}"
+ 
+       rm ${TMP}/$HOST.tmp.$$ 2>/dev/null
+-      ${PROFTOOL} ${BINDIR}/tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -I "${TLS_GROUPS}" -V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} -f \
++      ${PROFTOOL} ${BINDIR}/tstclnt -4 -p ${PORT} -h ${HOSTADDR} -c ${param} -I "${TLS_GROUPS}" ${TLS_SIG_SCHEMES} -V ${VMIN}:${VMAX} ${CLIENT_OPTIONS} -f \
+               -d ${P_R_CLIENTDIR} $verbose -w nss < ${REQUEST_FILE} \
+               >${TMP}/$HOST.tmp.$$  2>&1
+       ret=$?
+       cat ${TMP}/$HOST.tmp.$$
+       rm ${TMP}/$HOST.tmp.$$ 2>/dev/null
+       html_msg $ret 0 "${testname}" \
+                "produced a returncode of $ret, expected is 0"
+   done < ${SSL_COV_TMP}
+@@ -687,16 +708,22 @@ ssl_stress()
+       if [ "$ectype" = "SNI" -a "$NORM_EXT" = "Extended Test" ] ; then
+           echo "$SCRIPTNAME: skipping  $testname for $NORM_EXT"
+       elif [ "${CLIENT_MODE}" = "fips" -a "${CAUTH}" -ne 0 ] ; then
+           echo "$SCRIPTNAME: skipping  $testname (non-FIPS only)"
+       elif [ "${NOLOGIN}" -eq 0 ] && \
+            [ "${CLIENT_MODE}" = "fips" -o "$NORM_EXT" = "Extended Test" ] ; then
+           echo "$SCRIPTNAME: skipping  $testname for $NORM_EXT"
+       else
++          unset SERVER_VMIN
++          unset SERVER_VMAX
++          if [ "$ectype" = "MLDSA" ]; then
++             SERVER_VMIN="tls1.1"
++             SERVER_VMAX="tls1.3"
++          fi
+           cparam=`echo $cparam | sed -e 's;_; ;g' -e "s/TestUser/$USER_NICKNAME/g" `
+           if [ "$ectype" = "SNI" ]; then
+               cparam=`echo $cparam | sed -e "s/Host/$HOST/g" -e "s/Dom/$DOMSUF/g" `
+               sparam=`echo $sparam | sed -e "s/Host/$HOST/g" -e "s/Dom/$DOMSUF/g" `
+           fi
+ 
+           start_selfserv `echo "$sparam" | sed -e 's,_, ,g'`
+ 
+@@ -707,20 +734,20 @@ ssl_stress()
+ 
+           if [ "${NOLOGIN}" -eq 0 ] ; then
+               dbdir=${P_R_NOLOGINDIR}
+           else
+               dbdir=${P_R_CLIENTDIR}
+           fi
+ 
+           echo "strsclnt -4 -q -p ${PORT} -d ${dbdir} ${CLIENT_OPTIONS} -w nss $cparam \\"
+-          echo "         -V ssl3:tls1.2 $verbose ${HOSTADDR}"
++          echo "         $verbose ${HOSTADDR}"
+           echo "strsclnt started at `date`"
+           ${PROFTOOL} ${BINDIR}/strsclnt -4 -q -p ${PORT} -d ${dbdir} ${CLIENT_OPTIONS} -w nss $cparam \
+-                   -V ssl3:tls1.2 $verbose ${HOSTADDR}
++                   $verbose ${HOSTADDR}
+           ret=$?
+           echo "strsclnt completed at `date`"
+           html_msg $ret $value \
+                    "${testname}" \
+                    "produced a returncode of $ret, expected is $value. "
+           if [ "`uname -n`" = "sjsu" ] ; then
+               echo "debugging disapering selfserv... ps -ef | grep selfserv"
+               ps -ef | grep selfserv
+@@ -983,19 +1010,18 @@ ssl_policy_pkix_ocsp()
+   # 5961 reset by peer
+   grep 5961 ${P_R_SERVERDIR}/vfy2.out
+   GRET=$?  ; echo "OCSP: RET=$RET GRET=$GRET"
+   if [ $RET -ne 0 -o $GRET -eq 0  ]; then
+       echo "$SCRIPTNAME: skipping Check that OCSP doesn't break if we disable sha1 $NORM_EXT - server $SERVER_MODE/client $CLIENT_MODE - can't reach external servers"
+       return 0
+   fi
+ 
+-  PKIX_SAVE=${NSS_ENABLE_PKIX_VERIFY-"unset"}
+-  NSS_ENABLE_PKIX_VERIFY="1"
+-  export NSS_ENABLE_PKIX_VERIFY
++  PKIX_SAVE=${NSS_DISABLE_LIBPKIX_VERIFY-"unset"}
++  unset NSS_DISABLE_LIBPKIX_VERIFY
+ 
+   testname=""
+ 
+   if [ ! -f "${P_R_SERVERDIR}/pkcs11.txt" ] ; then
+       html_failed "${SCRIPTNAME}: ${P_R_SERVERDIR} is not initialized"
+       return 1;
+   fi
+ 
+@@ -1010,22 +1036,20 @@ ssl_policy_pkix_ocsp()
+   vfyserv -o wrong.host.badssl.com -d ${P_R_SERVERDIR} 2>&1 | tee ${P_R_SERVERDIR}/vfy.out
+   # make sure we have the domain mismatch, not bad signature error
+   echo "grep -E '12276|5961' ${P_R_SERVERDIR}/vfy.out"
+   grep -E '12276|5961' ${P_R_SERVERDIR}/vfy.out
+   RET=$?
+   html_msg $RET $RET_EXP "${testname}" \
+            "produced a returncode of $RET, expected is $RET_EXP"
+ 
+-  if [ "${PKIX_SAVE}" = "unset" ]; then
+-      unset NSS_ENABLE_PKIX_VERIFY
+-  else
+-      NSS_ENABLE_PKIX_VERIFY=${PKIX_SAVE}
+-      export NSS_ENABLE_PKIX_VERIFY
++  if [ "{PKIX_SAVE}" != "unset" ]; then
++      export NSS_DISABLE_LIBPKIX_VERIFY=${PKIX_SAVE}
+   fi
++
+   cp ${P_R_SERVERDIR}/pkcs11.txt.sav ${P_R_SERVERDIR}/pkcs11.txt
+ 
+   html "</TABLE><BR>"
+ 
+ }
+ 
+ ############################## ssl_policy_selfserv #####################
+ # local shell function to perform SSL Policy tests, using selfserv
+@@ -1050,17 +1074,17 @@ ssl_policy_selfserv()
+   setup_policy "disallow=rsa/ssl-key-exchange" ${P_R_SERVERDIR}
+ 
+   SAVE_SERVER_OPTIONS=${SERVER_OPTIONS}
+   # make sure policy is working in the multiprocess case is working on
+   # UNIX-like OS's. Other OS's can't properly clean up the child processes
+   # when our test suite kills the parent, so just use the single process
+   # self serve for them
+   # if [ "${OS_ARCH}" != "WINNT" ]; then
+-  #    SERVER_OPTIONS="-M 3 ${SERVER_OPTIONS}"
++      SERVER_OPTIONS="-M 3 ${SERVER_OPTIONS}"
+   # fi
+ 
+   start_selfserv $CIPHER_SUITES
+ 
+   SERVER_OPTIONS="${SAVE_SERVER_OPTIONS}"
+   VMIN="ssl3"
+   VMAX="tls1.2"
+ 
+@@ -1641,20 +1665,20 @@ ssl_run_tests()
+             ssl_iopr_run
+             ;;
+         *)
+             SERVER_MODE=`echo "${SSL_TEST}" | cut -d_ -f1`
+             CLIENT_MODE=`echo "${SSL_TEST}" | cut -d_ -f2`
+ 
+             case "${SERVER_MODE}" in
+             "normal")
+-                SERVER_OPTIONS=
++                SERVER_OPTIONS=""
+                 ;;
+             "fips")
+-                SERVER_OPTIONS=
++                SERVER_OPTIONS=""
+                 ssl_set_fips server on
+                 ;;
+             *)
+                 html_failed "${SCRIPTNAME}: Error: Unknown server mode ${SERVER_MODE}"
+                 return 1
+                 ;;
+             esac
+ 
+diff --git a/tests/ssl/sslauth.txt b/tests/ssl/sslauth.txt
+--- a/tests/ssl/sslauth.txt
++++ b/tests/ssl/sslauth.txt
+@@ -77,8 +77,27 @@
+   SNI     1       -r_-a_Host-sni.Dom       -V_ssl3:tls1.2_-c_v_-w_nss_-n_TestUser_-a_Host-sni1.Dom    TLS Server response with alert
+   SNI     0       -r_-a_Host-sni.Dom       -V_ssl3:ssl3_-w_nss_-n_TestUser                  SSL3 Server hello response without SNI
+   SNI     1       -r_-a_Host-sni.Dom       -V_ssl3:ssl3_-c_v_-w_nss_-n_TestUser_-a_Host-sni.Dom  SSL3 Server hello response with SNI: SSL don't have SH extensions
+   SNI     0       -r_-r_-r_-a_Host-sni.Dom -V_ssl3:tls1.2_-w_nss_-n_TestUser                          TLS Server hello response without SNI
+   SNI     0       -r_-r_-r_-a_Host-sni.Dom -V_ssl3:tls1.2_-c_v_-w_nss_-n_TestUser_-a_Host-sni.Dom     TLS Server hello response with SNI
+   SNI     1       -r_-r_-r_-a_Host-sni.Dom -V_ssl3:tls1.2_-w_nss_-n_TestUser_-a_Host-sni.Dom_-a_Host.Dom TLS Server hello response with SNI: Change name on 2d HS
+   SNI     1       -r_-r_-r_-a_Host-sni.Dom -V_ssl3:tls1.2_-c_v_-w_nss_-n_TestUser_-a_Host-sni.Dom_-a_Host-sni1.Dom TLS Server hello response with SNI: Change name to invalid 2d HS
+   SNI     1       -r_-r_-r_-a_Host-sni.Dom -V_ssl3:tls1.2_-c_v_-w_nss_-n_TestUser_-a_Host-sni1.Dom    TLS Server response with alert
++
++#
++# ML-DSA Tests
++#
++MLDSA     0       -r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_TestUser-ml-dsa-44_-w_nss TLS 1.3 ML-DSA-44 Request don't require client auth on post hs (client auth)
++MLDSA     0       -r_-r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_TestUser-ml-dsa-44_-w_nss TLS 1.3 ML-DSA-44 Require client auth on post hs (client auth)
++MLDSA     0       -r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_none_-w_nss TLS 1.3 ML-DSA-44 Request don't require client auth on post hs (client does not provide auth)
++MLDSA     1       -r_-r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_none_-w_nss TLS 1.3 ML-DSA-44 Require client auth on post hs (client does not provide auth)
++MLDSA     0       -r_-r_-r_-E_-u  -V_tls1.3:tls1.3_-E_-n_TestUser-ml-dsa-44_-w_nss TLS 1.3 ML-DSA-44 Request don't require client auth on post hs with session ticket (client auth)
++MLDSA     0       -r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_TestUser-ml-dsa-65_-w_nss TLS 1.3 ML-DSA-65 Request don't require client auth on post hs (client auth)
++MLDSA     0       -r_-r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_TestUser-ml-dsa-65_-w_nss TLS 1.3 ML-DSA-65 Require client auth on post hs (client auth)
++MLDSA     0       -r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_none_-w_nss TLS 1.3 ML-DSA-65 Request don't require client auth on post hs (client does not provide auth)
++MLDSA     1       -r_-r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_none_-w_nss TLS 1.3 ML-DSA-65 Require client auth on post hs (client does not provide auth)
++MLDSA     0       -r_-r_-r_-E_-u  -V_tls1.3:tls1.3_-E_-n_TestUser-ml-dsa-65_-w_nss TLS 1.3 ML-DSA-65 Request don't require client auth on post hs with session ticket (client auth)
++MLDSA     0       -r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_TestUser-ml-dsa-44_-w_nss TLS 1.3 ML-DSA-44 Request don't require client auth on post hs (client auth)
++MLDSA     0       -r_-r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_TestUser-ml-dsa-44_-w_nss TLS 1.3 ML-DSA-44 Require client auth on post hs (client auth)
++MLDSA     0       -r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_none_-w_nss TLS 1.3 ML-DSA-44 Request don't require client auth on post hs (client does not provide auth)
++MLDSA     1       -r_-r_-r_-r_-E  -V_tls1.3:tls1.3_-E_-n_none_-w_nss TLS 1.3 ML-DSA-44 Require client auth on post hs (client does not provide auth)
++MLDSA     0       -r_-r_-r_-E_-u  -V_tls1.3:tls1.3_-E_-n_TestUser-ml-dsa-44_-w_nss TLS 1.3 ML-DSA-44 Request don't require client auth on post hs with session ticket (client auth)
+diff --git a/tests/ssl/sslcov.txt b/tests/ssl/sslcov.txt
+--- a/tests/ssl/sslcov.txt
++++ b/tests/ssl/sslcov.txt
+@@ -157,8 +157,9 @@ MLKEM384 TLS13  :1301 TLS13_MLKEM1024P38
+ MLKEM384 TLS13  :1302 TLS13_MLKEM1024P384_WITH_AES_256_GCM_SHA384
+ MLKEM384 TLS13  :1303 TLS13_MLKEM1024P384_WITH_CHACHA20_POLY1305_SHA256
+ MLKEM256 TLS13  :1301 TLS13_MLKEM768P256_WITH_AES_128_GCM_SHA256
+ MLKEM256 TLS13  :1302 TLS13_MLKEM768P256_WITH_AES_256_GCM_SHA384
+ MLKEM256 TLS13  :1303 TLS13_MLKEM768P256_WITH_CHACHA20_POLY1305_SHA256
+ MLKEM219 TLS13  :1301 TLS13_MLKEM768X25519_WITH_AES_128_GCM_SHA256
+ MLKEM219 TLS13  :1302 TLS13_MLKEM768X25519_WITH_AES_256_GCM_SHA384
+ MLKEM219 TLS13  :1303 TLS13_MLKEM768X25519_WITH_CHACHA20_POLY1305_SHA256
++MLDSAECC TLS13  :1301 TLS13_ECDHE_WITH_AES_128_GCM_SHA256_WITH_MLDSA44
+diff --git a/tests/ssl_gtests/ssl_gtests.sh b/tests/ssl_gtests/ssl_gtests.sh
+--- a/tests/ssl_gtests/ssl_gtests.sh
++++ b/tests/ssl_gtests/ssl_gtests.sh
+@@ -52,16 +52,30 @@ ssl_gtest_certs() {
+   make_cert ecdh_ecdsa p256 kex
+   make_cert rsa_ca rsa_ca ca
+   make_cert rsa_chain rsa_chain sign
+   make_cert rsa_pss_ca rsapss_ca ca
+   make_cert rsa_pss_chain rsapss_chain sign
+   make_cert rsa_ca_rsa_pss_chain rsa_ca_rsapss_chain sign
+   make_cert ecdh_rsa ecdh_rsa kex
+   make_cert dsa dsa sign
++  if [ -n "${NSS_ENABLE_ML_DSA}" ]; then
++      make_cert mldsa44 mldsa44 sign
++      make_cert mldsa44_ca mldsa44_ca ca
++      make_cert mldsa44_chain mldsa44_chain sign
++      make_cert delegator_mldsa44 delegator_mldsa44 sign
++      make_cert mldsa65 mldsa65 sign
++      make_cert mldsa65_ca mldsa65_ca ca
++      make_cert mldsa65_chain mldsa65_chain sign
++      make_cert delegator_mldsa65 delegator_mldsa65 sign
++      make_cert mldsa87 mldsa87 sign
++      make_cert mldsa87_ca mldsa87_ca ca
++      make_cert mldsa87_chain mldsa87_chain sign
++      make_cert delegator_mldsa87 delegator_mldsa87 sign
++  fi
+   make_cert delegator_ecdsa256 delegator_p256 sign
+   make_cert delegator_rsae2048 delegator_rsae2048 sign
+   make_cert delegator_rsa_pss2048 delegator_rsa_pss2048 sign
+ }
+ 
+ ############################## ssl_gtest_init ##########################
+ # local shell function to initialize this script
+ ########################################################################
+@@ -145,11 +159,15 @@ parallel_fallback()
+ ssl_gtest_cleanup()
+ {
+   cd ${QADIR}
+   . common/cleanup.sh
+ }
+ 
+ ################## main #################################################
+ cd "$(dirname "$0")"
++
++if using_sql ; then
++   echo "skipping ssl_gtests in dbm"
++fi
+ ssl_gtest_init
+ ssl_gtest_start
+ ssl_gtest_cleanup
