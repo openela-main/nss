@@ -21,7 +21,16 @@ typedef enum {
     SFTKFIPSChkHashTls,  /* make sure the base hash of TLS KDF functions is FIPS */
     SFTKFIPSChkHashSp800,  /* make sure the base hash of SP-800-108 KDF functions is FIPS */
     SFTKFIPSRSAOAEP, /* make sure that both hashes use the same FIPS compliant algorithm */
+#ifndef NSS_DISABLE_KYBER
+    SFKFIPSMLKEM, /* make sure the keys are only mlkem and not kyber */
+#endif
 } SFTKFIPSSpecialClass;
+
+#ifdef NSS_DISABLE_KYBER
+/* if kyber is disable, we don't need to check that we are using
+ * a kyber key in the ML_KEM code */
+#define SFTKFIPSMLKEM SFTKFIPSNone
+#endif
 
 /* set according to your security policy */
 #define SFTKFIPS_PBKDF2_MIN_PW_LEN  8
@@ -64,6 +73,10 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
 #define CKF_KDF CKF_DERIVE
 #define CKF_HSH CKF_DIGEST
 #define CK_MAX 0xffffffffUL
+#define CK_ALL_KEY 1, CK_MAX /* key limits are handled by special ops or the 
+                              * implementation itself */
+#define CK_ALL_STEP 1
+
 /* mechanisms using the same key types share the same key type
  * limits */
 #define RSA_FB_KEY 2048, 4096 /* min, max */
@@ -87,14 +100,6 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
     { CKM_SHA256_RSA_PKCS, { RSA_FB_KEY, CKF_SGN }, RSA_FB_STEP, SFTKFIPSNone },
     { CKM_SHA384_RSA_PKCS, { RSA_FB_KEY, CKF_SGN }, RSA_FB_STEP, SFTKFIPSNone },
     { CKM_SHA512_RSA_PKCS, { RSA_FB_KEY, CKF_SGN }, RSA_FB_STEP, SFTKFIPSNone },
-    { CKM_SHA224_RSA_PKCS, { RSA_LEGACY_FB_KEY, CKF_VERIFY }, RSA_LEGACY_FB_STEP, SFTKFIPSNone },
-    { CKM_SHA256_RSA_PKCS, { RSA_LEGACY_FB_KEY, CKF_VERIFY }, RSA_LEGACY_FB_STEP, SFTKFIPSNone },
-    { CKM_SHA384_RSA_PKCS, { RSA_LEGACY_FB_KEY, CKF_VERIFY }, RSA_LEGACY_FB_STEP, SFTKFIPSNone },
-    { CKM_SHA512_RSA_PKCS, { RSA_LEGACY_FB_KEY, CKF_VERIFY }, RSA_LEGACY_FB_STEP, SFTKFIPSNone },
-    { CKM_SHA224_RSA_PKCS_PSS, { RSA_LEGACY_FB_KEY, CKF_VERIFY }, RSA_LEGACY_FB_STEP, SFTKFIPSRSAPSS },
-    { CKM_SHA256_RSA_PKCS_PSS, { RSA_LEGACY_FB_KEY, CKF_VERIFY }, RSA_LEGACY_FB_STEP, SFTKFIPSRSAPSS },
-    { CKM_SHA384_RSA_PKCS_PSS, { RSA_LEGACY_FB_KEY, CKF_VERIFY }, RSA_LEGACY_FB_STEP, SFTKFIPSRSAPSS },
-    { CKM_SHA512_RSA_PKCS_PSS, { RSA_LEGACY_FB_KEY, CKF_VERIFY }, RSA_LEGACY_FB_STEP, SFTKFIPSRSAPSS },
     { CKM_SHA224_RSA_PKCS_PSS, { RSA_FB_KEY, CKF_SGN }, RSA_FB_STEP, SFTKFIPSRSAPSS },
     { CKM_SHA256_RSA_PKCS_PSS, { RSA_FB_KEY, CKF_SGN }, RSA_FB_STEP, SFTKFIPSRSAPSS },
     { CKM_SHA384_RSA_PKCS_PSS, { RSA_FB_KEY, CKF_SGN }, RSA_FB_STEP, SFTKFIPSRSAPSS },
@@ -110,6 +115,12 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
     { CKM_ECDSA_SHA256, { EC_FB_KEY, CKF_SGN }, EC_FB_STEP, SFTKFIPSECC },
     { CKM_ECDSA_SHA384, { EC_FB_KEY, CKF_SGN }, EC_FB_STEP, SFTKFIPSECC },
     { CKM_ECDSA_SHA512, { EC_FB_KEY, CKF_SGN }, EC_FB_STEP, SFTKFIPSECC },
+    /* only allowed keys are implented for ML_DSA */
+    { CKM_ML_DSA_KEY_PAIR_GEN, { CK_ALL_KEY, CKF_SGN }, CK_ALL_STEP, SFTKFIPSNone },
+    { CKM_ML_DSA, { CK_ALL_KEY, CKF_SGN },  CK_ALL_STEP, SFTKFIPSNone },
+    /* only allowed keys are implented for ML_KEM */
+    { CKM_ML_KEM_KEY_PAIR_GEN, { CK_ALL_KEY, CKF_SGN }, CK_ALL_STEP, SFTKFIPSMLKEM },
+    { CKM_ML_KEM, { CK_ALL_KEY, CKF_SGN },  CK_ALL_STEP, SFTKFIPSMLKEM },
     /* ------------------------- RC2 Operations --------------------------- */
     /* ------------------------- AES Operations --------------------------- */
     { CKM_AES_KEY_GEN, { AES_FB_KEY, CKF_GEN }, AES_FB_STEP, SFTKFIPSNone },
@@ -172,6 +183,9 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
     { CKM_PKCS5_PBKD2, { 112, 256, CKF_GEN }, 1, SFTKFIPSPBKDF2 },
     /* the deprecated mechanisms, don't use for some reason we are supposed
      * to set the FIPS indicators on these (sigh) */
+    /* NOTE: CKM_NSS_ML_KEM_KEY_GEN and the KYBER equivalent does not do
+     * pairwise consistency checks on key gen, so are not FIPS */
+    { CKM_NSS_ML_KEM, { CK_ALL_KEY, CKF_SGN },  CK_ALL_STEP, SFTKFIPSNone },
     { CKM_NSS_AES_KEY_WRAP, { AES_FB_KEY, CKF_ECW }, AES_FB_STEP, SFTKFIPSNone },
     { CKM_NSS_AES_KEY_WRAP_PAD, { AES_FB_KEY, CKF_ECW }, AES_FB_STEP, SFTKFIPSNone },
     { CKM_NSS_TLS_KEY_AND_MAC_DERIVE_SHA256, { 384, 384, CKF_DERIVE }, 1, SFTKFIPSTlsKeyCheck },
@@ -186,5 +200,12 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
         offsetof(CK_SP800_108_KDF_PARAMS, prfType) },
     { CKM_NSS_SP800_108_DOUBLE_PIPELINE_KDF_DERIVE_DATA, { 112, CK_MAX, CKF_KDF }, 1,  SFTKFIPSChkHashSp800,
         offsetof(CK_SP800_108_KDF_PARAMS, prfType) },
+    /* concatentate fuctions used in hybrid operations */
+    /* The following functions add data at the end of a base key. If the base
+     * key is FIPS, and the resulting keys are strong enough, then the
+     * resulting key will also be FIPS and the resulting operations will be
+     * FIPS approved. */
+    { CKM_CONCATENATE_BASE_AND_KEY, { 112, CK_MAX, CKF_DERIVE }, 1, SFTKFIPSNone },
+    { CKM_CONCATENATE_BASE_AND_DATA, { 112, CK_MAX, CKF_DERIVE }, 1, SFTKFIPSNone },
 };
 const int SFTK_NUMBER_FIPS_ALGORITHMS = PR_ARRAY_SIZE(sftk_fips_mechs);

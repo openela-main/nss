@@ -1,14 +1,24 @@
-diff -up ./gtests/ssl_gtest/manifest.mn.disable_ech ./gtests/ssl_gtest/manifest.mn
---- ./gtests/ssl_gtest/manifest.mn.disable_ech	2024-06-12 13:29:17.162207862 -0700
-+++ ./gtests/ssl_gtest/manifest.mn	2024-06-12 13:30:25.699047788 -0700
-@@ -59,7 +59,6 @@ CPPSRCS = \
+diff --git a/gtests/ssl_gtest/manifest.mn b/gtests/ssl_gtest/manifest.mn
+--- a/gtests/ssl_gtest/manifest.mn
++++ b/gtests/ssl_gtest/manifest.mn
+@@ -50,17 +50,16 @@ CPPSRCS = \
+       ssl_staticrsa_unittest.cc \
+       ssl_tls13compat_unittest.cc \
+       ssl_v2_client_hello_unittest.cc \
+       ssl_version_unittest.cc \
+       ssl_versionpolicy_unittest.cc \
+       test_io.cc \
+       tls_agent.cc \
+       tls_connect.cc \
+-      tls_ech_unittest.cc \
+       tls_filter.cc \
+       tls_hkdf_unittest.cc \
+       tls_mlkem_unittest.cc \
        tls_protect.cc \
        tls_psk_unittest.cc \
        tls_subcerts_unittest.cc \
--      tls_ech_unittest.cc \
        tls_xyber_unittest.cc \
        $(SSLKEYLOGFILE_FILES) \
-       $(NULL)
 diff -up ./lib/ssl/sslsock.c.disable_ech ./lib/ssl/sslsock.c
 --- ./lib/ssl/sslsock.c.disable_ech	2024-06-07 09:26:03.000000000 -0700
 +++ ./lib/ssl/sslsock.c	2024-06-12 13:29:17.162207862 -0700

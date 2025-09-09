@@ -1,0 +1,62 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1752601818 25200
+#      Tue Jul 15 10:50:18 2025 -0700
+# Branch RHEL_8
+# Node ID ef820c54bad5f034231f51df2b14f88863170cfb
+# Parent  5c09db329be3e1e2b19c92f9e6224cdad04d65ba
+nss-3.101-disable-signature-policies.patch
+
+diff --git a/lib/pk11wrap/pk11pars.c b/lib/pk11wrap/pk11pars.c
+--- a/lib/pk11wrap/pk11pars.c
++++ b/lib/pk11wrap/pk11pars.c
+@@ -448,22 +448,19 @@ static const oidValDef smimeKxOptList[] 
+     { CIPHER_NAME("ECDH"), SEC_OID_ECDH_KEA, NSS_USE_ALG_IN_SMIME_KX },
+     { CIPHER_NAME("DH"), SEC_OID_X942_DIFFIE_HELMAN_KEY, NSS_USE_ALG_IN_SMIME_KX },
+ };
+ 
+ static const oidValDef signOptList[] = {
+     /* Signatures */
+     { CIPHER_NAME("DSA"), SEC_OID_ANSIX9_DSA_SIGNATURE,
+       NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_SIGNATURE },
+-    { CIPHER_NAME("RSA-PKCS"), SEC_OID_PKCS1_RSA_ENCRYPTION,
+-      NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_SIGNATURE },
+-    { CIPHER_NAME("RSA-PSS"), SEC_OID_PKCS1_RSA_PSS_SIGNATURE,
+-      NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_SIGNATURE },
+-    { CIPHER_NAME("ECDSA"), SEC_OID_ANSIX962_EC_PUBLIC_KEY,
+-      NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_SIGNATURE },
++    { CIPHER_NAME("RSA-PKCS"), SEC_OID_PKCS1_RSA_ENCRYPTION, 0},
++    { CIPHER_NAME("RSA-PSS"), SEC_OID_PKCS1_RSA_PSS_SIGNATURE, 0},
++    { CIPHER_NAME("ECDSA"), SEC_OID_ANSIX962_EC_PUBLIC_KEY, 0},
+     { CIPHER_NAME("ED25519"), SEC_OID_ED25519_PUBLIC_KEY,
+       NSS_USE_ALG_IN_SIGNATURE },
+ };
+ 
+ typedef struct {
+     const oidValDef *list;
+     PRUint32 entries;
+     const char *description;
+diff --git a/tests/ssl/sslpolicy.txt b/tests/ssl/sslpolicy.txt
+--- a/tests/ssl/sslpolicy.txt
++++ b/tests/ssl/sslpolicy.txt
+@@ -188,17 +188,19 @@
+   1 noECC  SSL3   d    disallow=rsa/ssl-key-exchange Disallow Key Exchange Explicitly
+   1 noECC  SSL3   d    disallow=all_allow=hmac-sha1:sha256:rsa-pkcs:dh-dss:des-ede3-cbc:tls-version-min=ssl3.0:tls-version-max=ssl3.0 Disallow Key Exchange Implicitly Narrow
+   1 noECC  SSL3   d    disallow=all_allow=md2/all:md4/all:md5/all:sha1/all:sha256/all:sha384/all:sha512/all:rsa-pkcs/all:rsa-pss/all:ecdsa/all:dsa/all:hmac-sha1/all:hmac-sha224/all:hmac-sha256/all:hmac-sha384/all:hmac-sha512/all:hmac-md5/all:camellia128-cbc/all:camellia192-cbc/all:camellia256-cbc/all:seed-cbc/all:des-ede3-cbc/all:des-40-cbc/all:des-cbc/all:null-cipher/all:rc2/all:rc4/all:idea/all:rsa-export/all:dhe-rsa/all:dhe-dss/all:ecdhe-ecdsa/all:ecdhe-rsa/all:ecdh-ecdsa/all:ecdh-rsa/all:tls-version-min=ssl2.0:tls-version-max=tls1.2 Disallow Key Exchange Signatures Implicitly
+ # turn off  version
+   1 noECC  SSL3   d    allow=tls-version-min=tls1.0:tls-version-max=tls1.2 Disallow Version Exlicitly
+   1 noECC  SSL3   d    disallow=all_allow=hmac-sha1:sha256:rsa-pkcs:rsa:des-ede3-cbc:tls-version-min=tls1.0:tls-version-max=tls1.2 Disallow Version Implicitly Narrow
+   1 noECC  SSL3   d    disallow=all_allow=md2/all:md4/all:md5/all:sha1/all:sha256/all:sha384/all:sha512/all:rsa-pkcs/all:rsa-pss/all:ecdsa/all:dsa/all:hmac-sha1/all:hmac-sha224/all:hmac-sha256/all:hmac-sha384/all:hmac-sha512/all:hmac-md5/all:camellia128-cbc/all:camellia192-cbc/all:camellia256-cbc/all:seed-cbc/all:des-ede3-cbc/all:des-40-cbc/all:des-cbc/all:null-cipher/all:rc2/all:rc4/all:idea/all:rsa/all:rsa-export/all:dhe-rsa/all:dhe-dss/all:ecdhe-ecdsa/all:ecdhe-rsa/all:ecdh-ecdsa/all:ecdh-rsa/all:tls-version-min=tls1.0:tls-version-max=tls1.2 Disallow Version Implicitly
+   0 noECC  SSL3   d    disallow=dsa Disallow DSA Signatures Explicitly
+-  1 noECC  SSL3   d    disallow=rsa-pkcs Disallow RSA PKCS 1 Signatures Explicitly
++# rsa-pkcs, rsa-pss, and ecdsa policy checking reverted in rhel8 for binary
++# compatibility reasons
++#  1 noECC  SSL3   d    disallow=rsa-pkcs Disallow RSA PKCS 1 Signatures Explicitly
+   1 noECC  SSL3   d    allow=rsa-min=16384:key-size-flags=key-size-verify Restrict RSA keys on signature verification
+   0 noECC  SSL3   d    allow=rsa-min=16384:key-size-flags=key-size-sign Restrict RSA keys on signing
+   1 noECC  SSL3   d    allow=rsa-min=16384:key-size-flags=key-size-ssl Restrict RSA keys when used in SSL
+   0 noECC  SSL3   d    allow=rsa-min=1023 Restrict RSA keys when used in SSL
+ # test default settings
+ # NOTE: tstclient will attempt to overide the defaults, so we detect we
+ # were successful by locking in our settings
+   0 noECC  SSL3   d    allow=all_disable=all Disable all by default, application override

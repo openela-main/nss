@@ -1,0 +1,33 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1752601914 25200
+#      Tue Jul 15 10:51:54 2025 -0700
+# Branch RHEL_8
+# Node ID 89a40126836b8e2a5d98e250262c498e304fcdcc
+# Parent  ef820c54bad5f034231f51df2b14f88863170cfb
+nss-3.66-disable-external-host-test.patch
+
+diff --git a/tests/ssl/ssl.sh b/tests/ssl/ssl.sh
+--- a/tests/ssl/ssl.sh
++++ b/tests/ssl/ssl.sh
+@@ -1595,17 +1595,19 @@ ssl_run_tests()
+ {
+     for SSL_TEST in ${NSS_SSL_TESTS}
+     do
+         case "${SSL_TEST}" in
+         "policy")
+             if using_sql ; then
+                 ssl_policy_listsuites
+                 ssl_policy_selfserv
+-                ssl_policy_pkix_ocsp
++                # requires access to external servers, which fails
++                # when running in brew
++                #ssl_policy_pkix_ocsp
+                 ssl_policy
+             fi
+             ;;
+         "crl")
+             ssl_crl_ssl
+             ssl_crl_cache
+             ;;
+         "iopr")

@@ -1,1 +1,3 @@
-SOURCES/nss-3.101.tar.gz
+SOURCES/nss_compat_test_pkcs12.tar
+SOURCES/nss-3.112-add-ml-dsa-gtests-el8.patch
+SOURCES/nss-3.112.tar.gz
