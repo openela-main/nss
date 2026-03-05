@@ -69,6 +69,7 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
 #define CKF_ECW (CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP)
 #define CKF_WRP (CKF_WRAP | CKF_UNWRAP)
 #define CKF_KEK (CKF_WRAP | CKF_UNWRAP)
+#define CKF_KEM (CKF_ENCAPSULATE | CKF_DECAPSULATE )
 #define CKF_KEA CKF_DERIVE
 #define CKF_KDF CKF_DERIVE
 #define CKF_HSH CKF_DIGEST
@@ -116,11 +117,12 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
     { CKM_ECDSA_SHA384, { EC_FB_KEY, CKF_SGN }, EC_FB_STEP, SFTKFIPSECC },
     { CKM_ECDSA_SHA512, { EC_FB_KEY, CKF_SGN }, EC_FB_STEP, SFTKFIPSECC },
     /* only allowed keys are implented for ML_DSA */
-    { CKM_ML_DSA_KEY_PAIR_GEN, { CK_ALL_KEY, CKF_SGN }, CK_ALL_STEP, SFTKFIPSNone },
+    { CKM_ML_DSA_KEY_PAIR_GEN, { CK_ALL_KEY, CKF_KPG }, CK_ALL_STEP, SFTKFIPSNone },
     { CKM_ML_DSA, { CK_ALL_KEY, CKF_SGN },  CK_ALL_STEP, SFTKFIPSNone },
     /* only allowed keys are implented for ML_KEM */
-    { CKM_ML_KEM_KEY_PAIR_GEN, { CK_ALL_KEY, CKF_SGN }, CK_ALL_STEP, SFTKFIPSMLKEM },
-    { CKM_ML_KEM, { CK_ALL_KEY, CKF_SGN },  CK_ALL_STEP, SFTKFIPSMLKEM },
+    { CKM_ML_KEM_KEY_PAIR_GEN, { CK_ALL_KEY, CKF_KPG }, CK_ALL_STEP, SFTKFIPSMLKEM },
+
+    { CKM_ML_KEM, { CK_ALL_KEY, CKF_KEM },  CK_ALL_STEP, SFTKFIPSMLKEM },
     /* ------------------------- RC2 Operations --------------------------- */
     /* ------------------------- AES Operations --------------------------- */
     { CKM_AES_KEY_GEN, { AES_FB_KEY, CKF_GEN }, AES_FB_STEP, SFTKFIPSNone },
@@ -185,7 +187,7 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
      * to set the FIPS indicators on these (sigh) */
     /* NOTE: CKM_NSS_ML_KEM_KEY_GEN and the KYBER equivalent does not do
      * pairwise consistency checks on key gen, so are not FIPS */
-    { CKM_NSS_ML_KEM, { CK_ALL_KEY, CKF_SGN },  CK_ALL_STEP, SFTKFIPSNone },
+    { CKM_NSS_ML_KEM, { CK_ALL_KEY, CKF_KEM },  CK_ALL_STEP, SFTKFIPSMLKEM },
     { CKM_NSS_AES_KEY_WRAP, { AES_FB_KEY, CKF_ECW }, AES_FB_STEP, SFTKFIPSNone },
     { CKM_NSS_AES_KEY_WRAP_PAD, { AES_FB_KEY, CKF_ECW }, AES_FB_STEP, SFTKFIPSNone },
     { CKM_NSS_TLS_KEY_AND_MAC_DERIVE_SHA256, { 384, 384, CKF_DERIVE }, 1, SFTKFIPSTlsKeyCheck },
@@ -206,6 +208,5 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
      * resulting key will also be FIPS and the resulting operations will be
      * FIPS approved. */
     { CKM_CONCATENATE_BASE_AND_KEY, { 112, CK_MAX, CKF_DERIVE }, 1, SFTKFIPSNone },
-    { CKM_CONCATENATE_BASE_AND_DATA, { 112, CK_MAX, CKF_DERIVE }, 1, SFTKFIPSNone },
 };
 const int SFTK_NUMBER_FIPS_ALGORITHMS = PR_ARRAY_SIZE(sftk_fips_mechs);

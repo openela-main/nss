@@ -3,7 +3,7 @@
 # NOTE: To avoid NVR clashes of nspr* packages:
 # - reset %%{nspr_release} to 1, when updating %%{nspr_version}
 # - increment %%{nspr_version}, when updating the NSS part only
-%global baserelease 4
+%global baserelease 8
 %global nss_release %baserelease
 # use "%%global nspr_release %%[%%baserelease+n]" to handle offsets when
 # release number between nss and nspr are different.
@@ -168,19 +168,23 @@ Patch53:          nss-3.101-skip-ocsp-if-not-connected.patch
 Patch74:          nss-3.90-dh-test-update.patch
 Patch75:          nss-3.90-ppc_no_init.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=676100
-Patch85:          nss-3.101-fix-cms-abi-break.patch
-Patch88:          nss-3.101-fix-shlibsign-fips.patch
+Patch78:          nss-3.101-fix-cms-abi-break.patch
+Patch79:          nss-3.101-fix-shlibsign-fips.patch
 
 # Post Quantum specific
-Patch90:          nss-3.112-disable-dsa.patch
-Patch91:          nss-3.112-replace-xyber-with-mlkem-256.patch
-Patch92:          nss-3.112-add-sec384r1-mlkem-1024.patch
-Patch93:          nss-3.112-add-ml-dsa-base.patch
-Patch94:          nss-3.112-add-ml-dsa-gtests.patch
-Patch95:          nss-3.112-add-ml-dsa-ssl-support.patch
-Patch96:          nss-3.112-fips-and-fixes-el10.patch
-Patch97:          nss-3.112-big-endian-compression-fix.patch
-Patch98:          nss-3.112-fix-get-interface.patch
+Patch80:          nss-3.112-disable-dsa.patch
+Patch81:          nss-3.112-replace-xyber-with-mlkem-256.patch
+Patch82:          nss-3.112-add-sec384r1-mlkem-1024.patch
+Patch83:          nss-3.112-add-ml-dsa-base.patch
+Patch84:          nss-3.112-add-ml-dsa-gtests.patch
+Patch85:          nss-3.112-add-ml-dsa-ssl-support.patch
+Patch86:          nss-3.112-fips-and-fixes-el10.patch
+Patch87:          nss-3.112-big-endian-compression-fix.patch
+Patch88:          nss-3.112-fix-get-interface.patch
+Patch89:          nss-3.112-mlkem-fips-update.patch
+Patch90:          nss-3.112-update-fixes.patch
+Patch91:          nss-3.112-partial-pub-key-validate.patch
+Patch92:          nss-3.112-pkcs12-ml-dsa-crash-fix.patch
 
 # NSS reverse patches
 Patch300:         nss-3.79-distrusted-certs.patch
@@ -728,6 +732,10 @@ rm -rf \
    $RPM_BUILD_ROOT/%{_datadir}/aclocal/nspr.m4 \
    $RPM_BUILD_ROOT/%{_includedir}/nspr4/md
 
+#cp win.h to old name for compatibility
+cp $RPM_BUILD_ROOT/%{_includedir}/nspr4/prwin.h \
+   $RPM_BUILD_ROOT/%{_includedir}/nspr4/prwin16.h
+
 for f in nspr-config; do
    install -c -m 644 ${f}.1 $RPM_BUILD_ROOT%{_mandir}/man1/${f}.1
 done
@@ -1164,11 +1172,32 @@ fi
 
 
 %changelog
+* Fri Jan 23 2026 Bob Relyea <rrelyea@redhat.com> - 3.112.0-8
+- fix incomplete ml-kem pct patch.
+
+* Fri Jan 16 2026 Bob Relyea <rrelyea@redhat.com> - 3.112.0-7
+- fix regression in -5 bug fix
+
+* Fri Jan 9 2026 Bob Relyea <rrelyea@redhat.com> - 3.112.0-6
+- fix a null in ml-dsa pkcs12 decode
+- fix return code in ml-kem pct
+
+* Mon Nov 3 2025 Bob Relyea <rrelyea@redhat.com> - 3.112.0-5
+- fips update
+-   Fix indicators for the new post-quantum algorithms
+-   Fix the ML-KEM Self-tests
+-   Fix the ML-KEM zeroizaiton
+-   Add partial public validation before OAEP
+- bug fixes
+-   add CKA_SEED to private attributes so they are updated on password change.
+-   mark CKA_PARAMETER_SET as CK_ULONG when storing into the database
+-   fix unrefrence read in leancrypto.
+
 * Thu Aug 7 2025 Bob Relyea <rrelyea@redhat.com> - 3.112.0-4
 - fix interface issue when pulling 3.0 pkcs#11 interfaces explicitly
 
 * Fri Aug 1 2025 Bob Relyea <rrelyea@redhat.com> - 3.112.0-3
-- restore CONCATENATE functions accidentally remvoed in the last patch
+- restore CONCATENATE functions accidentally removed in the last patch
 - fix big endian issue in tstclnt and selfserv in certificate compression
 
 * Wed Jul 30 2025 Bob Relyea <rrelyea@redhat.com> - 3.112.0-2
