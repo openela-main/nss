@@ -1,0 +1,821 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1781049891 25200
+#      Tue Jun 09 17:04:51 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID 06a3884cf6203361c0f25221b132233356e0c415
+# Parent  c05574d73be6479439416e07fa31fb3f0ce553b7
+nss-3.124_el9-fix-ed-key-storage.patch
+
+diff --git a/cmd/lib/secutil.c b/cmd/lib/secutil.c
+--- a/cmd/lib/secutil.c
++++ b/cmd/lib/secutil.c
+@@ -1600,16 +1600,24 @@ secu_PrintSubjectPublicKeyInfo(FILE *out
+             case dsaKey:
+                 SECU_PrintDSAPublicKey(out, pk, "DSA Public Key", level + 1);
+                 break;
+ 
+             case ecKey:
+                 secu_PrintECPublicKey(out, pk, "EC Public Key", level + 1);
+                 break;
+ 
++            case ecMontKey:
++                secu_PrintECPublicKey(out, pk, "EC Montgomery Public Key", level + 1);
++                break;
++
++            case edKey:
++                secu_PrintECPublicKey(out, pk, "EC Edwards Public Key", level + 1);
++                break;
++
+             case mldsaKey:
+                 SECU_PrintMLDSAPublicKey(out, pk, "ML-DSA Public Key", level + 1);
+                 break;
+ 
+             case kyberKey:
+                 SECU_PrintMLKEMPublicKey(out, pk, "ML-KEM Public Key", level + 1);
+                 break;
+ 
+diff --git a/cmd/pk11importtest/pk11importtest.c b/cmd/pk11importtest/pk11importtest.c
+--- a/cmd/pk11importtest/pk11importtest.c
++++ b/cmd/pk11importtest/pk11importtest.c
+@@ -188,16 +188,18 @@ static const char *const usageInfo[] = {
+     " -f pwFile             file to fetch the password from",
+     " -p pwString           password",
+     " -n                    force pub key to be rebuilt",
+     " -r                    skip rsa test",
+     " -D                    skip dsa test",
+     " -h                    skip dh test",
+     " -e                    skip ec test",
+     " -K                    skip mk-kem test",
++    " -w                    skip ed test",
++    " -g                    skip ec montgomery test",
+ };
+ static int nUsageInfo = sizeof(usageInfo) / sizeof(char *);
+ 
+ static void
+ Usage(char *progName, FILE *outFile)
+ {
+     int i;
+     fprintf(outFile, "Usage:  %s [ commands ] options\n", progName);
+@@ -213,46 +215,52 @@ enum {
+     opt_PWFile,
+     opt_PWString,
+     opt_NoPub,
+     opt_NoRSA,
+     opt_NoDSA,
+     opt_NoDH,
+     opt_NoEC,
+     opt_NoMLKEM,
++    opt_NoED,
++    opt_NoECMont,
+ };
+ 
+ static secuCommandFlag options[] = {
+     { /* opt_CertDir          */ 'd', PR_TRUE, 0, PR_FALSE },
+     { /* opt_KeySize          */ 'k', PR_TRUE, 0, PR_FALSE },
+     { /* opt_ECCurve          */ 'C', PR_TRUE, 0, PR_FALSE },
+     { /* opt_PWFile           */ 'f', PR_TRUE, 0, PR_FALSE },
+     { /* opt_PWString         */ 'p', PR_TRUE, 0, PR_FALSE },
+     { /* opt_NoPub            */ 'n', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoRSA            */ 'r', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoDSA            */ 'D', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoDH             */ 'h', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoEC             */ 'e', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoMLKEM          */ 'K', PR_FALSE, 0, PR_FALSE },
++    { /* opt_NoED             */ 'w', PR_FALSE, 0, PR_FALSE },
++    { /* opt_NoECMont         */ 'g', PR_FALSE, 0, PR_FALSE },
+ };
+ 
+ int
+ main(int argc, char **argv)
+ {
+     char *progName;
+     SECStatus rv;
+     secuCommand args;
+     PK11SlotInfo *slot = NULL;
+     PRBool failed = PR_FALSE;
+     secuPWData pwArgs = { PW_NONE, 0 };
+     PRBool doRSA = PR_TRUE;
+     PRBool doDSA = PR_TRUE;
+     PRBool doDH = PR_FALSE; /* NSS currently can't export wrapped DH keys */
+     PRBool doEC = PR_TRUE;
+     PRBool doMLKEM = PR_TRUE;
++    PRBool doED = PR_TRUE;
++    PRBool doECMont = PR_TRUE;
+     PRBool noPub = PR_FALSE;
+     PQGParams *pqgParams = NULL;
+     int keySize;
+ 
+     args.numCommands = 0;
+     args.numOptions = sizeof(options) / sizeof(secuCommandFlag);
+     args.commands = NULL;
+     args.options = options;
+@@ -407,16 +415,61 @@ main(int argc, char **argv)
+                                               CKM_ML_KEM_KEY_PAIR_GEN,
+                                               noPub, &paramSet, &pwArgs);
+         if (rv != SECSuccess) {
+             fprintf(stderr, "MLKEM Import Failed!\n");
+             failed = PR_TRUE;
+         }
+     }
+ 
++    if (doED) {
++        SECKEYECParams ecParams;
++        SECOidData *curve = SECOID_FindOIDByTag(SEC_OID_ED25519);
++        ecParams.data = PORT_Alloc(curve->oid.len + 2);
++        if (ecParams.data == NULL) {
++            rv = SECFailure;
++            goto ed_failed;
++        }
++        ecParams.data[0] = SEC_ASN1_OBJECT_ID;
++        ecParams.data[1] = (unsigned char)curve->oid.len;
++        PORT_Memcpy(&ecParams.data[2], curve->oid.data, curve->oid.len);
++        ecParams.len = curve->oid.len + 2;
++        rv = handleEncryptedPrivateImportTest(progName, slot, "EDDSA",
++                                              CKM_EC_EDWARDS_KEY_PAIR_GEN,
++                                              noPub, &ecParams, &pwArgs);
++        PORT_Free(ecParams.data);
++    ed_failed:
++        if (rv != SECSuccess) {
++            fprintf(stderr, "EDDSA Import Failed!\n");
++            failed = PR_TRUE;
++        }
++    }
++    if (doECMont) {
++        SECKEYECParams ecParams;
++        SECOidData *curve = SECOID_FindOIDByTag(SEC_OID_X25519);
++        ecParams.data = PORT_Alloc(curve->oid.len + 2);
++        if (ecParams.data == NULL) {
++            rv = SECFailure;
++            goto ecmont_failed;
++        }
++        ecParams.data[0] = SEC_ASN1_OBJECT_ID;
++        ecParams.data[1] = (unsigned char)curve->oid.len;
++        PORT_Memcpy(&ecParams.data[2], curve->oid.data, curve->oid.len);
++        ecParams.len = curve->oid.len + 2;
++        rv = handleEncryptedPrivateImportTest(progName, slot, "EC Mont",
++                                              CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
++                                              noPub, &ecParams, &pwArgs);
++        PORT_Free(ecParams.data);
++    ecmont_failed:
++        if (rv != SECSuccess) {
++            fprintf(stderr, "EC Montgomery Import Failed!\n");
++            failed = PR_TRUE;
++        }
++    }
++
+     if (pqgParams) {
+         PK11_PQG_DestroyParams(pqgParams);
+     }
+ 
+     if (slot) {
+         PK11_FreeSlot(slot);
+     }
+ 
+diff --git a/lib/softoken/lowkey.c b/lib/softoken/lowkey.c
+--- a/lib/softoken/lowkey.c
++++ b/lib/softoken/lowkey.c
+@@ -40,16 +40,21 @@ const SEC_ASN1Template nsslowkey_Private
+     { SEC_ASN1_INLINE | SEC_ASN1_XTRN,
+       offsetof(NSSLOWKEYPrivateKeyInfo, algorithm),
+       SEC_ASN1_SUB(SECOID_AlgorithmIDTemplate) },
+     { SEC_ASN1_OCTET_STRING,
+       offsetof(NSSLOWKEYPrivateKeyInfo, privateKey) },
+     { SEC_ASN1_OPTIONAL | SEC_ASN1_CONSTRUCTED | SEC_ASN1_CONTEXT_SPECIFIC | 0,
+       offsetof(NSSLOWKEYPrivateKeyInfo, attributes),
+       nsslowkey_SetOfAttributeTemplate },
++    { SEC_ASN1_OPTIONAL | SEC_ASN1_CONSTRUCTED |
++          SEC_ASN1_EXPLICIT | SEC_ASN1_CONTEXT_SPECIFIC |
++          SEC_ASN1_XTRN | 1,
++      offsetof(NSSLOWKEYPrivateKeyInfo, publicKey),
++      SEC_ASN1_SUB(SEC_BitStringTemplate) },
+     { 0 }
+ };
+ 
+ const SEC_ASN1Template nsslowkey_SubjectPublicKeyInfoTemplate[] = {
+     { SEC_ASN1_SEQUENCE, 0, NULL, sizeof(NSSLOWKEYSubjectPublicKeyInfo) },
+     { SEC_ASN1_INLINE | SEC_ASN1_XTRN,
+       offsetof(NSSLOWKEYSubjectPublicKeyInfo, algorithm),
+       SEC_ASN1_SUB(SECOID_AlgorithmIDTemplate) },
+@@ -396,16 +401,18 @@ nsslowkey_ConvertToPublicKey(NSSLOWKEYPr
+                     break;
+                 rv = SECITEM_CopyItem(arena, &pubk->u.dh.base,
+                                       &privk->u.dh.base);
+                 if (rv == SECSuccess)
+                     return pubk;
+             }
+             break;
+         case NSSLOWKEYECKey:
++        case NSSLOWKEYECEdwardsKey:
++        case NSSLOWKEYECMontgomeryKey:
+             pubk = (NSSLOWKEYPublicKey *)PORT_ArenaZAlloc(arena,
+                                                           sizeof(NSSLOWKEYPublicKey));
+             if (pubk != NULL) {
+                 SECStatus rv;
+ 
+                 pubk->arena = arena;
+                 pubk->keyType = privk->keyType;
+ 
+@@ -628,16 +635,18 @@ nsslowkey_CopyPrivateKey(NSSLOWKEYPrivat
+             if (rv != SECSuccess)
+                 break;
+             rv = SECITEM_CopyItem(poolp, &(returnKey->u.dh.base),
+                                   &(privKey->u.dh.base));
+             if (rv != SECSuccess)
+                 break;
+             break;
+         case NSSLOWKEYECKey:
++        case NSSLOWKEYECEdwardsKey:
++        case NSSLOWKEYECMontgomeryKey:
+             rv = SECITEM_CopyItem(poolp, &(returnKey->u.ec.version),
+                                   &(privKey->u.ec.version));
+             if (rv != SECSuccess)
+                 break;
+             rv = SECITEM_CopyItem(poolp, &(returnKey->u.ec.publicValue),
+                                   &(privKey->u.ec.publicValue));
+             if (rv != SECSuccess)
+                 break;
+diff --git a/lib/softoken/lowkeyti.h b/lib/softoken/lowkeyti.h
+--- a/lib/softoken/lowkeyti.h
++++ b/lib/softoken/lowkeyti.h
+@@ -45,16 +45,17 @@ typedef struct NSSLOWKEYAttributeStr NSS
+ ** A PKCS#8 private key info object
+ */
+ struct NSSLOWKEYPrivateKeyInfoStr {
+     PLArenaPool *arena;
+     SECItem version;
+     SECAlgorithmID algorithm;
+     SECItem privateKey;
+     NSSLOWKEYAttribute **attributes;
++    SECItem publicKey;
+ };
+ typedef struct NSSLOWKEYPrivateKeyInfoStr NSSLOWKEYPrivateKeyInfo;
+ #define NSSLOWKEY_PRIVATE_KEY_INFO_VERSION 0 /* what we *create* */
+ 
+ struct NSSLOWKEYSubjectPublicKeyInfoStr {
+     PLArenaPool *arena;
+     SECAlgorithmID algorithm;
+     SECItem subjectPublicKey;
+@@ -62,18 +63,20 @@ struct NSSLOWKEYSubjectPublicKeyInfoStr 
+ typedef struct NSSLOWKEYSubjectPublicKeyInfoStr NSSLOWKEYSubjectPublicKeyInfo;
+ 
+ typedef enum {
+     NSSLOWKEYNullKey = 0,
+     NSSLOWKEYRSAKey = 1,
+     NSSLOWKEYDSAKey = 2,
+     NSSLOWKEYDHKey = 4,
+     NSSLOWKEYECKey = 5,
+-    NSSLOWKEYMLDSAKey = 6,
+-    NSSLOWKEYMLKEMKey = 7,
++    NSSLOWKEYECEdwardsKey = 6,
++    NSSLOWKEYECMontgomeryKey = 7,
++    NSSLOWKEYMLDSAKey = 8,
++    NSSLOWKEYMLKEMKey = 9,
+ } NSSLOWKEYType;
+ 
+ /* ML KEM low structures packages a key with it's parameters.
+  * The ML KEM freebl didn't define these because all the functions
+  * take raw keys and param separately */
+ typedef struct MLKEMPrivateKeyStr MLKEMPrivateKey;
+ typedef struct MLKEMPublicKeyStr MLKEMPublicKey;
+ 
+diff --git a/lib/softoken/pkcs11.c b/lib/softoken/pkcs11.c
+--- a/lib/softoken/pkcs11.c
++++ b/lib/softoken/pkcs11.c
+@@ -2220,19 +2220,24 @@ sftk_GetPubKey(SFTKObject *object, CK_KE
+             crv = sftk_Attribute2SSecItem(arena, &pubKey->u.dh.base,
+                                           object, CKA_BASE);
+             if (crv != CKR_OK)
+                 break;
+             crv = sftk_Attribute2SSecItem(arena, &pubKey->u.dh.publicValue,
+                                           object, CKA_VALUE);
+             break;
+         case CKK_EC_EDWARDS:
++            pubKey->keyType = NSSLOWKEYECEdwardsKey;
++            goto ec_continue;
+         case CKK_EC_MONTGOMERY:
++            pubKey->keyType = NSSLOWKEYECMontgomeryKey;
++            goto ec_continue;
+         case CKK_EC:
+             pubKey->keyType = NSSLOWKEYECKey;
++        ec_continue:
+             crv = sftk_Attribute2SSecItem(arena,
+                                           &pubKey->u.ec.ecParams.DEREncoding,
+                                           object, CKA_EC_PARAMS);
+             if (crv != CKR_OK)
+                 break;
+ 
+             /* Fill out the rest of the ecParams structure
+              * based on the encoded params
+@@ -2448,19 +2453,24 @@ sftk_mkPrivKey(SFTKObject *object, CK_KE
+             itemTemplateCount++;
+             SFTK_SET_ITEM_TEMPLATE(itemTemplate, itemTemplateCount,
+                                    &privKey->u.dh.privateValue, CKA_VALUE);
+             itemTemplateCount++;
+             /* privKey was zero'd so public value is already set to NULL, 0
+              * if we don't set it explicitly */
+             break;
+         case CKK_EC_EDWARDS:
++            privKey->keyType = NSSLOWKEYECEdwardsKey;
++            goto ec_continue;
+         case CKK_EC_MONTGOMERY:
++            privKey->keyType = NSSLOWKEYECMontgomeryKey;
++            goto ec_continue;
+         case CKK_EC:
+             privKey->keyType = NSSLOWKEYECKey;
++        ec_continue:
+             crv = sftk_Attribute2SSecItem(arena,
+                                           &privKey->u.ec.ecParams.DEREncoding,
+                                           object, CKA_EC_PARAMS);
+             if (crv != CKR_OK)
+                 break;
+ 
+             /* Fill out the rest of the ecParams structure
+              * based on the encoded params
+@@ -2511,16 +2521,17 @@ sftk_mkPrivKey(SFTKObject *object, CK_KE
+             break;
+ 
+ #ifndef NSS_DISABLE_KYBER
+         case CKK_NSS_KYBER:
+ #endif
+         case CKK_NSS_ML_KEM:
+         case CKK_ML_KEM:
+             privKey->keyType = NSSLOWKEYMLKEMKey;
++
+             crv = sftk_GetULongAttribute(object, CKA_PARAMETER_SET,
+                                          &paramSet);
+             if (crv != CKR_OK) {
+                 crv = sftk_GetULongAttribute(object, CKA_NSS_PARAMETER_SET,
+                                              &paramSet);
+                 if (crv != CKR_OK) {
+                     break;
+                 }
+diff --git a/lib/softoken/pkcs11c.c b/lib/softoken/pkcs11c.c
+--- a/lib/softoken/pkcs11c.c
++++ b/lib/softoken/pkcs11c.c
+@@ -6462,35 +6462,31 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hS
+             unsigned char seedData[KYBER_KEYPAIR_COIN_BYTES];
+ 
+             /* generate the seed here so we can record it with
+              * the private key */
+             seed.data = seedData;
+             seed.len = sizeof(seedData);
+             rv = RNG_GenerateGlobalRandomBytes(seed.data, seed.len);
+             if (rv != SECSuccess) {
+-                fprintf(stderr, "Generate bytes failed nbytes=%d err=%d\n",
+-                        seed.len, PORT_GetError());
+                 crv = sftk_MapCryptError(PORT_GetError());
+                 goto kyber_done;
+             }
+ 
+             KyberParams kyberParams = sftk_kyber_PK11ParamToInternal(genParamSet);
+             if (!sftk_kyber_AllocPrivKeyItem(kyberParams, &privKey)) {
+                 crv = CKR_HOST_MEMORY;
+                 goto kyber_done;
+             }
+             if (!sftk_kyber_AllocPubKeyItem(kyberParams, &pubKey)) {
+                 crv = CKR_HOST_MEMORY;
+                 goto kyber_done;
+             }
+             rv = Kyber_NewKey(kyberParams, &seed, &privKey, &pubKey);
+             if (rv != SECSuccess) {
+-                fprintf(stderr, "Generate Kyber_NewKey failed nbytes=%d err=%d\n",
+-                        seed.len, PORT_GetError());
+                 crv = sftk_MapCryptError(PORT_GetError());
+                 goto kyber_done;
+             }
+ 
+             crv = sftk_AddAttributeType(publicKey, CKA_VALUE, sftk_item_expand(&pubKey));
+             if (crv != CKR_OK) {
+                 goto kyber_done;
+             }
+@@ -6899,16 +6895,17 @@ sftk_PackagePrivateKey(SFTKObject *key, 
+             dummy = SEC_ASN1EncodeItem(arena, &pki->privateKey, lk,
+                                        nsslowkey_DSAPrivateKeyExportTemplate);
+             prepare_low_pqg_params_for_asn1(&lk->u.dsa.params);
+             param = SEC_ASN1EncodeItem(NULL, NULL, &(lk->u.dsa.params),
+                                        nsslowkey_PQGParamsTemplate);
+             algorithm = SEC_OID_ANSIX9_DSA_SIGNATURE;
+             break;
+         case NSSLOWKEYECKey:
++            algorithm = SEC_OID_ANSIX962_EC_PUBLIC_KEY;
+             prepare_low_ec_priv_key_for_asn1(lk);
+             /* Public value is encoded as a bit string so adjust length
+              * to be in bits before ASN encoding and readjust
+              * immediately after.
+              *
+              * Since the SECG specification recommends not including the
+              * parameters as part of ECPrivateKey, we zero out the curveOID
+              * length before encoding and restore it later.
+@@ -6923,18 +6920,36 @@ sftk_PackagePrivateKey(SFTKObject *key, 
+ 
+ #ifdef EC_DEBUG
+             fordebug = &pki->privateKey;
+             SEC_PRINT("sftk_PackagePrivateKey()", "PrivateKey", lk->keyType,
+                       fordebug);
+ #endif
+ 
+             param = SECITEM_DupItem(&lk->u.ec.ecParams.DEREncoding);
+-
+-            algorithm = SEC_OID_ANSIX962_EC_PUBLIC_KEY;
++            break;
++        /* X25519, ED25519, X448, and ED448 encode the private key
++         * as just and int. The public key and Curve come from the
++         * generaly key structure */
++        case NSSLOWKEYECEdwardsKey:
++            algorithm = SEC_OID_ED25519;
++            goto ec_continue;
++        case NSSLOWKEYECMontgomeryKey:
++            algorithm = SEC_OID_X25519;
++        ec_continue:
++            prepare_low_ec_priv_key_for_asn1(lk);
++            /* if we have a public key, copy it to pki public key */
++            if (lk->u.ec.publicValue.len) {
++                pki->publicKey = lk->u.ec.publicValue;
++                pki->publicKey.len <<= 3;
++            }
++            dummy = SEC_ASN1EncodeItem(arena, &pki->privateKey,
++                                       &lk->u.ec.privateValue,
++                                       SEC_ASN1_GET(SEC_OctetStringTemplate));
++            param = NULL;
+             break;
+         case NSSLOWKEYMLKEMKey: {
+             SECItem seed = { siBuffer, NULL, 0 };
+             SECItem rawKey = { siBuffer, NULL, 0 };
+             dummy = NULL;
+ 
+             switch (lk->u.mlkem.mlkemParams) {
+                 case params_ml_kem768:
+@@ -7255,16 +7270,18 @@ sftk_unwrapPrivateKey(SFTKObject *key, S
+     SECStatus rv = SECFailure;
+     const SEC_ASN1Template *keyTemplate, *paramTemplate;
+     void *paramDest = NULL;
+     PLArenaPool *arena;
+     NSSLOWKEYPrivateKey *lpk = NULL;
+     NSSLOWKEYPrivateKeyInfo *pki = NULL;
+     CK_RV crv = CKR_KEY_TYPE_INCONSISTENT;
+     CK_ULONG paramSet = 0;
++    const SECOidData *oidData = NULL;
++    SECOidTag pkiAlg = SEC_OID_UNKNOWN;
+ 
+     arena = PORT_NewArena(2048);
+     if (!arena) {
+         return SECFailure;
+     }
+ 
+     pki = (NSSLOWKEYPrivateKeyInfo *)PORT_ArenaZAlloc(arena,
+                                                       sizeof(NSSLOWKEYPrivateKeyInfo));
+@@ -7280,17 +7297,18 @@ sftk_unwrapPrivateKey(SFTKObject *key, S
+ 
+     lpk = (NSSLOWKEYPrivateKey *)PORT_ArenaZAlloc(arena,
+                                                   sizeof(NSSLOWKEYPrivateKey));
+     if (lpk == NULL) {
+         goto loser;
+     }
+     lpk->arena = arena;
+ 
+-    switch (SECOID_GetAlgorithmTag(&pki->algorithm)) {
++    pkiAlg = SECOID_GetAlgorithmTag(&pki->algorithm);
++    switch (pkiAlg) {
+         case SEC_OID_PKCS1_RSA_ENCRYPTION:
+         case SEC_OID_PKCS1_RSA_PSS_SIGNATURE:
+             keyTemplate = nsslowkey_RSAPrivateKeyTemplate;
+             paramTemplate = NULL;
+             paramDest = NULL;
+             lpk->keyType = NSSLOWKEYRSAKey;
+             prepare_low_rsa_priv_key_for_asn1(lpk);
+             break;
+@@ -7306,16 +7324,52 @@ sftk_unwrapPrivateKey(SFTKObject *key, S
+         case SEC_OID_ANSIX962_EC_PUBLIC_KEY:
+             keyTemplate = nsslowkey_ECPrivateKeyTemplate;
+             paramTemplate = NULL;
+             paramDest = &(lpk->u.ec.ecParams.DEREncoding);
+             lpk->keyType = NSSLOWKEYECKey;
+             prepare_low_ec_priv_key_for_asn1(lpk);
+             prepare_low_ecparams_for_asn1(&lpk->u.ec.ecParams);
+             break;
++        case SEC_OID_X25519:
++            lpk->keyType = NSSLOWKEYECMontgomeryKey;
++            goto ecx_continue;
++        case SEC_OID_ED25519:
++            lpk->keyType = NSSLOWKEYECEdwardsKey;
++        ecx_continue:
++            /* we decode the whole key here rather than do the normal
++             * later decode step */
++            keyTemplate = NULL;
++            paramTemplate = NULL;
++            paramDest = NULL;
++            oidData = SECOID_FindOIDByTag(pkiAlg);
++            if (oidData == NULL) {
++                goto loser;
++            }
++            /* CURVE is provided by the tag, not encoded in the parameters
++             * for the x25519, x448, ed25519 and ed448 keys */
++            if (SEC_ASN1EncodeItem(arena, &(lpk->u.ec.ecParams.DEREncoding),
++                                   &oidData->oid,
++                                   SEC_ASN1_GET(SEC_ObjectIDTemplate)) == NULL) {
++                goto loser;
++            }
++            prepare_low_ec_priv_key_for_asn1(lpk);
++            /* private key is a simple octet string, just decode it now */
++            rv = SEC_QuickDERDecodeItem(arena, &(lpk->u.ec.privateValue),
++                                        SEC_ASN1_GET(SEC_OctetStringTemplate),
++                                        &(pki->privateKey));
++            if (rv != SECSuccess) {
++                goto loser;
++            }
++            if (pki->publicKey.len) {
++                lpk->u.ec.publicValue = pki->publicKey;
++                /* convert length in bits to length in bytes */
++                lpk->u.ec.publicValue.len >>= 3;
++            }
++            break;
+         case SEC_OID_ML_KEM_768:
+             paramSet = CKP_ML_KEM_768;
+             goto mlkem_next;
+         case SEC_OID_ML_KEM_1024:
+             paramSet = CKP_ML_KEM_1024;
+         mlkem_next:
+             lpk->keyType = NSSLOWKEYMLKEMKey;
+             goto pq_next;
+@@ -7341,36 +7395,37 @@ sftk_unwrapPrivateKey(SFTKObject *key, S
+                 case SEC_ASN1_OCTET_STRING:
+                     keyTemplate = nsslowkey_PQPrivateKeyTemplate;
+                     break;
+                 case SEC_ASN1_CONSTRUCTED | SEC_ASN1_SEQUENCE:
+                     keyTemplate = nsslowkey_PQBothSeedAndPrivateKeyTemplate;
+                     break;
+                 default:
+                     keyTemplate = NULL;
+-                    break;
++                    PORT_SetError(SEC_ERROR_BAD_KEY);
++                    goto loser;
+             }
+ 
+             paramTemplate = NULL;
+             paramDest = NULL;
+             /* genpq encodes ocect, not integer, so no need to prep it */
+             break;
+         default:
+             keyTemplate = NULL;
+             paramTemplate = NULL;
+             paramDest = NULL;
+-            break;
+-    }
+-
+-    if (!keyTemplate) {
+-        goto loser;
++            PORT_SetError(SEC_ERROR_BAD_KEY);
++            goto loser;
+     }
+ 
+     /* decode the private key and any algorithm parameters */
+-    rv = SEC_QuickDERDecodeItem(arena, lpk, keyTemplate, &pki->privateKey);
++    rv = SECSuccess;
++    if (keyTemplate) {
++        rv = SEC_QuickDERDecodeItem(arena, lpk, keyTemplate, &pki->privateKey);
++    }
+ 
+     if (lpk->keyType == NSSLOWKEYECKey) {
+         /* convert length in bits to length in bytes */
+         lpk->u.ec.publicValue.len >>= 3;
+         rv = SECITEM_CopyItem(arena,
+                               &(lpk->u.ec.ecParams.DEREncoding),
+                               &(pki->algorithm.parameters));
+         if (rv != SECSuccess) {
+@@ -7557,19 +7612,25 @@ sftk_unwrapPrivateKey(SFTKObject *key, S
+             break;
+ #ifdef notdef
+         case NSSLOWKEYDHKey:
+             template = dhTemplate;
+             templateCount = sizeof(dhTemplate) / sizeof(CK_ATTRIBUTE);
+             keyType = CKK_DH;
+             break;
+ #endif
+-        /* what about fortezza??? */
++        case NSSLOWKEYECEdwardsKey:
++            keyType = CKK_EC_EDWARDS;
++            goto ec_import_continue;
++        case NSSLOWKEYECMontgomeryKey:
++            keyType = CKK_EC_MONTGOMERY;
++            goto ec_import_continue;
+         case NSSLOWKEYECKey:
+             keyType = CKK_EC;
++        ec_import_continue:
+             /* if we weren't passed the CKA_NSS_DB, get it
+              * from the public key */
+             if (!sftk_hasAttribute(key, CKA_NSS_DB)) {
+                 if (lpk->u.ec.publicValue.len == 0) {
+                     crv = CKR_KEY_TYPE_INCONSISTENT;
+                     goto loser;
+                 }
+                 crv = sftk_AddAttributeType(key, CKA_NSS_DB,
+diff --git a/lib/softoken/pkcs11u.c b/lib/softoken/pkcs11u.c
+--- a/lib/softoken/pkcs11u.c
++++ b/lib/softoken/pkcs11u.c
+@@ -1639,16 +1639,18 @@ stfk_CopyTokenPrivateKey(SFTKObject *des
+             crv = stfk_CopyTokenAttributes(destObject, src_to, mldsaPrivKeyAttrs,
+                                            mldsaPrivKeyAttrsCount);
+             break;
+         case CKK_DH:
+             crv = stfk_CopyTokenAttributes(destObject, src_to, dhPrivKeyAttrs,
+                                            dhPrivKeyAttrsCount);
+             break;
+         case CKK_EC:
++        case CKK_EC_EDWARDS:
++        case CKK_EC_MONTGOMERY:
+             crv = stfk_CopyTokenAttributes(destObject, src_to, ecPrivKeyAttrs,
+                                            ecPrivKeyAttrsCount);
+             break;
+         default:
+             crv = CKR_DEVICE_ERROR; /* shouldn't happen unless we store more types
+                                      * of token keys into our database. */
+     }
+ fail:
+@@ -1703,16 +1705,18 @@ stfk_CopyTokenPublicKey(SFTKObject *dest
+             crv = stfk_CopyTokenAttributes(destObject, src_to, mldsaPubKeyAttrs,
+                                            mldsaPubKeyAttrsCount);
+             break;
+         case CKK_DH:
+             crv = stfk_CopyTokenAttributes(destObject, src_to, dhPubKeyAttrs,
+                                            dhPubKeyAttrsCount);
+             break;
+         case CKK_EC:
++        case CKK_EC_EDWARDS:
++        case CKK_EC_MONTGOMERY:
+             crv = stfk_CopyTokenAttributes(destObject, src_to, ecPubKeyAttrs,
+                                            ecPubKeyAttrsCount);
+             break;
+         default:
+             crv = CKR_DEVICE_ERROR; /* shouldn't happen unless we store more types
+                                      * of token keys into our database. */
+     }
+ fail:
+diff --git a/lib/util/secoid.c b/lib/util/secoid.c
+--- a/lib/util/secoid.c
++++ b/lib/util/secoid.c
+@@ -637,20 +637,20 @@ CONST_OID curve25519[] = { 0x2B, 0x06, 0
+         Binary encoding: 3005 0603 2B65 70
+ 
+         The same algorithm identifiers are used for identifying a public key,
+         a private key, and a signature (for the two EdDSA related OIDs).
+         Additional encoding information is provided below for each of these
+         locations.
+ */
+ 
+-CONST_OID ed25519PublicKey[] = { 0x2B, 0x65, 0x70 };
+-CONST_OID ed25519Signature[] = { 0x2B, 0x65, 0x70 };
+-
+ /*https://www.rfc-editor.org/rfc/rfc8410#section-3*/
++/* 1.3.101.112 */
++CONST_OID ed25519[] = { 0x2B, 0x65, 0x70 };
++/* 1.3.101.110 */
+ CONST_OID x25519PublicKey[] = { 0x2b, 0x65, 0x6e };
+ 
+ /*
+  * ML-DSA OIDs
+  * https://csrc.nist.gov/projects/computer-security-objects-register/algorithm-registration
+  */
+ CONST_OID mlDsa44[] = { DSA2, 17 };
+ CONST_OID mlDsa65[] = { DSA2, 18 };
+@@ -1866,21 +1866,24 @@ const static SECOidData oids[SEC_OID_TOT
+     OD(hmac_sha3_224, SEC_OID_HMAC_SHA3_224, "HMAC SHA3-224", CKM_SHA3_224_HMAC, INVALID_CERT_EXTENSION),
+     OD(hmac_sha3_256, SEC_OID_HMAC_SHA3_256, "HMAC SHA3-256", CKM_SHA3_256_HMAC, INVALID_CERT_EXTENSION),
+     OD(hmac_sha3_384, SEC_OID_HMAC_SHA3_384, "HMAC SHA3-384", CKM_SHA3_384_HMAC, INVALID_CERT_EXTENSION),
+     OD(hmac_sha3_512, SEC_OID_HMAC_SHA3_512, "HMAC SHA3-512", CKM_SHA3_512_HMAC, INVALID_CERT_EXTENSION),
+ 
+     ODE(SEC_OID_XYBER768D00,
+         "X25519+Kyber768 key exchange", CKM_INVALID_MECHANISM, INVALID_CERT_EXTENSION),
+ 
+-    OD(ed25519Signature, SEC_OID_ED25519_SIGNATURE, "X9.62 EDDSA signature", CKM_EDDSA,
+-       INVALID_CERT_EXTENSION),
++    /* SEC_OID_ED25519_PUBLIC_KEY and SEC_OID_ED25519_SIGNATURE have the same
++     * values, so we should only have one entry in the table, We can't
++     * shift the values of the other entries, so just leav a dead spot here */
++    ODE(SEC_OID_RESERVED_OLD_EDSIG, "Reserved", CKM_INVALID_MECHANISM,
++        INVALID_CERT_EXTENSION),
+ 
+-    OD(ed25519PublicKey, SEC_OID_ED25519_PUBLIC_KEY,
+-       "X9.62 elliptic edwards curve public key", CKM_EC_EDWARDS_KEY_PAIR_GEN, INVALID_CERT_EXTENSION),
++    OD(ed25519, SEC_OID_ED25519,
++       "X9.62 Elliptic Edwards Curve 25519", CKM_EDDSA, INVALID_CERT_EXTENSION),
+ 
+     OD(dhSinglePassstdDHsha1kdfscheme, SEC_OID_DHSINGLEPASS_STDDH_SHA1KDF_SCHEME,
+        "Eliptic Curve Diffie-Hellman Single Pass Standard with SHA1 KDF", CKM_ECDH1_DERIVE,
+        INVALID_CERT_EXTENSION),
+     OD(dhSinglePassstdDHsha224kdfscheme, SEC_OID_DHSINGLEPASS_STDDH_SHA224KDF_SCHEME,
+        "Eliptic Curve Diffie-Hellman Single Pass Standard with SHA224 KDF", CKM_ECDH1_DERIVE,
+        INVALID_CERT_EXTENSION),
+     OD(dhSinglePassstdDHsha256kdfscheme, SEC_OID_DHSINGLEPASS_STDDH_SHA256KDF_SCHEME,
+diff --git a/lib/util/secoidt.h b/lib/util/secoidt.h
+--- a/lib/util/secoidt.h
++++ b/lib/util/secoidt.h
+@@ -509,18 +509,18 @@ typedef enum {
+ 
+     SEC_OID_HMAC_SHA3_224 = 368,
+     SEC_OID_HMAC_SHA3_256 = 369,
+     SEC_OID_HMAC_SHA3_384 = 370,
+     SEC_OID_HMAC_SHA3_512 = 371,
+ 
+     SEC_OID_XYBER768D00 = 372,
+ 
+-    SEC_OID_ED25519_SIGNATURE = 373,
+-    SEC_OID_ED25519_PUBLIC_KEY = 374,
++    SEC_OID_RESERVED_OLD_EDSIG = 373,
++    SEC_OID_ED25519 = 374,
+ 
+     SEC_OID_DHSINGLEPASS_STDDH_SHA1KDF_SCHEME = 375,
+     SEC_OID_DHSINGLEPASS_STDDH_SHA224KDF_SCHEME = 376,
+     SEC_OID_DHSINGLEPASS_STDDH_SHA256KDF_SCHEME = 377,
+     SEC_OID_DHSINGLEPASS_STDDH_SHA384KDF_SCHEME = 378,
+     SEC_OID_DHSINGLEPASS_STDDH_SHA512KDF_SCHEME = 379,
+     SEC_OID_DHSINGLEPASS_COFACTORDH_SHA1KDF_SCHEME = 380,
+     SEC_OID_DHSINGLEPASS_COFACTORDH_SHA224KDF_SCHEME = 381,
+@@ -558,16 +558,20 @@ typedef enum {
+ /* ML-DSA Public keys and signatures use the same identifier */
+ #define SEC_OID_ML_DSA_44_SIGNATURE SEC_OID_ML_DSA_44
+ #define SEC_OID_ML_DSA_44_PUBLIC_KEY SEC_OID_ML_DSA_44
+ #define SEC_OID_ML_DSA_65_SIGNATURE SEC_OID_ML_DSA_65
+ #define SEC_OID_ML_DSA_65_PUBLIC_KEY SEC_OID_ML_DSA_65
+ #define SEC_OID_ML_DSA_87_SIGNATURE SEC_OID_ML_DSA_87
+ #define SEC_OID_ML_DSA_87_PUBLIC_KEY SEC_OID_ML_DSA_87
+ 
++/* EDDSA have the same identifiers for public keys and signatures */
++#define SEC_OID_ED25519_SIGNATURE SEC_OID_ED25519
++#define SEC_OID_ED25519_PUBLIC_KEY SEC_OID_ED25519
++
+ typedef enum {
+     INVALID_CERT_EXTENSION = 0,
+     UNSUPPORTED_CERT_EXTENSION = 1,
+     SUPPORTED_CERT_EXTENSION = 2
+ } SECSupportExtenTag;
+ 
+ struct SECOidDataStr {
+     SECItem oid;
+diff --git a/tests/tools/tools.sh b/tests/tools/tools.sh
+--- a/tests/tools/tools.sh
++++ b/tests/tools/tools.sh
+@@ -123,16 +123,17 @@ tools_init()
+   cp ${QADIR}/tools/PKCS5WithImplicitKDF.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-valid-sha256.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-valid-sha256-sha512.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-valid-sha512.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-invalid-bad-iter.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-invalid-bad-salt.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-invalid-no-length.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/corrupted_cert_bag.p12 ${TOOLSDIR}/data
++  cp ${QADIR}/tools/openssl-ed25519.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-768-seed.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-768-priv.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-768-both.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-1024-seed.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-1024-priv.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-1024-both.p12 ${TOOLSDIR}/data
+ 
+ 
+@@ -531,16 +532,27 @@ tools_p12_import_rsa_pss_private_key()
+   ${BINDIR}/certutil -d ${P_R_COPYDIR} -K -f ${R_PWFILE} | grep '^<[0-9 ]*> *rsaPss'
+   ret=$?
+   html_msg $ret 0 "Listing RSA-PSS private key imported from PKCS#12 file"
+   check_tmpfile
+ 
+   return $ret
+ }
+ 
++tools_p12_import_ed25519_private_key()
++{
++  echo "$SCRIPTNAME: Importing ED25519 private key from PKCS#12 file --------------"
++  ${BINDIR}/pk12util -i ${TOOLSDIR}/data/openssl-ed25519.p12 -d ${P_R_COPYDIR} -k ${R_PWFILE} -W 'test' 2>&1
++  ret=$?
++  html_msg $ret 0 "Importing ED25519 private key from PKCS#12 file"
++  check_tmpfile
++
++  return $ret
++}
++
+ tools_p12_ml_kem_import()
+ {
+   echo "$SCRIPTNAME: Testing ml-kem compatibility with pkcs12 --------------"
+   for i in 768 1024
+   do
+     for j in 'seed' 'priv' 'both'
+     do
+        echo "${BINDIR}/pk12util -i ${TOOLSDIR}/data/openssl-ml-kem-$i-$j.p12 -d ${P_R_COPYDIR} -k ${R_PWFILE} -W 'test' 2>&1"
+@@ -611,16 +623,17 @@ tools_p12()
+       tools_p12_export_list_import_all_pkcs12v2pbe_ciphers
+   else
+       tools_p12_export_list_import_most_ciphers
+   fi
+   tools_p12_export_with_none_ciphers
+   tools_p12_export_with_invalid_ciphers
+   tools_p12_import_old_files
+   tools_p12_import_pbmac1_samples
++  tools_p12_import_ed25519_private_key
+   tools_p12_ml_kem_import
+   if using_sql; then
+     tools_p12_import_rsa_pss_private_key
+ #tools_p12_policy
+   fi
+ }
+ 
+ ############################## tools_sign ##############################

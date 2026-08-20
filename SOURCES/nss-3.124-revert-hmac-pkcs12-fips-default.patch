@@ -1,0 +1,36 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1781629595 25200
+#      Tue Jun 16 10:06:35 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID b38b82d220e288befed5176cd2ebb04df5fc3317
+# Parent  07371c5f55e422e28311ef00131462bcf2058882
+nss-3.124-revert-hmac-pkcs12-fips-default.patch
+
+diff --git a/cmd/pk12util/pk12util.c b/cmd/pk12util/pk12util.c
+--- a/cmd/pk12util/pk12util.c
++++ b/cmd/pk12util/pk12util.c
+@@ -1159,20 +1159,23 @@ main(int argc, char **argv)
+             if (certCipher == SEC_OID_UNKNOWN) {
+                 PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
+                 SECU_PrintError(progName, "Algorithm: \"%s\"", cipherString);
+                 pk12uErrno = PK12UERR_INVALIDALGORITHM;
+                 goto done;
+             }
+         }
+     }
++#ifdef nodef
++    /* default to old encodings on rhel-8 and rhel-9 */
+     /* in FIPS mode default to encoding with pkcs5v2 for the MAC */
+     if (PK11_IsFIPS()) {
+         hash = SEC_OID_HMAC_SHA256;
+     }
++#endif
+     if (pk12util.options[opt_Mac].activated) {
+         char *hashString = pk12util.options[opt_Mac].arg;
+ 
+         hash = PKCS12U_MapHashFromString(hashString);
+         /* We don't support creating Mac-less pkcs 12 files */
+         if (hash == SEC_OID_UNKNOWN) {
+             PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
+             SECU_PrintError(progName, "Algorithm: \"%s\"", hashString);

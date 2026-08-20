@@ -1,0 +1,80 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1780962091 25200
+#      Mon Jun 08 16:41:31 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID 7748a8ddfa510458e76ff41e840f78f5af55795a
+# Parent  5f6c91f6171020eea4ce9eb5bc353370d30c8df0
+nss-3.124-ml-kem-alias-fix.patch
+
+diff --git a/cmd/lib/secutil.c b/cmd/lib/secutil.c
+--- a/cmd/lib/secutil.c
++++ b/cmd/lib/secutil.c
+@@ -4303,16 +4303,18 @@ static const struct SSLNamedGroupString 
+ #ifndef NSS_DISABLE_KYBER
+     { NAME_AND_LEN("xyber76800"), ssl_grp_kem_xyber768d00 },
+ #endif
+     { NAME_AND_LEN("x25519mlkem768"), ssl_grp_kem_mlkem768x25519 },
+     { NAME_AND_LEN("secp256r1mlkem768"), ssl_grp_kem_secp256r1mlkem768 },
+     { NAME_AND_LEN("secp384r1mlkem1024"), ssl_grp_kem_secp384r1mlkem1024 },
+     // keep for compatibility
+     { NAME_AND_LEN("mlkem768x25519"), ssl_grp_kem_mlkem768x25519 },
++    { NAME_AND_LEN("mlkem768secp256r1"), ssl_grp_kem_secp256r1mlkem768 },
++    { NAME_AND_LEN("mlkem1024secp384r1"), ssl_grp_kem_secp384r1mlkem1024 },
+ };
+ 
+ static const size_t sslNamedGroupStringLen = PR_ARRAY_SIZE(sslNamedGroupStringArray);
+ 
+ static SSLNamedGroup
+ groupNameToNamedGroup(char *name)
+ {
+     int len = PL_strlen(name);
+diff --git a/lib/pk11wrap/pk11pars.c b/lib/pk11wrap/pk11pars.c
+--- a/lib/pk11wrap/pk11pars.c
++++ b/lib/pk11wrap/pk11pars.c
+@@ -255,16 +255,20 @@ static const oidValDef curveOptList[] = 
+     { CIPHER_NAME("X25519MLKEM768"), SEC_OID_MLKEM768X25519,
+       NSS_USE_ALG_IN_SSL_KX },
+     { CIPHER_NAME("SECP256R1MLKEM768"), SEC_OID_SECP256R1MLKEM768,
+       NSS_USE_ALG_IN_SSL_KX },
+     { CIPHER_NAME("SECP384R1MLKEM1024"), SEC_OID_SECP384R1MLKEM1024,
+       NSS_USE_ALG_IN_SSL_KX },
+     { CIPHER_NAME("MLKEM768X25519"), SEC_OID_MLKEM768X25519,
+       NSS_USE_ALG_IN_SSL_KX },
++    { CIPHER_NAME("MLKEM768SECP256R1"), SEC_OID_SECP256R1MLKEM768,
++       NSS_USE_ALG_IN_SSL_KX },
++    { CIPHER_NAME("MLKEM1024SECP384R1"), SEC_OID_SECP384R1MLKEM1024,
++       NSS_USE_ALG_IN_SSL_KX },
+     /* ANSI X9.62 named elliptic curves (characteristic two field) */
+     { CIPHER_NAME("C2PNB163V1"), SEC_OID_ANSIX962_EC_C2PNB163V1,
+       NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_CERT_SIGNATURE },
+     { CIPHER_NAME("C2PNB163V2"), SEC_OID_ANSIX962_EC_C2PNB163V2,
+       NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_CERT_SIGNATURE },
+     { CIPHER_NAME("C2PNB163V3"), SEC_OID_ANSIX962_EC_C2PNB163V3,
+       NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_CERT_SIGNATURE },
+     { CIPHER_NAME("C2PNB176V1"), SEC_OID_ANSIX962_EC_C2PNB176V1,
+@@ -467,21 +471,21 @@ static const oidValDef signOptList[] = {
+       NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_SIGNATURE },
+     { CIPHER_NAME("RSA-PSS"), SEC_OID_PKCS1_RSA_PSS_SIGNATURE,
+       NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_SIGNATURE },
+     { CIPHER_NAME("ECDSA"), SEC_OID_ANSIX962_EC_PUBLIC_KEY,
+       NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_SIGNATURE },
+     { CIPHER_NAME("ED25519"), SEC_OID_ED25519_PUBLIC_KEY,
+       NSS_USE_ALG_IN_SIGNATURE },
+     { CIPHER_NAME("ML-DSA-44"), SEC_OID_ML_DSA_44,
+-      NSS_USE_ALG_IN_SIGNATURE },
++      NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_SIGNATURE },
+     { CIPHER_NAME("ML-DSA-65"), SEC_OID_ML_DSA_65,
+-      NSS_USE_ALG_IN_SIGNATURE },
++      NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_SIGNATURE },
+     { CIPHER_NAME("ML-DSA-87"), SEC_OID_ML_DSA_87,
+-      NSS_USE_ALG_IN_SIGNATURE },
++      NSS_USE_ALG_IN_SSL_KX | NSS_USE_ALG_IN_SIGNATURE },
+ };
+ 
+ typedef struct {
+     const oidValDef *list;
+     PRUint32 entries;
+     const char *description;
+     PRBool allowEmpty;
+ } algListsDef;

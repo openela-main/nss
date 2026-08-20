@@ -1,4 +1,4 @@
-SOURCES/nss-3.112.tar.gz
+SOURCES/nss-3.124.tar.gz
 SOURCES/nss_compat_test_pkcs12.tar
-SOURCES/nspr-4.36.tar.gz
-SOURCES/nss-3.112-add-ml-dsa-gtests-dsa.patch
+SOURCES/nspr-4.39.tar.gz
+SOURCES/nss-3.118-ml-dsa-unittests.patch

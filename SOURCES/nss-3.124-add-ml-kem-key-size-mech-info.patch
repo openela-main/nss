@@ -1,0 +1,60 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1781030209 25200
+#      Tue Jun 09 11:36:49 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID 9d51dda84f46517faa8b9cf6abe4311e1ae3e2ac
+# Parent  2a7bb3310ced138c06a588fc47b9f98e3f9faa68
+nss-3.124-add-ml-kem-key-size-mech-info.patch
+
+diff --git a/lib/softoken/pkcs11.c b/lib/softoken/pkcs11.c
+--- a/lib/softoken/pkcs11.c
++++ b/lib/softoken/pkcs11.c
+@@ -35,16 +35,17 @@
+ #include "secoid.h"
+ #include "sftkdb.h"
+ #include "utilpars.h"
+ #include "ec.h"
+ #include "secasn1.h"
+ #include "secerr.h"
+ #include "lgglue.h"
+ #include "kem.h"
++#include "kyber.h"
+ 
+ PRBool parentForkedAfterC_Initialize;
+ 
+ #ifndef NO_FORK_CHECK
+ 
+ PRBool sftkForkCheckDisabled;
+ 
+ #if defined(CHECK_FORK_PTHREAD) || defined(CHECK_FORK_MIXED)
+@@ -676,23 +677,23 @@ static const struct mechanismList mechan
+     { CKM_IKE1_PRF_DERIVE, { 8, 64, CKF_DERIVE }, PR_TRUE },
+     { CKM_IKE1_EXTENDED_DERIVE, { 8, 255 * 64, CKF_DERIVE }, PR_TRUE },
+     { CKM_NSS_IKE_PRF_PLUS_DERIVE, { 8, 255 * 64, CKF_DERIVE }, PR_TRUE },
+     { CKM_NSS_IKE_PRF_DERIVE, { 8, 64, CKF_DERIVE }, PR_TRUE },
+     { CKM_NSS_IKE1_PRF_DERIVE, { 8, 64, CKF_DERIVE }, PR_TRUE },
+     { CKM_NSS_IKE1_APP_B_PRF_DERIVE, { 8, 255 * 64, CKF_DERIVE }, PR_TRUE },
+ /* -------------------- Kyber Operations ----------------------- */
+ #ifndef NSS_DISABLE_KYBER
+-    { CKM_NSS_KYBER_KEY_PAIR_GEN, { 0, 0, CKF_GENERATE_KEY_PAIR }, PR_TRUE },
+-    { CKM_NSS_KYBER, { 0, 0, CKF_KEM }, PR_TRUE },
++    { CKM_NSS_KYBER_KEY_PAIR_GEN, { KYBER768_PUBLIC_KEY_BYTES, KYBER768_PUBLIC_KEY_BYTES, CKF_GENERATE_KEY_PAIR }, PR_TRUE },
++    { CKM_NSS_KYBER, { KYBER768_PUBLIC_KEY_BYTES, KYBER768_PUBLIC_KEY_BYTES, CKF_KEM }, PR_TRUE },
+ #endif
+-    { CKM_NSS_ML_KEM_KEY_PAIR_GEN, { 0, 0, CKF_GENERATE_KEY_PAIR }, PR_TRUE },
+-    { CKM_NSS_ML_KEM, { 0, 0, CKF_KEM }, PR_TRUE },
+-    { CKM_ML_KEM_KEY_PAIR_GEN, { 0, 0, CKF_GENERATE_KEY_PAIR }, PR_TRUE },
+-    { CKM_ML_KEM, { 0, 0, CKF_KEM }, PR_TRUE },
++    { CKM_NSS_ML_KEM_KEY_PAIR_GEN, { KYBER768_PUBLIC_KEY_BYTES, MLKEM1024_PUBLIC_KEY_BYTES, CKF_GENERATE_KEY_PAIR }, PR_TRUE },
++    { CKM_NSS_ML_KEM, { KYBER768_PUBLIC_KEY_BYTES, MLKEM1024_PUBLIC_KEY_BYTES, CKF_KEM }, PR_TRUE },
++    { CKM_ML_KEM_KEY_PAIR_GEN, { KYBER768_PUBLIC_KEY_BYTES, MLKEM1024_PUBLIC_KEY_BYTES, CKF_GENERATE_KEY_PAIR }, PR_TRUE },
++    { CKM_ML_KEM, { KYBER768_PUBLIC_KEY_BYTES, MLKEM1024_PUBLIC_KEY_BYTES, CKF_KEM }, PR_TRUE },
+     /* don't advertize ML_DSA support until we have it working in freebl */
+     { CKM_ML_DSA_KEY_PAIR_GEN, { ML_DSA_44_PUBLICKEY_LEN, ML_DSA_87_PUBLICKEY_LEN, CKF_GENERATE }, PR_TRUE },
+     { CKM_ML_DSA, { ML_DSA_44_PUBLICKEY_LEN, ML_DSA_87_PUBLICKEY_LEN, CKF_SN_VR }, PR_TRUE },
+ };
+ static const CK_ULONG mechanismCount = sizeof(mechanisms) / sizeof(mechanisms[0]);
+ 
+ /* sigh global so fipstokn can read it */
+ PRBool nsc_init = PR_FALSE;

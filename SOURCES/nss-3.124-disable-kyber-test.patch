@@ -1,0 +1,19 @@
+diff -up ./gtests/freebl_gtest/kyber_unittest.cc.disable_kyber ./gtests/freebl_gtest/kyber_unittest.cc
+--- ./gtests/freebl_gtest/kyber_unittest.cc.disable_kyber	2026-06-03 10:11:43.287411934 -0700
++++ ./gtests/freebl_gtest/kyber_unittest.cc	2026-06-03 10:11:47.246465604 -0700
+@@ -394,6 +394,7 @@ INSTANTIATE_TEST_SUITE_P(SelfTests, Kybe
+                                            params_kyber768_round3));
+ #endif
+ 
++#ifndef NSS_DISABLE_KYBER
+ TEST(Kyber768Test, KnownAnswersTest) {
+   ScopedSECItem privateKey(
+       SECITEM_AllocItem(nullptr, nullptr, MAX_ML_KEM_PRIVATE_KEY_LENGTH));
+@@ -446,6 +447,7 @@ TEST(Kyber768Test, KnownAnswersTest) {
+     EXPECT_EQ(0, memcmp(secret->data, secret2->data, secret2->len));
+   }
+ }
++#endif
+ 
+ TEST(MlKemKeyGen, KnownAnswersTest) {
+   ScopedSECItem privateKey(

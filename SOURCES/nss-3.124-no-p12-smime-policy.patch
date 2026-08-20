@@ -1,3 +1,12 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1781048663 25200
+#      Tue Jun 09 16:44:23 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID f11e37ce2019be68e879875d774c770cf0a4c94a
+# Parent  a1ec20318f4fa9feeb4be2bc7339d573b4d78e27
+nss-3.124-no-p12-smime-policy.patch
+
 diff --git a/lib/pkcs12/p12plcy.c b/lib/pkcs12/p12plcy.c
 --- a/lib/pkcs12/p12plcy.c
 +++ b/lib/pkcs12/p12plcy.c
@@ -75,7 +84,7 @@ diff --git a/lib/smime/smimeutil.c b/lib/smime/smimeutil.c
 @@ -480,28 +482,34 @@ smime_init_once(void *arg)
          return PR_FAILURE;
      }
-     algorithm_list_lock = PZ_NewLock(nssILockCache);
+     algorithm_list_lock = PR_NewLock();
      if (algorithm_list_lock == NULL) {
          *error = PORT_GetError();
          return PR_FAILURE;
@@ -110,7 +119,7 @@ diff --git a/lib/smime/smimeutil.c b/lib/smime/smimeutil.c
 diff --git a/tests/smime/smime.sh b/tests/smime/smime.sh
 --- a/tests/smime/smime.sh
 +++ b/tests/smime/smime.sh
-@@ -867,13 +867,13 @@ smime_cleanup()
+@@ -898,13 +898,13 @@ smime_cleanup()
  }
  
  ################## main #################################################
@@ -130,17 +139,17 @@ diff --git a/tests/smime/smime.sh b/tests/smime/smime.sh
 diff --git a/tests/tools/tools.sh b/tests/tools/tools.sh
 --- a/tests/tools/tools.sh
 +++ b/tests/tools/tools.sh
-@@ -590,17 +590,17 @@ tools_p12()
-       tools_p12_export_list_import_most_ciphers
+@@ -614,17 +614,17 @@ tools_p12()
    fi
    tools_p12_export_with_none_ciphers
    tools_p12_export_with_invalid_ciphers
    tools_p12_import_old_files
    tools_p12_import_pbmac1_samples
+   tools_p12_ml_kem_import
    if using_sql; then
      tools_p12_import_rsa_pss_private_key
 -    tools_p12_policy
-+#  tools_p12_policy
++#tools_p12_policy
    fi
  }
  

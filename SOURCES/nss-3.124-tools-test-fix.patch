@@ -1,0 +1,31 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1780589779 25200
+#      Thu Jun 04 09:16:19 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID 5f6c91f6171020eea4ce9eb5bc353370d30c8df0
+# Parent  709702f4bfbee0bed65f6abcd85bc8fc2d14ff55
+nss-3.124-tools-test-fix.patch
+
+diff --git a/tests/tools/tools.sh b/tests/tools/tools.sh
+--- a/tests/tools/tools.sh
++++ b/tests/tools/tools.sh
+@@ -518,17 +518,17 @@ tools_p12_import_old_files()
+   ${BINDIR}/pk12util -i ${TOOLSDIR}/data/PKCS5WithImplicitKDF.p12 -d ${P_R_COPYDIR} -k ${R_PWFILE} -W password 2>&1
+   ret=$?
+   html_msg $ret 0 "Importing PKCS#12 file with and implicit KDF value"
+   check_tmpfile
+ 
+   echo "pk12util -I -l corrupted_cert_bag.p12 -W start"
+   ${BINDIR}/pk12util -I -l ${TOOLSDIR}/data/corrupted_cert_bag.p12 -W start 2>&1
+   ret=$?
+-  html_msg $ret 17 "Listing a PKCS#12 file with corrupted certificate bag"
++  html_msg $ret 19 "Listing a PKCS#12 file with corrupted certificate bag"
+   check_tmpfile
+ 
+ }
+ 
+ tools_p12_import_rsa_pss_private_key()
+ {
+   echo "$SCRIPTNAME: Importing RSA-PSS private key from PKCS#12 file --------------"
+   ${BINDIR}/pk12util -i ${TOOLSDIR}/data/TestRSAPSS.p12 -d ${P_R_COPYDIR} -k ${R_PWFILE} -W '' 2>&1
