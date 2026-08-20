@@ -1,0 +1,217 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1781029720 25200
+#      Tue Jun 09 11:28:40 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID 1e0565f958c9e9ce4713a19eeee3541286133fb6
+# Parent  d9ba1487c7c6821154edd972c88cecba1d458503
+nss-3.124-fix-pub-key-import-encapsulate.patch
+
+diff --git a/lib/pk11wrap/pk11skey.c b/lib/pk11wrap/pk11skey.c
+--- a/lib/pk11wrap/pk11skey.c
++++ b/lib/pk11wrap/pk11skey.c
+@@ -3124,33 +3124,54 @@ SECStatus
+ PK11_Encapsulate(SECKEYPublicKey *pubKey, CK_MECHANISM_TYPE target,
+                  PK11AttrFlags attrFlags, CK_FLAGS opFlags,
+                  PK11SymKey **outKey, SECItem **outCiphertext)
+ {
+     PORT_Assert(pubKey);
+     PORT_Assert(outKey);
+     PORT_Assert(outCiphertext);
+ 
+-    PK11SlotInfo *slot = pubKey->pkcs11Slot;
+ 
+     PK11SymKey *sharedSecret = NULL;
+     SECItem *ciphertext = NULL;
+ 
+     CK_ATTRIBUTE keyTemplate[MAX_TEMPL_ATTRS];
+     unsigned int templateCount;
+ 
++
+     CK_ATTRIBUTE *attrs;
+     CK_BBOOL cktrue = CK_TRUE;
+     CK_BBOOL ckfalse = CK_FALSE;
+     CK_OBJECT_CLASS keyClass = CKO_SECRET_KEY;
+     CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
+     CK_MECHANISM_TYPE kemType = pk11_mapKemKeyType(pubKey->keyType);
+     CK_MECHANISM mech = { kemType, NULL, 0 };
+     CK_ULONG ciphertextLen = 0;
+-    CK_RV crv;
++    CK_RV crv = CKR_OK;
++
++    PK11SlotInfo *slot = pubKey->pkcs11Slot;
++
++    if (slot == NULL) {
++        CK_MECHANISM_TYPE mechs[] = { kemType, target};
++        CK_ULONG mech_count = PR_ARRAY_SIZE(mechs);
++        slot = PK11_GetBestSlotMultiple(mechs, mech_count, NULL /*sigh*/);
++    } else {
++        /* should we check if the slot can do target and kemtype
++         * here and move the public key if it can't? */
++        slot = PK11_ReferenceSlot(slot);
++    }
++    if (slot == NULL) {
++        goto loser; /* error already set */
++    }
++
++    CK_OBJECT_HANDLE id = PK11_ImportPublicKey(slot, pubKey, PR_FALSE);
++
++    if (id == CK_INVALID_HANDLE) {
++        goto loser; /* error already set */
++    }
+ 
+     /* set up the target key template */
+     attrs = keyTemplate;
+     PK11_SETATTRS(attrs, CKA_CLASS, &keyClass, sizeof(keyClass));
+     attrs++;
+ 
+     PK11_SETATTRS(attrs, CKA_KEY_TYPE, &keyType, sizeof(keyType));
+     attrs++;
+@@ -3162,30 +3183,30 @@ PK11_Encapsulate(SECKEYPublicKey *pubKey
+     PR_ASSERT(templateCount <= sizeof(keyTemplate) / sizeof(CK_ATTRIBUTE));
+ 
+     *outKey = NULL;
+     *outCiphertext = NULL;
+ 
+     /* create a struxture for the target key */
+     sharedSecret = pk11_CreateSymKey(slot, target, PR_TRUE, PR_TRUE, NULL);
+     if (sharedSecret == NULL) {
+-        PORT_SetError(SEC_ERROR_NO_MEMORY);
+-        return SECFailure;
++        crv = CKR_HOST_MEMORY;
++        goto loser;
+     }
+     sharedSecret->origin = PK11_OriginDerive;
+ 
+     /* this path is KEM mechanism agnostic */
+     if (PK11_CheckPKCS11Version(slot, 3, 2, PR_TRUE) >= 0) {
+         pk11_EnterKeyMonitor(sharedSecret);
+         /* get the length the normal PKCS #11 way. This works no matter
+          * what the KEM is and we don't have to try to guess the KEM length
+          * from the key */
+         crv = PK11_GETTAB(slot)->C_EncapsulateKey(sharedSecret->session,
+                                                   &mech,
+-                                                  pubKey->pkcs11ID,
++                                                  id,
+                                                   keyTemplate,
+                                                   templateCount,
+                                                   NULL,
+                                                   &ciphertextLen,
+                                                   &sharedSecret->objectID);
+         pk11_ExitKeyMonitor(sharedSecret);
+         if ((crv != CKR_OK) && (crv != CKR_BUFFER_TOO_SMALL) &&
+             (crv != CKR_KEY_SIZE_RANGE)) {
+@@ -3197,17 +3218,17 @@ PK11_Encapsulate(SECKEYPublicKey *pubKey
+             goto loser;
+         }
+         pk11_EnterKeyMonitor(sharedSecret);
+         /* Now do the encapsulate */
+         /* NOTE: the PKCS #11 order of the parameters is different from
+          * the vendor interface */
+         crv = PK11_GETTAB(slot)->C_EncapsulateKey(sharedSecret->session,
+                                                   &mech,
+-                                                  pubKey->pkcs11ID,
++                                                  id,
+                                                   keyTemplate,
+                                                   templateCount,
+                                                   ciphertext->data,
+                                                   &ciphertextLen,
+                                                   &sharedSecret->objectID);
+         pk11_ExitKeyMonitor(sharedSecret);
+         if (crv != CKR_OK) {
+             goto loser;
+@@ -3228,21 +3249,21 @@ PK11_Encapsulate(SECKEYPublicKey *pubKey
+         if (crv != CKR_OK) {
+             goto loser;
+         }
+         KEMInterfaceFunctions = (CK_NSS_KEM_FUNCTIONS *)(KEMInterface->pFunctionList);
+ 
+         /* the old API expected the parameter set as a parameter, the
+          * pkcs11 v3.2 gets it from the key */
+         kemParameterSet = PK11_ReadULongAttribute(slot,
+-                                                  pubKey->pkcs11ID,
++                                                  id,
+                                                   CKA_NSS_PARAMETER_SET);
+         if (kemParameterSet == CK_UNAVAILABLE_INFORMATION) {
+             kemParameterSet = PK11_ReadULongAttribute(slot,
+-                                                      pubKey->pkcs11ID,
++                                                      id,
+                                                       CKA_PARAMETER_SET);
+             if (kemParameterSet == CK_UNAVAILABLE_INFORMATION) {
+                 crv = CKR_PUBLIC_KEY_INVALID;
+                 goto loser;
+             }
+         }
+         /* The old interface only ever supported KYBER768 and MLKEM768
+          * SOME versions of RHEL has MLKEM1024  support, if we want to
+@@ -3259,39 +3280,48 @@ PK11_Encapsulate(SECKEYPublicKey *pubKey
+         if (ciphertext == NULL) {
+             crv = CKR_HOST_MEMORY;
+             goto loser;
+         }
+ 
+         pk11_EnterKeyMonitor(sharedSecret);
+         crv = KEMInterfaceFunctions->C_Encapsulate(sharedSecret->session,
+                                                    &mech,
+-                                                   pubKey->pkcs11ID,
++                                                   id,
+                                                    keyTemplate,
+                                                    templateCount,
+                                                    &sharedSecret->objectID,
+                                                    ciphertext->data,
+                                                    &ciphertextLen);
+         pk11_ExitKeyMonitor(sharedSecret);
+         if (crv != CKR_OK) {
+             goto loser;
+         }
+ 
+         PORT_Assert(ciphertextLen == ciphertext->len);
+     }
+ 
++    PK11_FreeSlot(slot);
++
+     *outKey = sharedSecret;
+     *outCiphertext = ciphertext;
+ 
+     return SECSuccess;
+ 
+ loser:
+-    PK11_FreeSymKey(sharedSecret);
++    if (slot) {
++        PK11_FreeSlot(slot);
++    }
++    if (sharedSecret) {
++        PK11_FreeSymKey(sharedSecret);
++    }
+     SECITEM_FreeItem(ciphertext, PR_TRUE);
+-    PORT_SetError(PK11_MapError(crv));
++    if (crv != CKR_OK) {
++        PORT_SetError(PK11_MapError(crv));
++    }
+     return SECFailure;
+ }
+ 
+ SECStatus
+ PK11_Decapsulate(SECKEYPrivateKey *privKey, const SECItem *ciphertext,
+                  CK_MECHANISM_TYPE target, PK11AttrFlags attrFlags,
+                  CK_FLAGS opFlags, PK11SymKey **outKey)
+ {
+@@ -3312,17 +3342,17 @@ PK11_Decapsulate(SECKEYPrivateKey *privK
+     CK_OBJECT_CLASS keyClass = CKO_SECRET_KEY;
+     CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
+     CK_MECHANISM_TYPE kemType = pk11_mapKemKeyType(privKey->keyType);
+     CK_MECHANISM mech = { kemType, NULL, 0 };
+ 
+     CK_RV crv;
+ 
+     *outKey = NULL;
+-    sharedSecret = pk11_CreateSymKey(slot, target, PR_TRUE, PR_TRUE, NULL);
++    sharedSecret = pk11_CreateSymKey(slot, target, PR_TRUE, PR_TRUE, privKey->wincx);
+     if (sharedSecret == NULL) {
+         PORT_SetError(SEC_ERROR_NO_MEMORY);
+         return SECFailure;
+     }
+     sharedSecret->origin = PK11_OriginUnwrap;
+ 
+     attrs = keyTemplate;
+     PK11_SETATTRS(attrs, CKA_CLASS, &keyClass, sizeof(keyClass));

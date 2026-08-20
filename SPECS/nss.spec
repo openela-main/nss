@@ -1,12 +1,13 @@
-%global nss_version 3.112.0
-%global nspr_version 4.36.0
+%global nss_version 3.124.0
+%global nspr_version 4.39.0
 # NOTE: To avoid NVR clashes of nspr* packages:
 # - reset %%{nspr_release} to 1, when updating %%{nspr_version}
 # - increment %%{nspr_version}, when updating the NSS part only
-%global baserelease 8
+%global baserelease 5
 %global nss_release %baserelease
 # use "%%global nspr_release %%[%%baserelease+n]" to handle offsets when
-# release number between nss and nspr are different.
+# release number between nss and nspr are different. This typically
+# happens with a new version of nss was release, but nspr was not updated
 #%%global nspr_release %%[%%baserelease+21]
 %global nspr_release %baserelease
 # only need to update this as we added new
@@ -130,7 +131,8 @@ Source27:         secmod.db.xml
 Source29:         nss_compat_test_pkcs12.tar
 # fips algorithms are tied to the red hat validation, others
 # will have their own validation
-Source30:         fips_algorithms.h
+Source30:         prwin.h
+Source90:         fips_algorithms.h
 
 Source101:        nspr-config.xml
 
@@ -154,40 +156,47 @@ Patch31:          nss-dso-ldflags.patch
 Patch32:          nss-3.112-disable-md5.patch
 # rhel10 disabled dbm by default
 Patch33:          nss-no-dbm-man-page.patch
-
 # not upstreamable patch...
 Patch34:          nss-3.71-fix-lto-gtests.patch
 # disable ech
-Patch36:          nss-3.112-disable-ech.patch
+Patch35:          nss-3.124-disable-ech.patch
+# don't fail if our build machine can't access the internet
+Patch36:          nss-3.101-skip-ocsp-if-not-connected.patch
+patch37:          nss-3.124-allow-hash-override-pss.patch
+Patch38:          nss-3.79-revert-distrusted-certs.patch
 
 # patches that expect to be upstreamed
-Patch42:          nss-3.103-unused-cipherwrap2.patch
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1767883
-Patch50:          nss-3.112-fips.patch
-Patch53:          nss-3.101-skip-ocsp-if-not-connected.patch
-Patch74:          nss-3.90-dh-test-update.patch
-Patch75:          nss-3.90-ppc_no_init.patch
+Patch40:          nss-3.90-dh-test-update.patch
+Patch41:          nss-3.124-ppc_no_init.patch
 # https://bugzilla.mozilla.org/show_bug.cgi?id=676100
-Patch78:          nss-3.101-fix-cms-abi-break.patch
-Patch79:          nss-3.101-fix-shlibsign-fips.patch
+Patch42:          nss-3.101-fix-cms-abi-break.patch
+Patch43:          nss-3.124-tools-test-fix.patch
+
+#in process upstream
+Patch50:          nss-3.124-fips-key-import-fix.patch
+Patch51:          nss-3.124-fix-ed-key-storage.patch
+Patch52:          nss-3.124-indicators-prf.patch
+Patch53:          nss-3.124-annocheck.fix.patch
+Patch54:          nss-3.124-disable-kyber-test.patch
 
 # Post Quantum specific
-Patch80:          nss-3.112-disable-dsa.patch
-Patch81:          nss-3.112-replace-xyber-with-mlkem-256.patch
-Patch82:          nss-3.112-add-sec384r1-mlkem-1024.patch
-Patch83:          nss-3.112-add-ml-dsa-base.patch
-Patch84:          nss-3.112-add-ml-dsa-gtests.patch
-Patch85:          nss-3.112-add-ml-dsa-ssl-support.patch
-Patch86:          nss-3.112-fips-and-fixes-el10.patch
-Patch87:          nss-3.112-big-endian-compression-fix.patch
-Patch88:          nss-3.112-fix-get-interface.patch
-Patch89:          nss-3.112-mlkem-fips-update.patch
-Patch90:          nss-3.112-update-fixes.patch
-Patch91:          nss-3.112-partial-pub-key-validate.patch
-Patch92:          nss-3.112-pkcs12-ml-dsa-crash-fix.patch
+Patch60:          nss-3.118-ml-dsa-leancrypto.patch
+Patch61:          nss-3.118-ml-dsa-tls.patch
+Patch62:          nss-3.124-prefer-all-hybrid.patch
+Patch65:          nss-3.124-ml-dsa-test-for-sign-verify-pkcs12.patch
+Patch66:          nss-3.124-ml-dsa-tls-test.patch
+Patch67:          nss-3.118-ml-dsa-unittests.patch
+Patch68:          nss-3.123-fix-mldsa-import-regeneration.patch
+
+# rebase fixes
+Patch70:          nss-3.124-add-ml-kem-key-size-mech-info.patch
+Patch71:          nss-3.124-fix-pub-key-import-encapsulate.patch
+Patch72:          nss-3.124-ml-kem-alias-fix.patch
 
 # NSS reverse patches
-Patch300:         nss-3.79-distrusted-certs.patch
+# no longer need this patch because all the builtins are
+# handled by p11kit and ca-certifiates.
+#Patch300:         nss-3.79-distrusted-certs.patch
 
 Patch100:         nspr-config-pc.patch
 Patch101:         nspr-gcc-atomics.patch
@@ -357,19 +366,15 @@ tar xvf %{SOURCE29}
 
 pushd nss
 %autopatch -p1 -M 99
-# sigh it would be nice if autopatch supported -R
-%patch -P 300 -R -p 1
-#%%patch -P 400 -p 1 -b .cert_compression
 popd
 
 # copy the fips_algorithms.h for this release
 # this file is release specific and matches what
 # each vendors claim in their own FIPS certification
-cp %{SOURCE30} nss/lib/softoken/
+cp %{SOURCE90} nss/lib/softoken/
 
 # https://bugzilla.redhat.com/show_bug.cgi?id=1247353
 find nss/lib/libpkix -perm /u+x -type f -exec chmod -x {} \;
-
 
 %build
 # Build, check, and install NSPR for building NSS in the later phase
@@ -433,6 +438,7 @@ export NSS_DISABLE_DEPRECATED_SEED=1
 export NSS_DISABLE_DSA=1
 export NSS_DISABLE_KYBER=1
 export NSS_ENABLE_ML_DSA=1
+export NSS_ENABLE_CRMF=1
 
 # FIPS related defines
 export NSS_FORCE_FIPS=1
@@ -635,6 +641,7 @@ export NSS_DISABLE_DEPRECATED_SEED=1
 export NSS_DISABLE_DSA=1
 export NSS_DISABLE_KYBER=1
 export NSS_ENABLE_ML_DSA=1
+export NSS_ENABLE_CRMF=1
 
 %ifnarch noarch
 %if 0%{__isa_bits} == 64
@@ -699,7 +706,7 @@ pushd nss/tests
 #  nss_cycles: standard pkix upgradedb sharedb
 #  the full list from all.sh is:
 #  "cipher lowhash libpkix cert dbtests tools fips sdr crmf smime ssl ocsp merge pkits chains ec gtests ssl_gtests"
-%define nss_tests "libpkix cert dbtests tools fips sdr crmf smime ssl ocsp merge pkits chains ec gtests ssl_gtests"
+%define nss_tests "libpkix cert dbtests tools fips sdr smime ssl ocsp merge pkits chains ec gtests ssl_gtests"
 #  nss_ssl_tests: crl bypass_normal normal_bypass normal_fips fips_normal iopr policy
 #  nss_ssl_run: cov auth stapling stress
 #
@@ -733,6 +740,7 @@ rm -rf \
    $RPM_BUILD_ROOT/%{_includedir}/nspr4/md
 
 #cp win.h to old name for compatibility
+cp %{SOURCE30} $RPM_BUILD_ROOT/%{_includedir}/nspr4/prwin.h
 cp $RPM_BUILD_ROOT/%{_includedir}/nspr4/prwin.h \
    $RPM_BUILD_ROOT/%{_includedir}/nspr4/prwin16.h
 
@@ -804,7 +812,7 @@ install -p -m 644 %{SOURCE14} $RPM_BUILD_ROOT/%{_sysconfdir}/pki/nssdb/key4.db
 install -p -m 644 %{SOURCE15} $RPM_BUILD_ROOT/%{_sysconfdir}/pki/nssdb/pkcs11.txt
 
 # Copy the development libraries we want
-for file in libcrmf.a libnssb.a libnssckfw.a
+for file in libnssb.a libnssckfw.a
 do
   install -p -m 644 dist/${LOBJDIR}/lib/$file $RPM_BUILD_ROOT/%{_libdir}
 done
@@ -974,7 +982,6 @@ fi
 %doc %{_mandir}/man1/vfyserv.1*
 
 %files devel
-%{_libdir}/libcrmf.a
 %{_libdir}/pkgconfig/nss.pc
 %{_bindir}/nss-config
 %doc %{_mandir}/man1/nss-config.1*
@@ -983,13 +990,9 @@ fi
 %{_includedir}/nss3/cert.h
 %{_includedir}/nss3/certdb.h
 %{_includedir}/nss3/certt.h
-%{_includedir}/nss3/cmmf.h
-%{_includedir}/nss3/cmmft.h
 %{_includedir}/nss3/cms.h
 %{_includedir}/nss3/cmsreclist.h
 %{_includedir}/nss3/cmst.h
-%{_includedir}/nss3/crmf.h
-%{_includedir}/nss3/crmft.h
 %{_includedir}/nss3/cryptohi.h
 %{_includedir}/nss3/cryptoht.h
 %{_includedir}/nss3/jar-ds.h
@@ -1172,6 +1175,28 @@ fi
 
 
 %changelog
+* Mon Jun 22 2026 Bob Relyea <rrelyea@redhat.com> - 3.124.0-5
+- full fix to pss issues
+
+* Tue Jun 16 2026 Bob Relyea <rrelyea@redhat.com> - 3.124.0-4
+- fix pkcs12 defaults
+- fix pss issues
+- remove crmf
+
+* Tue Jun 9 2026 Bob Relyea <rrelyea@redhat.com> - 3.124.0-2
+- rebase fixes
+- restore mlkem aliases
+- add mlkem key lengths to the mechanism info
+- fix crash if you try to encapsulate with an unimported
+  public key
+- restore distrusted certs to certdata.txt even though we
+  never reference them to make tests happy.
+
+* Tue Jun 2 2026 Bob Relyea <rrelyea@redhat.com> - 3.124.0-1
+- rebase to upstream NSS 3.124
+- backport ml-dsa support that is not upstream yet.
+- pick up in process patches upstream including eddsa
+
 * Fri Jan 23 2026 Bob Relyea <rrelyea@redhat.com> - 3.112.0-8
 - fix incomplete ml-kem pct patch.
 

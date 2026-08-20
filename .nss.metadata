@@ -1,3 +1,3 @@
-f9d538448ff944b1ad9c6fc9838f6b4bd704c1d93756fdf4b008be0ba398c0d6 SOURCES/nss-3.112-add-ml-dsa-gtests.patch
-a8ee2b4485c4d841b1f974a13037183071ac12520512e6ec6b7d38ff36e8a125 SOURCES/nss-3.112-with-nspr-4.36.tar.gz
-6c72a1eb99380096944fd9479d6ecb4ce096f39cb398164e3432cc948c30a5f9 SOURCES/nss_compat_test_pkcs12.tar
+33e81f62e568832b6f567ec8943aadd04219f53d3b639d649254f03c7ffaaf4a SOURCES/nss-3.118-ml-dsa-unittests.patch
+362de77e31a16e64be500a22980448c7f08e98dd8ab85c29d0c5e41d4df68d1c SOURCES/nss-3.124-with-nspr-4.39.tar.gz
+5143d4f4947b1e1a66427483a6fb051122e3f7d9a3ed99361bd13b92a1f05f41 SOURCES/nss_compat_test_pkcs12.tar
