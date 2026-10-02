@@ -1,0 +1,42 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1782250609 25200
+#      Tue Jun 23 14:36:49 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID d7217ccba81e478980f5540140f2d2a690e2a2a9
+# Parent  9fc4546f66e227fd073fd908984f6a729c04f662
+nss-3.124-fix-old-compiler-issue.patch
+
+diff --git a/lib/softoken/pkcs11u.c b/lib/softoken/pkcs11u.c
+--- a/lib/softoken/pkcs11u.c
++++ b/lib/softoken/pkcs11u.c
+@@ -2723,27 +2723,28 @@ sftk_handleSpecial(SFTKSlot *slot, CK_ME
+                 if (mech->ulParameterLen < mechInfo->offset + sizeof(CK_ULONG)) {
+                     return PR_FALSE;
+                 }
+                 if (!sftk_checkFIPSHash(*(CK_MECHANISM_TYPE *)(((char *)mech->pParameter) + mechInfo->offset), PR_FALSE, PR_FALSE)) {
+                     return PR_FALSE;
+                 }
+             }
+             return PR_TRUE;
+-        case SFTKFIPSRSAOAEP:
++        case SFTKFIPSRSAOAEP: {
+             CK_RSA_PKCS_OAEP_PARAMS *rsaoaep = (CK_RSA_PKCS_OAEP_PARAMS *)
+                                                    mech->pParameter;
+ 
+             HASH_HashType hash_msg = sftk_GetHashTypeFromMechanism(rsaoaep->hashAlg);
+             HASH_HashType hash_pad = sftk_GetHashTypeFromMechanism(rsaoaep->mgf);
+             /* message hash and mask generation function must be the same */
+             if (hash_pad != hash_msg)
+                 return PR_FALSE;
+ 
+             return sftk_checkFIPSHash(rsaoaep->hashAlg, PR_FALSE, PR_FALSE);
++        }
+         default:
+             break;
+     }
+     /* if we didn't understand the special processing, mark it non-fips */
+     return PR_FALSE;
+ }
+ #endif
+ 

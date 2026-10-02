@@ -7,42 +7,8 @@
  * algorithms which have NIST algorithm Certificates.
  */
 
-/* handle special cases. Classes require existing code to already be
- * in place for that class */
-typedef enum {
-    SFTKFIPSNone = 0,
-    SFTKFIPSDH,  /* allow only specific primes */
-    SFTKFIPSECC, /* not just keys but specific curves */
-    SFTKFIPSAEAD, /* single shot AEAD functions not allowed in FIPS mode */
-    SFTKFIPSRSAPSS, /* make sure salt isn't too big */
-    SFTKFIPSPBKDF2,  /* handle pbkdf2 FIPS restrictions */
-    SFTKFIPSTlsKeyCheck,  /* check the output of TLS prf functions */
-    SFTKFIPSChkHash,  /* make sure the base hash of KDF functions is FIPS */
-    SFTKFIPSChkHashTls,  /* make sure the base hash of TLS KDF functions is FIPS */
-    SFTKFIPSChkHashSp800,  /* make sure the base hash of SP-800-108 KDF functions is FIPS */
-    SFTKFIPSRSAOAEP, /* make sure that both hashes use the same FIPS compliant algorithm */
-#ifndef NSS_DISABLE_KYBER
-    SFKFIPSMLKEM, /* make sure the keys are only mlkem and not kyber */
-#endif
-} SFTKFIPSSpecialClass;
-
-#ifdef NSS_DISABLE_KYBER
-/* if kyber is disable, we don't need to check that we are using
- * a kyber key in the ML_KEM code */
-#define SFTKFIPSMLKEM SFTKFIPSNone
-#endif
-
 /* set according to your security policy */
 #define SFTKFIPS_PBKDF2_MIN_PW_LEN  8
-
-typedef struct SFTKFIPSAlgorithmListStr SFTKFIPSAlgorithmList;
-struct SFTKFIPSAlgorithmListStr {
-    CK_MECHANISM_TYPE type;
-    CK_MECHANISM_INFO info;
-    CK_ULONG step;
-    SFTKFIPSSpecialClass special;
-    size_t offset;
-};
 
 SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
 /* A sample set of algorithms to allow basic testing in our continous
@@ -120,9 +86,9 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
     { CKM_ML_DSA_KEY_PAIR_GEN, { CK_ALL_KEY, CKF_KPG }, CK_ALL_STEP, SFTKFIPSNone },
     { CKM_ML_DSA, { CK_ALL_KEY, CKF_SGN },  CK_ALL_STEP, SFTKFIPSNone },
     /* only allowed keys are implented for ML_KEM */
-    { CKM_ML_KEM_KEY_PAIR_GEN, { CK_ALL_KEY, CKF_KPG }, CK_ALL_STEP, SFTKFIPSMLKEM },
+    { CKM_ML_KEM_KEY_PAIR_GEN, { CK_ALL_KEY, CKF_KPG }, CK_ALL_STEP, SFTKFIPSNone },
 
-    { CKM_ML_KEM, { CK_ALL_KEY, CKF_KEM },  CK_ALL_STEP, SFTKFIPSMLKEM },
+    { CKM_ML_KEM, { CK_ALL_KEY, CKF_KEM },  CK_ALL_STEP, SFTKFIPSNone },
     /* ------------------------- RC2 Operations --------------------------- */
     /* ------------------------- AES Operations --------------------------- */
     { CKM_AES_KEY_GEN, { AES_FB_KEY, CKF_GEN }, AES_FB_STEP, SFTKFIPSNone },
@@ -187,7 +153,7 @@ SFTKFIPSAlgorithmList sftk_fips_mechs[] = {
      * to set the FIPS indicators on these (sigh) */
     /* NOTE: CKM_NSS_ML_KEM_KEY_GEN and the KYBER equivalent does not do
      * pairwise consistency checks on key gen, so are not FIPS */
-    { CKM_NSS_ML_KEM, { CK_ALL_KEY, CKF_KEM },  CK_ALL_STEP, SFTKFIPSMLKEM },
+    { CKM_NSS_ML_KEM, { CK_ALL_KEY, CKF_KEM },  CK_ALL_STEP, SFTKFIPSNone },
     { CKM_NSS_AES_KEY_WRAP, { AES_FB_KEY, CKF_ECW }, AES_FB_STEP, SFTKFIPSNone },
     { CKM_NSS_AES_KEY_WRAP_PAD, { AES_FB_KEY, CKF_ECW }, AES_FB_STEP, SFTKFIPSNone },
     { CKM_NSS_TLS_KEY_AND_MAC_DERIVE_SHA256, { 384, 384, CKF_DERIVE }, 1, SFTKFIPSTlsKeyCheck },

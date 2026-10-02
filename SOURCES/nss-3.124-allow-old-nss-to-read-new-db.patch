@@ -1,0 +1,33 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1782506169 25200
+#      Fri Jun 26 13:36:09 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID 824f0f507b84d9077509d75a7d39816e1ae9fa81
+# Parent  f5b50861c24c1fd94f4326b3e4c7eb0ab9568bf3
+nss-3.124-allow-old-nss-to-read-new-db.patch
+
+diff --git a/lib/softoken/sftkpwd.c b/lib/softoken/sftkpwd.c
+--- a/lib/softoken/sftkpwd.c
++++ b/lib/softoken/sftkpwd.c
+@@ -1397,17 +1397,19 @@ sftkdb_ChangePassword(SFTKDBHandle *keyd
+         rv = sftkdb_CheckPassword(keydb, oldPin, tokenRemoved);
+         if (rv == SECFailure) {
+             goto loser;
+         }
+     } else {
+         salt.len = 0;
+     }
+ 
+-    preferred_salt_length = SHA384_LENGTH;
++    /* RHEL -8 keep the old default since old versions of NSS
++     * cannot read SHA386_LENGTH databases */
++    preferred_salt_length = SHA1_LENGTH;
+ 
+     /* Prefer SHA-1 if the password is NULL */
+     if (!newPin || *newPin == 0) {
+         preferred_salt_length = SHA1_LENGTH;
+     }
+ 
+     if (salt.len != preferred_salt_length) {
+         salt.len = preferred_salt_length;

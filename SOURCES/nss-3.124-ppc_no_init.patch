@@ -1,0 +1,65 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1780431689 25200
+#      Tue Jun 02 13:21:29 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID c3324d6ea02d9496ced68a4c59f81af9525d89ea
+# Parent  ba35abba131fe9379c69e63c9206d6a2143a3762
+nss-3.90-ppc_no_init.patch
+
+diff --git a/lib/freebl/Makefile b/lib/freebl/Makefile
+--- a/lib/freebl/Makefile
++++ b/lib/freebl/Makefile
+@@ -288,17 +288,17 @@ ifeq ($(CPU_ARCH),arm)
+     DEFINES += -DMP_USE_UINT_DIGIT
+     DEFINES += -DSHA_NO_LONG_LONG # avoid 64-bit arithmetic in SHA512
+     MPI_SRCS += mpi_arm.c
+ endif
+ ifeq ($(CPU_ARCH),ppc)
+     DEFINES += -DHAVE_PLATFORM_GHASH
+     EXTRA_SRCS += ghash-ppc.c
+ ifdef USE_64
+-    DEFINES += -DNSS_NO_INIT_SUPPORT
++#    DEFINES += -DNSS_NO_INIT_SUPPORT
+     PPC_ABI := $(shell $(CC) -dM -E - < /dev/null | awk '$$2 == "_CALL_ELF" {print $$3}')
+     ifeq ($(PPC_ABI),2)
+         ASFILES += sha512-p8.s
+     ifeq ($(OS_TEST),ppc64le)
+         EXTRA_SRCS += chacha20poly1305-ppc.c ppc-gcm-wrap.c
+         ASFILES += chacha20-ppc64le.s ppc-gcm.s
+         DEFINES += -DHAVE_PLATFORM_GCM
+     endif # ppc64le
+diff --git a/lib/softoken/Makefile b/lib/softoken/Makefile
+--- a/lib/softoken/Makefile
++++ b/lib/softoken/Makefile
+@@ -18,23 +18,23 @@ include $(CORE_DEPTH)/coreconf/config.mk
+ 
+ #######################################################################
+ # (3) Include "component" configuration information. (OPTIONAL)       #
+ #######################################################################
+ 
+ ifdef NSS_NO_INIT_SUPPORT
+     DEFINES += -DNSS_NO_INIT_SUPPORT
+ endif
+-ifeq ($(OS_TARGET),Linux)
+-ifeq ($(CPU_ARCH),ppc)
+-ifdef USE_64
+-    DEFINES += -DNSS_NO_INIT_SUPPORT
+-endif # USE_64
+-endif # ppc
+-endif # Linux
++#ifeq ($(OS_TARGET),Linux)
++#ifeq ($(CPU_ARCH),ppc)
++#ifdef USE_64
++#    DEFINES += -DNSS_NO_INIT_SUPPORT
++#endif # USE_64
++#endif # ppc
++#endif # Linux
+ 
+ 
+ #######################################################################
+ # (4) Include "local" platform-dependent assignments (OPTIONAL).      #
+ #######################################################################
+ 
+ include config.mk
+ 

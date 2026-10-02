@@ -1,0 +1,894 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1782418183 25200
+#      Thu Jun 25 13:09:43 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID f5b50861c24c1fd94f4326b3e4c7eb0ab9568bf3
+# Parent  56214dd5d6d50d71c3637d7f0e4279c9e119018f
+nss-3.124-turn_off_non_dbm_tests.patch
+
+diff --git a/cmd/pk11importtest/pk11importtest.c b/cmd/pk11importtest/pk11importtest.c
+--- a/cmd/pk11importtest/pk11importtest.c
++++ b/cmd/pk11importtest/pk11importtest.c
+@@ -318,16 +318,22 @@ main(int argc, char **argv)
+         doEC = PR_FALSE;
+     }
+     if (args.options[opt_NoMLDSA].activated) {
+         doMLDSA = PR_FALSE;
+     }
+     if (args.options[opt_NoMLKEM].activated) {
+         doMLKEM = PR_FALSE;
+     }
++    if (args.options[opt_NoED].activated) {
++        doED = PR_FALSE;
++    }
++    if (args.options[opt_NoECMont].activated) {
++        doECMont = PR_FALSE;
++    }
+ 
+     slot = PK11_GetInternalKeySlot();
+     if (slot == NULL) {
+         SECU_PrintError(progName, "Couldn't find the internal key slot\n");
+         return 255;
+     }
+     rv = PK11_Authenticate(slot, PR_TRUE, &pwArgs);
+     if (rv != SECSuccess) {
+diff --git a/gtests/ssl_gtest/ssl_auth_unittest.cc b/gtests/ssl_gtest/ssl_auth_unittest.cc
+--- a/gtests/ssl_gtest/ssl_auth_unittest.cc
++++ b/gtests/ssl_gtest/ssl_auth_unittest.cc
+@@ -2477,16 +2477,17 @@ INSTANTIATE_TEST_SUITE_P(
+     SignatureSchemeEcdsaSha1, TlsSignatureSchemeConfiguration,
+     ::testing::Combine(TlsConnectTestBase::kTlsVariantsAll,
+                        TlsConnectTestBase::kTlsV12,
+                        ::testing::Values(TlsAgent::kServerEcdsa256,
+                                          TlsAgent::kServerEcdsa384),
+                        ::testing::Values(ssl_auth_ecdsa),
+                        ::testing::Values(ssl_sig_ecdsa_sha1)));
+ // ML-DSA is only allowed to be used in TLS 1.3 or greater
++#ifdef notdef
+ INSTANTIATE_TEST_SUITE_P(
+     SignatureSchemeMlDsa44Tls13, TlsSignatureSchemeConfiguration,
+     ::testing::Combine(TlsConnectTestBase::kTlsVariantsAll,
+                        TlsConnectTestBase::kTlsV13,
+                        ::testing::Values(TlsAgent::kServerMlDsa44),
+                        ::testing::Values(ssl_auth_mldsa44),
+                        ::testing::Values(ssl_sig_mldsa44)));
+ INSTANTIATE_TEST_SUITE_P(
+@@ -2498,10 +2499,11 @@ INSTANTIATE_TEST_SUITE_P(
+                        ::testing::Values(ssl_sig_mldsa65)));
+ INSTANTIATE_TEST_SUITE_P(
+     SignatureSchemeMlDsa87Tls13, TlsSignatureSchemeConfiguration,
+     ::testing::Combine(TlsConnectTestBase::kTlsVariantsAll,
+                        TlsConnectTestBase::kTlsV13,
+                        ::testing::Values(TlsAgent::kServerMlDsa87),
+                        ::testing::Values(ssl_auth_mldsa87),
+                        ::testing::Values(ssl_sig_mldsa87)));
++#endif
+ 
+ }  // namespace nss_test
+diff --git a/gtests/ssl_gtest/tls_subcerts_unittest.cc b/gtests/ssl_gtest/tls_subcerts_unittest.cc
+--- a/gtests/ssl_gtest/tls_subcerts_unittest.cc
++++ b/gtests/ssl_gtest/tls_subcerts_unittest.cc
+@@ -236,16 +236,17 @@ TEST_P(TlsConnectTls13, DCConnectEcdsaP2
+       client_, ssl_delegated_credentials_xtn);
+   Connect();
+ 
+   EXPECT_TRUE(cfilter->captured());
+   CheckPeerDelegCred(client_, true, 256);
+   EXPECT_EQ(ssl_sig_ecdsa_secp256r1_sha256, client_->info().signatureScheme);
+ }
+ 
++#ifdef notdef
+ // Connected with ML-DSA-65, using an ML-DSA-65 SKI and ML-DSA-65 delegation
+ // cert.
+ TEST_P(TlsConnectTls13, DCConnectMlDsa65MlDsa65) {
+   Reset(kMlDsa65DelegatorId);
+ 
+   static const SSLSignatureScheme kSchemes[] = {ssl_sig_ecdsa_secp256r1_sha256,
+                                                 ssl_sig_mldsa65};
+   client_->SetSignatureSchemes(kSchemes, PR_ARRAY_SIZE(kSchemes));
+@@ -281,16 +282,17 @@ TEST_P(TlsConnectTls13, DCConnectEcdsaP2
+   auto cfilter = MakeTlsFilter<TlsExtensionCapture>(
+       client_, ssl_delegated_credentials_xtn);
+   Connect();
+ 
+   EXPECT_TRUE(cfilter->captured());
+   CheckPeerDelegCred(client_, true, 256);
+   EXPECT_EQ(ssl_sig_ecdsa_secp256r1_sha256, client_->info().signatureScheme);
+ }
++#endif
+ 
+ // Simulate the client receiving a DC containing algorithms not advertised.
+ // Do this by tweaking the client's supported sigSchemes after the CH.
+ TEST_P(TlsConnectTls13, DCReceiveUnadvertisedScheme) {
+   Reset(kEcdsaDelegatorId);
+   static const SSLSignatureScheme kClientSchemes[] = {
+       ssl_sig_ecdsa_secp256r1_sha256, ssl_sig_ecdsa_secp384r1_sha384};
+   static const SSLSignatureScheme kServerSchemes[] = {
+@@ -725,16 +727,17 @@ TEST_P(TlsConnectTls13, DCRejectModified
+                                   now());
+   ConnectExpectAlert(client_, kTlsAlertIllegalParameter);
+   server_->CheckErrorCode(SSL_ERROR_ILLEGAL_PARAMETER_ALERT);
+   client_->CheckErrorCode(SSL_ERROR_DC_CERT_VERIFY_ALG_MISMATCH);
+ }
+ 
+ class DCDelegation : public ::testing::Test {};
+ 
++#ifdef notdef
+ TEST_F(DCDelegation, DCDelegations) {
+   PRTime now = PR_Now();
+   ScopedCERTCertificate cert;
+   ScopedSECKEYPrivateKey priv;
+   ASSERT_TRUE(TlsAgent::LoadCertificate(kEcdsaDelegatorId, &cert, &priv));
+ 
+   ScopedSECKEYPublicKey pub_rsa;
+   ScopedSECKEYPrivateKey priv_rsa;
+@@ -795,10 +798,11 @@ TEST_F(DCDelegation, DCDelegations) {
+             SSL_DelegateCredential(cert.get(), priv.get(), pub_mldsa.get(),
+                                    ssl_sig_mldsa44, kDCValidFor, now, &dc));
+   EXPECT_EQ(SSL_ERROR_INCORRECT_SIGNATURE_ALGORITHM, PORT_GetError());
+   EXPECT_EQ(SECSuccess,
+             SSL_DelegateCredential(cert.get(), priv.get(), pub_mldsa.get(),
+                                    ssl_sig_mldsa65, kDCValidFor, now, &dc));
+   dc.Reset();
+ }
++#endif
+ 
+ }  // namespace nss_test
+diff --git a/lib/softoken/legacydb/lgattr.c b/lib/softoken/legacydb/lgattr.c
+--- a/lib/softoken/legacydb/lgattr.c
++++ b/lib/softoken/legacydb/lgattr.c
+@@ -646,28 +646,103 @@ lg_FindPublicKeyAttribute(LGObjectCache 
+             return lg_FindECPublicKeyAttribute(key, type, attribute);
+         default:
+             break;
+     }
+ 
+     return lg_invalidAttribute(attribute);
+ }
+ 
++CK_KEY_TYPE
++lg_FetchSecretKeyType(NSSLOWKEYPrivateKey *key)
++{
++    unsigned char *keyString;
++    int keyTypeLen;
++    CK_KEY_TYPE keyType;
++    PRUint32 keyTypeStorage;
++
++    /* handle legacy databases. In legacy databases key_type was stored
++     * in host order, with any leading zeros stripped off. Only key types
++     * under 0x1f (AES) were stored. We assume that any values which are
++     * either 1 byte long (big endian), or have byte[0] between 0 and
++     * 0x7f and bytes[1]-bytes[3] equal to '0' (little endian). All other
++     * values are assumed to be from the new database, which is always 4
++     * bytes in network order */
++    keyType = 0;
++    keyString = key->u.rsa.coefficient.data;
++    keyTypeLen = key->u.rsa.coefficient.len;
++
++    /*
++     * Because of various endian and word lengths The database may have
++     * stored the keyType value in one of the following formats:
++     *   (kt) <= 0x1f
++     *                                   length data
++     * Big Endian,     pre-3.9, all lengths: 1  (kt)
++     * Little Endian,  pre-3.9, 32 bits:     4  (kt) 0  0  0
++     * Little Endian,  pre-3.9, 64 bits:     8  (kt) 0  0  0   0  0  0  0
++     * All platforms,      3.9, 32 bits:     4    0  0  0 (kt)
++     * Big Endian,         3.9, 64 bits:     8    0  0  0 (kt) 0  0  0  0
++     * Little  Endian,     3.9, 64 bits:     8    0  0  0  0   0  0  0 (kt)
++     * All platforms, >= 3.9.1, all lengths: 4   (a) k1 k2 k3
++     * where (a) is 0 or >= 0x80. currently (a) can only be 0.
++     */
++    /*
++     * this key was written on a 64 bit platform with a using NSS 3.9
++     * or earlier. Reduce the 64 bit possibilities above. When we are
++     * through, we will only have:
++     *
++     * Big Endian,     pre-3.9, all lengths: 1  (kt)
++     * Little Endian,  pre-3.9, all lengths: 4  (kt) 0  0  0
++     * All platforms,      3.9, all lengths: 4    0  0  0 (kt)
++     * All platforms, => 3.9.1, all lengths: 4   (a) k1 k2 k3
++     */
++    if (keyTypeLen == 8) {
++        keyTypeStorage = *(PRUint32 *)keyString;
++        if (keyTypeStorage == 0) {
++            keyString += sizeof(PRUint32);
++        }
++        keyTypeLen = 4;
++    }
++    /*
++     * Now Handle:
++     *
++     * All platforms,      3.9, all lengths: 4    0  0  0 (kt)
++     * All platforms, => 3.9.1, all lengths: 4   (a) k1 k2 k3
++     *
++     * NOTE: if  kt == 0 or ak1k2k3 == 0, the test fails and
++     * we handle it as:
++     *
++     * Little Endian,  pre-3.9, all lengths: 4  (kt) 0  0  0
++     */
++    if (keyTypeLen == sizeof(keyTypeStorage) &&
++        (((keyString[0] & 0x80) == 0x80) ||
++         !((keyString[1] == 0) && (keyString[2] == 0) && (keyString[3] == 0)))) {
++        PORT_Memcpy(&keyTypeStorage, keyString, sizeof(keyTypeStorage));
++        keyType = (CK_KEY_TYPE)PR_ntohl(keyTypeStorage);
++    } else {
++        /*
++         * Now Handle:
++         *
++         * Big Endian,     pre-3.9, all lengths: 1  (kt)
++         * Little Endian,  pre-3.9, all lengths: 4  (kt) 0  0  0
++         *  -- KeyType == 0 all other cases ---: 4    0  0  0  0
++         */
++        keyType = (CK_KEY_TYPE)keyString[0];
++    }
++    return keyType;
++}
+ static CK_RV
+ lg_FindSecretKeyAttribute(LGObjectCache *obj, CK_ATTRIBUTE_TYPE type,
+                           CK_ATTRIBUTE *attribute)
+ {
+     NSSLOWKEYPrivateKey *key;
+     char *label;
+-    unsigned char *keyString;
+     CK_RV crv;
+-    int keyTypeLen;
++    CK_KEY_TYPE keyType;
+     CK_ULONG keyLen;
+-    CK_KEY_TYPE keyType;
+-    PRUint32 keyTypeStorage;
+ 
+     switch (type) {
+         case CKA_PRIVATE:
+         case CKA_SENSITIVE:
+         case CKA_ALWAYS_SENSITIVE:
+         case CKA_EXTRACTABLE:
+         case CKA_DERIVE:
+         case CKA_ENCRYPT:
+@@ -704,84 +779,17 @@ lg_FindSecretKeyAttribute(LGObjectCache 
+     }
+ 
+     key = lg_GetPrivateKey(obj);
+     if (key == NULL) {
+         return CKR_OBJECT_HANDLE_INVALID;
+     }
+     switch (type) {
+         case CKA_KEY_TYPE:
+-            /* handle legacy databases. In legacy databases key_type was stored
+-             * in host order, with any leading zeros stripped off. Only key types
+-             * under 0x1f (AES) were stored. We assume that any values which are
+-             * either 1 byte long (big endian), or have byte[0] between 0 and
+-             * 0x7f and bytes[1]-bytes[3] equal to '0' (little endian). All other
+-             * values are assumed to be from the new database, which is always 4
+-             * bytes in network order */
+-            keyType = 0;
+-            keyString = key->u.rsa.coefficient.data;
+-            keyTypeLen = key->u.rsa.coefficient.len;
+-
+-            /*
+-             * Because of various endian and word lengths The database may have
+-             * stored the keyType value in one of the following formats:
+-             *   (kt) <= 0x1f
+-             *                                   length data
+-             * Big Endian,     pre-3.9, all lengths: 1  (kt)
+-             * Little Endian,  pre-3.9, 32 bits:     4  (kt) 0  0  0
+-             * Little Endian,  pre-3.9, 64 bits:     8  (kt) 0  0  0   0  0  0  0
+-             * All platforms,      3.9, 32 bits:     4    0  0  0 (kt)
+-             * Big Endian,         3.9, 64 bits:     8    0  0  0 (kt) 0  0  0  0
+-             * Little  Endian,     3.9, 64 bits:     8    0  0  0  0   0  0  0 (kt)
+-             * All platforms, >= 3.9.1, all lengths: 4   (a) k1 k2 k3
+-             * where (a) is 0 or >= 0x80. currently (a) can only be 0.
+-             */
+-            /*
+-             * this key was written on a 64 bit platform with a using NSS 3.9
+-             * or earlier. Reduce the 64 bit possibilities above. When we are
+-             * through, we will only have:
+-             *
+-             * Big Endian,     pre-3.9, all lengths: 1  (kt)
+-             * Little Endian,  pre-3.9, all lengths: 4  (kt) 0  0  0
+-             * All platforms,      3.9, all lengths: 4    0  0  0 (kt)
+-             * All platforms, => 3.9.1, all lengths: 4   (a) k1 k2 k3
+-             */
+-            if (keyTypeLen == 8) {
+-                keyTypeStorage = *(PRUint32 *)keyString;
+-                if (keyTypeStorage == 0) {
+-                    keyString += sizeof(PRUint32);
+-                }
+-                keyTypeLen = 4;
+-            }
+-            /*
+-             * Now Handle:
+-             *
+-             * All platforms,      3.9, all lengths: 4    0  0  0 (kt)
+-             * All platforms, => 3.9.1, all lengths: 4   (a) k1 k2 k3
+-             *
+-             * NOTE: if  kt == 0 or ak1k2k3 == 0, the test fails and
+-             * we handle it as:
+-             *
+-             * Little Endian,  pre-3.9, all lengths: 4  (kt) 0  0  0
+-             */
+-            if (keyTypeLen == sizeof(keyTypeStorage) &&
+-                (((keyString[0] & 0x80) == 0x80) ||
+-                 !((keyString[1] == 0) && (keyString[2] == 0) && (keyString[3] == 0)))) {
+-                PORT_Memcpy(&keyTypeStorage, keyString, sizeof(keyTypeStorage));
+-                keyType = (CK_KEY_TYPE)PR_ntohl(keyTypeStorage);
+-            } else {
+-                /*
+-                 * Now Handle:
+-                 *
+-                 * Big Endian,     pre-3.9, all lengths: 1  (kt)
+-                 * Little Endian,  pre-3.9, all lengths: 4  (kt) 0  0  0
+-                 *  -- KeyType == 0 all other cases ---: 4    0  0  0  0
+-                 */
+-                keyType = (CK_KEY_TYPE)keyString[0];
+-            }
++            keyType = lg_FetchSecretKeyType(key);
+             return lg_ULongAttribute(attribute, type, keyType);
+         case CKA_VALUE:
+             return lg_CopyPrivAttribute(attribute, type, key->u.rsa.privateExponent.data,
+                                         key->u.rsa.privateExponent.len, obj->sdb);
+         case CKA_VALUE_LEN:
+             keyLen = key->u.rsa.privateExponent.len;
+             return lg_ULongAttribute(attribute, type, keyLen);
+     }
+@@ -1063,17 +1071,17 @@ lg_FindSMIMEAttribute(LGObjectCache *obj
+ 
+ static CK_RV
+ lg_FindTrustAttribute(LGObjectCache *obj, CK_ATTRIBUTE_TYPE type,
+                       CK_ATTRIBUTE *attribute)
+ {
+     NSSLOWCERTTrust *trust;
+     NSSLOWCERTCertDBHandle *certHandle;
+     NSSLOWCERTCertificate *cert;
+-    unsigned char hash[SHA1_LENGTH];
++    unsigned char hash[SHA256_LENGTH];
+     unsigned int trustFlags;
+     CK_RV crv = CKR_CANCEL;
+     PRBool isPKCS;
+ 
+     switch (type) {
+         case CKA_PRIVATE:
+             return LG_CLONE_ATTR(attribute, type, lg_StaticFalseAttr);
+         case CKA_MODIFIABLE:
+@@ -1103,21 +1111,23 @@ lg_FindTrustAttribute(LGObjectCache *obj
+     }
+     trust = lg_getTrust(obj, certHandle);
+     if (trust == NULL) {
+         return CKR_OBJECT_HANDLE_INVALID;
+     }
+     isPKCS = PR_TRUE;
+     switch (type) {
+         case CKA_NAME_HASH_ALGORITHM:
+-            return lg_ULongAttribute(attribute, type, CKM_SHA_1);
++            return lg_ULongAttribute(attribute, type, CKM_SHA256);
+         case CKA_NSS_CERT_SHA1_HASH:
+-        case CKA_HASH_OF_CERTIFICATE:
+             SHA1_HashBuf(hash, trust->derCert->data, trust->derCert->len);
+             return lg_CopyAttribute(attribute, type, hash, SHA1_LENGTH);
++        case CKA_HASH_OF_CERTIFICATE:
++            SHA256_HashBuf(hash, trust->derCert->data, trust->derCert->len);
++            return lg_CopyAttribute(attribute, type, hash, SHA256_LENGTH);
+         case CKA_NSS_CERT_MD5_HASH:
+             MD5_HashBuf(hash, trust->derCert->data, trust->derCert->len);
+             return lg_CopyAttribute(attribute, type, hash, MD5_LENGTH);
+         case CKA_NSS_TRUST_CLIENT_AUTH:
+             isPKCS = PR_FALSE;
+         case CKA_PKCS_TRUST_CLIENT_AUTH:
+             trustFlags = trust->trust->sslFlags &
+                                  CERTDB_TRUSTED_CLIENT_CA
+diff --git a/lib/softoken/legacydb/lgcreate.c b/lib/softoken/legacydb/lgcreate.c
+--- a/lib/softoken/legacydb/lgcreate.c
++++ b/lib/softoken/legacydb/lgcreate.c
+@@ -905,16 +905,28 @@ lg_createSecretKeyObject(SDB *sdb, CK_KE
+     if (pubKey.len == 0) {
+         if (pubKey.data) {
+             PORT_Free(pubKey.data);
+             pubKey.data = NULL;
+         }
+         crv = lg_GenerateSecretCKA_ID(keyHandle, &pubKey, label);
+         if (crv != CKR_OK)
+             goto loser;
++    } else if (nsslowkey_KeyForIDExists(keyHandle, &pubKey)) {
++        /* if the item already exists, create a version with a different key type  */
++        SECItem *newPubKey = lg_makeSecretKeyId(&pubKey, key_type);
++        PORT_Free(pubKey.data);
++        pubKey.data = NULL;
++        if (newPubKey == NULL) {
++            goto loser;
++        }
++        /* swap in the new id length into pubkey */
++        pubKey.data = newPubKey->data;
++        pubKey.len = newPubKey->len;
++        PORT_Free(newPubKey);
+     }
+ 
+     privKey = lg_mkSecretKeyRep(templ, count, key_type, &pubKey, sdb);
+     if (privKey == NULL) {
+         crv = CKR_HOST_MEMORY;
+         goto loser;
+     }
+ 
+diff --git a/lib/softoken/legacydb/lgfind.c b/lib/softoken/legacydb/lgfind.c
+--- a/lib/softoken/legacydb/lgfind.c
++++ b/lib/softoken/legacydb/lgfind.c
+@@ -252,50 +252,81 @@ lg_key_collect(DBT *key, DBT *data, void
+ 
+ loser:
+     if (privKey) {
+         lg_nsslowkey_DestroyPrivateKey(privKey);
+     }
+     return (SECSuccess);
+ }
+ 
++SECItem *lg_makeSecretKeyId(SECItem *key_id, CK_KEY_TYPE keyType)
++{
++    SECItem *newItem=SECITEM_AllocItem(NULL, NULL, key_id->len+sizeof(PRUint32));
++    if (newItem == NULL) {
++        return NULL;
++    }
++    PRUint32 nkeyType=PR_htonl(keyType);
++    PORT_Memcpy(newItem->data, key_id->data, key_id->len);
++    PORT_Memcpy(newItem->data+key_id->len, &nkeyType, sizeof(PRUint32));
++    return newItem;
++}
++
+ static void
+ lg_searchKeys(SDB *sdb, SECItem *key_id,
+-              unsigned long classFlags, SDBFind *search, PRBool mustStrict,
++              unsigned long classFlags, CK_KEY_TYPE keyType, SDBFind *search, PRBool mustStrict,
+               const CK_ATTRIBUTE *pTemplate, CK_ULONG ulCount)
+ {
+     NSSLOWKEYDBHandle *keyHandle = NULL;
+     NSSLOWKEYPrivateKey *privKey;
+     lgKeyData keyData;
+     PRBool found = PR_FALSE;
+ 
+     keyHandle = lg_getKeyDB(sdb);
+     if (keyHandle == NULL) {
+         return;
+     }
+ 
+     if (key_id->data) {
+         privKey = nsslowkey_FindKeyByPublicKey(keyHandle, key_id, sdb);
+         if (privKey) {
+-            if ((classFlags & LG_KEY) && isSecretKey(privKey)) {
++            if ((classFlags & LG_KEY) && isSecretKey(privKey) && (keyType == lg_FetchSecretKeyType(privKey))) {
+                 lg_addHandle(search,
+                              lg_mkHandle(sdb, key_id, LG_TOKEN_TYPE_KEY));
+                 found = PR_TRUE;
+             }
+             if ((classFlags & LG_PRIVATE) && !isSecretKey(privKey)) {
+                 lg_addHandle(search,
+                              lg_mkHandle(sdb, key_id, LG_TOKEN_TYPE_PRIV));
+                 found = PR_TRUE;
+             }
+             if ((classFlags & LG_PUBLIC) && !isSecretKey(privKey)) {
+                 lg_addHandle(search,
+                              lg_mkHandle(sdb, key_id, LG_TOKEN_TYPE_PUB));
+                 found = PR_TRUE;
+             }
+             lg_nsslowkey_DestroyPrivateKey(privKey);
++            privKey = NULL;
++        }
++        if (!found && (classFlags & LG_KEY)) {
++         /* sigh we allow more than one key of different key types to have the same id,
++          * so we store those other ids under key_id/keytype */
++          SECItem *new_key_id = lg_makeSecretKeyId(key_id, keyType);
++          if (new_key_id) {
++              privKey = nsslowkey_FindKeyByPublicKey(keyHandle, new_key_id, sdb);
++              if (privKey) {
++                    if (isSecretKey(privKey) && (keyType == lg_FetchSecretKeyType(privKey))) {
++                        lg_addHandle(search,
++                                     lg_mkHandle(sdb, new_key_id, LG_TOKEN_TYPE_KEY));
++                        found = PR_TRUE;
++                    }
++                    lg_nsslowkey_DestroyPrivateKey(privKey);
++                    privKey = NULL;
++              }
++              SECITEM_FreeItem(new_key_id, PR_TRUE);
++          }
+         }
+         /* don't do the traversal if we have an up to date db */
+         if (keyHandle->version != 3) {
+             goto loser;
+         }
+         /* don't do the traversal if it can't possibly be the correct id */
+         /* all soft token id's are SHA1_HASH_LEN's */
+         if (key_id->len != SHA1_LENGTH) {
+@@ -642,16 +673,17 @@ lg_searchTokenList(SDB *sdb, SDBFind *se
+     SECItem cert_md5_hash = { siBuffer, NULL, 0 };
+     NSSLOWCERTIssuerAndSN issuerSN = {
+         { siBuffer, NULL, 0 },
+         { siBuffer, NULL, 0 }
+     };
+     SECItem *copy = NULL;
+     CK_CERTIFICATE_TYPE certType;
+     CK_OBJECT_CLASS objectClass;
++    CK_KEY_TYPE keyType = CK_INVALID_HANDLE;
+     CK_RV crv;
+     unsigned long classFlags;
+ 
+     if (lg_getCertDB(sdb) == NULL) {
+         classFlags = LG_PRIVATE | LG_KEY;
+     } else {
+         classFlags = LG_CERT | LG_TRUST | LG_NSS_TRUST | LG_PUBLIC | LG_SMIME | LG_CRL;
+     }
+@@ -793,16 +825,21 @@ lg_searchTokenList(SDB *sdb, SDBFind *se
+                     break;
+                 }
+                 classFlags &= LG_CRL;
+                 isKrl = (PRBool)(*((CK_BBOOL *)pTemplate[i].pValue) == CK_TRUE);
+                 break;
+             case CKA_MODIFIABLE:
+                 break;
+             case CKA_KEY_TYPE:
++                crv = lg_GetULongAttribute(CKA_KEY_TYPE, &pTemplate[i], 1, &keyType);
++                if (crv != CKR_OK) {
++                    classFlags = 0;
++                    break;
++                }
+             case CKA_DERIVE:
+                 classFlags &= LG_PUBLIC | LG_PRIVATE | LG_KEY;
+                 break;
+             case CKA_VERIFY_RECOVER:
+                 classFlags &= LG_PUBLIC;
+                 break;
+             case CKA_SIGN_RECOVER:
+                 classFlags &= LG_PRIVATE;
+@@ -838,17 +875,17 @@ lg_searchTokenList(SDB *sdb, SDBFind *se
+         lg_searchCertsAndTrust(sdb, &derCert, &name, &derSubject,
+                                &issuerSN, &email, classFlags, search,
+                                pTemplate, ulCount);
+     }
+ 
+     /* keys */
+     if (classFlags & (LG_PRIVATE | LG_PUBLIC | LG_KEY)) {
+         PRBool mustStrict = (name.len != 0);
+-        lg_searchKeys(sdb, &key_id, classFlags, search,
++        lg_searchKeys(sdb, &key_id, classFlags, keyType, search,
+                       mustStrict, pTemplate, ulCount);
+     }
+ 
+     /* crl's */
+     if (classFlags & LG_CRL) {
+         lg_searchCrls(sdb, &derSubject, isKrl, classFlags, search,
+                       pTemplate, ulCount);
+     }
+diff --git a/lib/softoken/legacydb/lowkeyi.h b/lib/softoken/legacydb/lowkeyi.h
+--- a/lib/softoken/legacydb/lowkeyi.h
++++ b/lib/softoken/legacydb/lowkeyi.h
+@@ -138,11 +138,17 @@ nsslowkey_FindKeyNicknameByPublicKey(NSS
+  */
+ SECStatus LGEC_FillParams(PLArenaPool *arena, const SECItem *encodedParams,
+                           ECParams *params);
+ 
+ /* Copy all of the fields from srcParams into dstParams */
+ SECStatus LGEC_CopyParams(PLArenaPool *arena, ECParams *dstParams,
+                           const ECParams *srcParams);
+ 
++/* fetch the key type from a secret key */
++CK_KEY_TYPE lg_FetchSecretKeyType(NSSLOWKEYPrivateKey *key);
++
++/* create a new key id with a distinguishing key type */
++SECItem *lg_makeSecretKeyId(SECItem *key_id, CK_KEY_TYPE keyType);
++
+ SEC_END_PROTOS
+ 
+ #endif /* _LOWKEYI_H_ */
+diff --git a/tests/cert/cert.sh b/tests/cert/cert.sh
+--- a/tests/cert/cert.sh
++++ b/tests/cert/cert.sh
+@@ -101,19 +101,21 @@ cert_init()
+   fi
+ 
+   cert_add_algorithm "RSA" "" "" "false" 0 
+   if [ -z ${NSS_DISABLE_DSA} ]; then
+       cert_add_algorithm "DSA" "-dsa" "-k dsa" "true" 20000
+   fi
+   # NOTE: curve is added later, so the full command would be '-k ec -q curve'
+   cert_add_algorithm "ECC" "-ec" "-k ec -q" "true" 10000
+-  cert_add_algorithm "ML-DSA-44" "-ml-dsa-44" "-k mldsa -q ml-dsa-44" "false" 30000
+-  cert_add_algorithm "ML-DSA-65" "-ml-dsa-65" "-k mldsa -q ml-dsa-65" "false" 40000
+-  cert_add_algorithm "ML-DSA-87" "-ml-dsa-87" "-k mldsa -q ml-dsa-87" "false" 50000
++  if using_sql; then
++      cert_add_algorithm "ML-DSA-44" "-ml-dsa-44" "-k mldsa -q ml-dsa-44" "false" 30000
++      cert_add_algorithm "ML-DSA-65" "-ml-dsa-65" "-k mldsa -q ml-dsa-65" "false" 40000
++      cert_add_algorithm "ML-DSA-87" "-ml-dsa-87" "-k mldsa -q ml-dsa-87" "false" 50000
++  fi
+   # currently rsa-pss is only enabled for a subset of tests
+   # this will enable a full suite of RSA-PSS certs, and we would
+   # then remove the explicit ones
+   # ulike the other tests, we would need to change ssl tests as this
+   # will rename some of the RSA-PSS certificates.
+   #cert_add_algorithm "RSA-PSS" "-rsa-pss" "-k rsa -pss -Z sha256" "true"
+   #cert_add_algorithm "RSA-PSS-SHA1" "-rsa-pss-sha1" "-k rsa -pss -Z sha1" "true"
+ 
+diff --git a/tests/dbtests/dbtests.sh b/tests/dbtests/dbtests.sh
+--- a/tests/dbtests/dbtests.sh
++++ b/tests/dbtests/dbtests.sh
+@@ -456,18 +456,22 @@ dbtest_main()
+     if [ $ret -ne 0 ]; then
+       html_failed "Nickname conflict test-setting nickname conflict incorrectly worked"
+     else
+       html_passed "Nickname conflict test-setting nickname conflict was correctly rejected"
+     fi
+     # import a token private key and make sure the corresponding public key is
+     # created
+     IMPORT_OPTIONS=""
++    if ! using_sql ; then
++        # can't store mlkem, mldsa, eddsa, or ecMont keys in the old database
++        IMPORT_OPTIONS="$IMPORT_OPTIONS -m -K -w -g"
++    fi
+     if [ -n "$NSS_DISABLE_DSA" ]; then
+-        IMPORT_OPTIONS="-D noDSA"
++        IMPORT_OPTIONS="$IMPORT_OPTION -D noDSA"
+     fi
+     Echo "Importing Token Private Key"
+     echo "pk11importtest ${IMPORT_OPTIONS} -d ${CONFLICT_DIR} -f ${R_PWFILE}"
+     ${BINDIR}/pk11importtest ${IMPORT_OPTIONS} -d ${CONFLICT_DIR} -f ${R_PWFILE}
+     ret=$?
+     if [ $ret -ne 0 ]; then
+       html_failed "Importing Token Private Key does not create the corrresponding Public Key"
+     else
+diff --git a/tests/sdr/sdr.sh b/tests/sdr/sdr.sh
+--- a/tests/sdr/sdr.sh
++++ b/tests/sdr/sdr.sh
+@@ -89,17 +89,17 @@ sdr_main()
+   html_msg $? 0 "Encrypt - Value 2"
+ 
+   echo "$SCRIPTNAME: SDR Encrypt - Value 3"
+   echo "sdrtest -d ${PROFILE} -o ${VALUE3} -t \"${T3}\"  -f ${R_PWFILE}"
+   ${BINDIR}/sdrtest -d ${PROFILE} -o ${VALUE3} -t "${T3}" -f ${R_PWFILE}
+   html_msg $? 0 "Encrypt - Value 3"
+ 
+   echo "$SCRIPTNAME: Creating an DES3 SDR key/SDR Encrypt - Value 4"
+-  echo "sdrtest -d ${PROFILE} -o ${VALUE4} -t \"${T4}\"  -f ${R_PWFILE}"
++  echo "sdrtest -d ${PROFILE} -o ${VALUE4} -t \"${T4}\"  -f ${R_PWFILE} -m des3"
+   ${BINDIR}/sdrtest -d ${PROFILE} -o ${VALUE4} -t "${T4}" -f ${R_PWFILE} -m des3
+   html_msg $? 0 "Creating an DES3 SDR key/Encrypt - Value 4"
+ 
+   echo "$SCRIPTNAME: SDR Decrypt - Value 1"
+   echo "sdrtest -d ${PROFILE} -i ${VALUE1} -t \"${T1}\"  -f ${R_PWFILE}"
+   ${BINDIR}/sdrtest -d ${PROFILE} -i ${VALUE1} -t "${T1}" -f ${R_PWFILE}
+   html_msg $? 0 "Decrypt - Value 1"
+ 
+@@ -118,16 +118,17 @@ sdr_main()
+   ${BINDIR}/sdrtest -d ${PROFILE} -i ${VALUE4} -t "${T4}" -f ${R_PWFILE}
+   html_msg $? 0 "DES3 Decrypt - Value 4"
+ 
+   echo "$SCRIPTNAME: pwdecrypt - 300 Entries"
+   # get base64 encoded encrypted versions of our tests
+   sdrtest -d ${PROFILE} -o ${ASCII_VALUE1} -a -t "${T1}"  -f ${R_PWFILE}
+   sdrtest -d ${PROFILE} -o ${ASCII_VALUE2} -a -t "${T2}"  -f ${R_PWFILE}
+   sdrtest -d ${PROFILE} -o ${ASCII_VALUE3} -a -t "${T3}"  -f ${R_PWFILE}
++  echo "sdrtest -d ${PROFILE} -o ${ASCII_VALUE4} -a -t \"${T4}\"  -f ${R_PWFILE} -m des3"
+   sdrtest -d ${PROFILE} -o ${ASCII_VALUE4} -a -t "${T4}"  -f ${R_PWFILE} -m des3
+   # make each encoded span exactly one line
+   touch ${ASCII_COMBINED}
+   cat ${ASCII_VALUE1} | tr -d '\n' >> ${ASCII_COMBINED}
+   echo >> ${ASCII_COMBINED}
+   cat ${ASCII_VALUE2} | tr -d '\n' >> ${ASCII_COMBINED}
+   echo >> ${ASCII_COMBINED}
+   cat ${ASCII_VALUE3} | tr -d '\n' >> ${ASCII_COMBINED}
+diff --git a/tests/ssl/ssl.sh b/tests/ssl/ssl.sh
+--- a/tests/ssl/ssl.sh
++++ b/tests/ssl/ssl.sh
+@@ -134,16 +134,24 @@ ssl_init()
+   # in fips mode, turn off curve25519 until it's NIST approved
+   FIPS_OPTIONS=""
+   # in fips mode, turn off curve25519 until it's NIST approved
+   ALL_GROUPS="P256,P384,P521,x25519,FF2048,FF3072,FF4096,FF6144,FF8192,xyber768d00,x25519mlkem768,secp256r1mlkem768,secp384r1mlkem1024"
+   NON_PQ_GROUPS="P256,P384,P521,x25519,FF2048,FF3072,FF4096,FF6144,FF8192"
+   FIPS_GROUPS="P256,P384,P521,FF2048,FF3072,FF4096,FF6144,FF8192,x25519mlkem768,secp256r1mlkem768,secp384r1mlkem1024"
+   FIPS_NON_PQ_GROUPS="P256,P384,P521,FF2048,FF3072,FF4096,FF6144,FF8192"
+ 
++  # dbm can't store ML_DSA certs
++  if ! using_sql ; then
++    NO_ML_DSA_CERTS=1
++  fi
++  # upgrade DB's are created from dbm, so they have no ML_DSA certs
++  if [ "$TEST_MODE" = "UPGRADE_DB" ]; then
++    NO_ML_DSA_CERTS=1
++  fi
+ 
+   # in non-fips mode, tstclnt may run without the db password in some
+   # cases, but in fips mode it's always needed
+   CLIENT_PW=""
+   CLIENT_PW_FIPS="-w nss"
+   CLIENT_PW_NORMAL=""
+ 
+   if [ "${OS_ARCH}" != "WINNT" ]; then
+@@ -331,32 +339,40 @@ ssl_cov()
+   # doing so hides the server pid environment variable in the subshell in
+   # cygwin, which means we can't kill selfserv at the end here.
+   SSL_COV_TMP=$(mktemp /tmp/ssl_cov.XXXXXX)
+   ignore_blank_lines ${SSLCOV} > ${SSL_COV_TMP}
+   while read ectype testmax param sig testname
+   do
+       # Select the TLS SIG SCHEME if necessary 
+       TLS_SIG_SCHEMES=""
++      TLS_IS_ML_DSA=0
+       if [ "$sig" = "RSA-PSS" ]; then
+           # RSA-PSS tests are currently handled in a separate function
+           continue
+       elif [ "$sig" = "ML-DSA-44" ]; then
+           TLS_SIG_SCHEMES="-J mldsa44 "
++          TLS_IS_ML_DSA=1
+       elif [ "$sig" = "ML-DSA-65" ]; then
+           TLS_SIG_SCHEMES="-J mldsa65 "
++          TLS_IS_ML_DSA=1
+       elif [ "$sig" = "ML-DSA-87" ]; then
+           TLS_SIG_SCHEMES="-J mldsa87 "
++          TLS_IS_ML_DSA=1
+       fi
+ 
+ 
+       # skip DSA tests if they are disabled
+       if [ -n "$NSS_DISABLE_DSA" -a "$sig" = "DSA" ]; then
+           continue
+       fi
++      # skip ML-DSA tests if they are disabled
++      if [ -n "$NO_ML_DSA_CERTS" -a -n "$NO_ML_DSA_CERTS" -a "$TLS_IS_ML_DSA" = 1 ]; then
++          continue
++      fi
+ 
+       echo "$SCRIPTNAME: running $testname ----------------------------"
+       VMAX="ssl3"
+       if [ "$testmax" = "TLS10" ]; then
+           VMAX="tls1.0"
+       fi
+       if [ "$testmax" = "TLS11" ]; then
+           VMAX="tls1.1"
+@@ -485,16 +501,18 @@ ssl_auth()
+       CAUTH=$?
+       echo "${testname}" | grep "TLS 1.3" > /dev/null
+       TLS13=$?
+ 
+       if [ "${CLIENT_MODE}" = "fips" -a "${CAUTH}" -eq 0 ] ; then
+           echo "$SCRIPTNAME: skipping  $testname (non-FIPS only)"
+       elif [ "$ectype" = "SNI" -a "$NORM_EXT" = "Extended Test" ] ; then
+           echo "$SCRIPTNAME: skipping  $testname for $NORM_EXT"
++      elif [ "$ectype" = "MLDSA" -a -n "$NO_ML_DSA_CERTS" -a "$NO_ML_DSA_CERTS" = "1" ] ; then
++          echo "$SCRIPTNAME: skipping  $testname old dbm does not support mldsa"
+       else
+           cparam=`echo $cparam | sed -e 's;\([^\\]\)_;\1 ;g' -e 's;\\\\_;_;g' -e "s/TestUser/$USER_NICKNAME/g" `
+           if [ "$ectype" = "SNI" ]; then
+               cparam=`echo $cparam | sed -e "s/Host/$HOST/g" -e "s/Dom/$DOMSUF/g" `
+               sparam=`echo $sparam | sed -e "s/Host/$HOST/g" -e "s/Dom/$DOMSUF/g" `
+           fi
+ 	  # SSL3 cannot be used with TLS 1.3
+ 	  unset SERVER_VMIN
+@@ -763,16 +781,18 @@ ssl_crl_ssl()
+ 
+   ignore_blank_lines ${SSLAUTH} | \
+   while read ectype value sparam cparam testname
+   do
+     echo "${testname}" | grep "TLS 1.3" > /dev/null
+     TLS13=$?
+     if [ "$ectype" = "SNI" ]; then
+         continue
++    elif [ "$ectype" = "MLDSA" -a -n "$NO_ML_DSA_CERTS" -a "$NO_ML_DSA_CERTS" = "1" ] ; then
++        continue
+     else
+         # SSL3 cannot be used with TLS 1.3
+         unset SERVER_VMIN
+         unset SERVER_VMAX
+         if [ $TLS13 -eq 0 ] ; then
+             SERVER_VMIN=tls1.0
+             SERVER_VMAX=tls1.3
+         fi
+diff --git a/tests/ssl_gtests/ssl_gtest_db.sh b/tests/ssl_gtests/ssl_gtest_db.sh
+--- a/tests/ssl_gtests/ssl_gtest_db.sh
++++ b/tests/ssl_gtests/ssl_gtest_db.sh
+@@ -54,33 +54,39 @@ make_cert rsa_sign rsa sign
+ make_cert rsa_pss rsapss sign
+ make_cert rsa_pss384 rsapss384 sign
+ make_cert rsa_pss512 rsapss512 sign
+ make_cert rsa_pss_noparam rsapss_noparam sign
+ make_cert rsa_decrypt rsa kex
+ make_cert ecdsa256 p256 sign
+ make_cert ecdsa384 p384 sign
+ make_cert ecdsa521 p521 sign
+-make_cert mldsa44 mldsa44 sign
+-make_cert mldsa65 mldsa65 sign
+-make_cert mldsa87 mldsa87 sign
++if using_sql; then
++    make_cert mldsa44 mldsa44 sign
++    make_cert mldsa65 mldsa65 sign
++    make_cert mldsa87 mldsa87 sign
++fi
+ make_cert ecdh_ecdsa p256 kex
+ make_cert rsa_ca rsa_ca ca
+ make_cert rsa_chain rsa_chain sign
+ make_cert rsa_pss_ca rsapss_ca ca
+ make_cert rsa_pss_chain rsapss_chain sign
+ make_cert rsa_ca_rsa_pss_chain rsa_ca_rsapss_chain sign
+-make_cert mldsa44_ca mldsa44_ca ca
+-make_cert mldsa44_chain mldsa44_chain sign
+-make_cert mldsa65_ca mldsa65_ca ca
+-make_cert mldsa65_chain mldsa65_chain sign
+-make_cert mldsa87_ca mldsa87_ca ca
+-make_cert mldsa87_chain mldsa87_chain sign
++if using_sql; then
++    make_cert mldsa44_ca mldsa44_ca ca
++    make_cert mldsa44_chain mldsa44_chain sign
++    make_cert mldsa65_ca mldsa65_ca ca
++    make_cert mldsa65_chain mldsa65_chain sign
++    make_cert mldsa87_ca mldsa87_ca ca
++    make_cert mldsa87_chain mldsa87_chain sign
++fi
+ make_cert ecdh_rsa ecdh_rsa kex
+ if [ -z "${NSS_DISABLE_DSA}" ]; then
+     make_cert dsa dsa sign
+ fi
+ make_cert delegator_ecdsa256 delegator_p256 sign
+ make_cert delegator_rsae2048 delegator_rsae2048 sign
+ make_cert delegator_rsa_pss2048 delegator_rsa_pss2048 sign
+-make_cert delegator_mldsa44 delegator_mldsa44 sign
+-make_cert delegator_mldsa65 delegator_mldsa65 sign
+-make_cert delegator_mldsa87 delegator_mldsa87 sign
++if using_sql; then
++   make_cert delegator_mldsa44 delegator_mldsa44 sign
++   make_cert delegator_mldsa65 delegator_mldsa65 sign
++   make_cert delegator_mldsa87 delegator_mldsa87 sign
++fi
+diff --git a/tests/ssl_gtests/ssl_gtests.sh b/tests/ssl_gtests/ssl_gtests.sh
+--- a/tests/ssl_gtests/ssl_gtests.sh
++++ b/tests/ssl_gtests/ssl_gtests.sh
+@@ -30,23 +30,27 @@ ssl_gtest_certs() {
+ ssl_gtest_init()
+ {
+   SCRIPTNAME=ssl_gtest.sh      # sourced - $0 would point to all.sh
+ 
+   if [ -z "${CLEANUP}" ] ; then     # if nobody else is responsible for
+       CLEANUP="${SCRIPTNAME}"       # cleaning this script will do it
+   fi
+   if [ -z "${INIT_SOURCED}" -o "${INIT_SOURCED}" != "TRUE" ]; then
+-      cd ../common
++      pushd ../common
+       . ./init.sh
++      popd
+   fi
+ 
+   SCRIPTNAME=ssl_gtest.sh
+   html_head SSL Gtests
+ 
++  echo "SSLGTESTDIR=${SSLGTESTDIR}"
++  pwd
++
+   if [ ! -d "${SSLGTESTDIR}" ]; then
+     ssl_gtest_certs
+   fi
+ 
+   cd "${SSLGTESTDIR}"
+ }
+ 
+ ########################## ssl_gtest_start #########################
+diff --git a/tests/tools/tools.sh b/tests/tools/tools.sh
+--- a/tests/tools/tools.sh
++++ b/tests/tools/tools.sh
+@@ -658,20 +658,20 @@ tools_p12()
+       tools_p12_export_list_import_all_pkcs12v2pbe_ciphers
+   else
+       tools_p12_export_list_import_most_ciphers
+   fi
+   tools_p12_export_with_none_ciphers
+   tools_p12_export_with_invalid_ciphers
+   tools_p12_import_old_files
+   tools_p12_import_pbmac1_samples
+-  tools_p12_import_ed25519_private_key
+-  tools_p12_ml_dsa_import
+-  tools_p12_ml_kem_import
+   if using_sql; then
++    tools_p12_import_ed25519_private_key
++    tools_p12_ml_dsa_import
++    tools_p12_ml_kem_import
+     tools_p12_import_rsa_pss_private_key
+ #tools_p12_policy
+   fi
+ }
+ 
+ ############################## tools_sign ##############################
+ # local shell function pk12util uses a hardcoded tmp file, if this exists
+ # and is owned by another user we don't get reasonable errormessages

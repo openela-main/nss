@@ -1,8 +1,17 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1780431402 25200
+#      Tue Jun 02 13:16:42 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID b9532ef80e57a3656a1cf077e751b5e1988c52b7
+# Parent  adcfeed46df897fe20ab59d2a40d8150915707fe
+nss-3.112-disable-ech.patch
+
 diff --git a/gtests/ssl_gtest/manifest.mn b/gtests/ssl_gtest/manifest.mn
 --- a/gtests/ssl_gtest/manifest.mn
 +++ b/gtests/ssl_gtest/manifest.mn
-@@ -50,17 +50,16 @@ CPPSRCS = \
-       ssl_staticrsa_unittest.cc \
+@@ -51,17 +51,16 @@ CPPSRCS = \
+       ssl_timers_unittest.cc \
        ssl_tls13compat_unittest.cc \
        ssl_v2_client_hello_unittest.cc \
        ssl_version_unittest.cc \
@@ -17,12 +26,17 @@ diff --git a/gtests/ssl_gtest/manifest.mn b/gtests/ssl_gtest/manifest.mn
        tls_protect.cc \
        tls_psk_unittest.cc \
        tls_subcerts_unittest.cc \
-       tls_xyber_unittest.cc \
+       $(XYBER_FILES) \
        $(SSLKEYLOGFILE_FILES) \
-diff -up ./lib/ssl/sslsock.c.disable_ech ./lib/ssl/sslsock.c
---- ./lib/ssl/sslsock.c.disable_ech	2024-06-07 09:26:03.000000000 -0700
-+++ ./lib/ssl/sslsock.c	2024-06-12 13:29:17.162207862 -0700
-@@ -4415,17 +4415,23 @@ ssl_ClearPRCList(PRCList *list, void (*f
+diff --git a/lib/ssl/sslsock.c b/lib/ssl/sslsock.c
+--- a/lib/ssl/sslsock.c
++++ b/lib/ssl/sslsock.c
+@@ -4466,62 +4466,82 @@ ssl_ClearPRCList(PRCList *list, void (*f
+         }
+         PORT_Free(cursor);
+     }
+ }
+ 
  SECStatus
  SSLExp_EnableTls13GreaseEch(PRFileDesc *fd, PRBool enabled)
  {
@@ -46,7 +60,13 @@ diff -up ./lib/ssl/sslsock.c.disable_ech ./lib/ssl/sslsock.c
      sslSocket *ss = ssl_FindSocket(fd);
      if (!ss || size == 0) {
          return SECFailure;
-@@ -4439,28 +4445,42 @@ SSLExp_SetTls13GreaseEchSize(PRFileDesc
+     }
+     ssl_Get1stHandshakeLock(ss);
+     ssl_GetSSL3HandshakeLock(ss);
+ 
+     ss->ssl3.hs.greaseEchSize = size;
+ 
+     ssl_ReleaseSSL3HandshakeLock(ss);
      ssl_Release1stHandshakeLock(ss);
  
      return SECSuccess;
@@ -89,3 +109,8 @@ diff -up ./lib/ssl/sslsock.c.disable_ech ./lib/ssl/sslsock.c
  }
  
  SECStatus
+ SSLExp_SetDtls13VersionWorkaround(PRFileDesc *fd, PRBool enabled)
+ {
+     sslSocket *ss = ssl_FindSocket(fd);
+     if (!ss) {
+         return SECFailure;

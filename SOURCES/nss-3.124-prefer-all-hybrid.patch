@@ -1,0 +1,92 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1780514963 25200
+#      Wed Jun 03 12:29:23 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID 6e7722343bbb64c097f476afff27db4bc0b103c2
+# Parent  c821cfd68f40883d94215accb63869deeeb1d4e6
+nss-3.124-prefer-all-hybrid.patch
+
+diff --git a/gtests/ssl_gtest/ssl_dhe_unittest.cc b/gtests/ssl_gtest/ssl_dhe_unittest.cc
+--- a/gtests/ssl_gtest/ssl_dhe_unittest.cc
++++ b/gtests/ssl_gtest/ssl_dhe_unittest.cc
+@@ -36,17 +36,17 @@ TEST_P(TlsConnectTls13, SharesForBothEcd
+   auto shares_capture =
+       std::make_shared<TlsExtensionCapture>(client_, ssl_tls13_key_share_xtn);
+   std::vector<std::shared_ptr<PacketFilter>> captures = {groups_capture,
+                                                          shares_capture};
+   client_->SetFilter(std::make_shared<ChainedPacketFilter>(captures));
+ 
+   Connect();
+ 
+-  CheckKeys(ssl_kea_ecdh, ssl_auth_rsa_sign);
++  CheckKeys(GetDefaultKEA(), ssl_auth_rsa_sign);
+ 
+   bool ec, dh;
+   auto track_group_type = [&ec, &dh](SSLNamedGroup group) {
+     if ((group & 0xff00U) == 0x100U) {
+       dh = true;
+     } else {
+       ec = true;
+     }
+diff --git a/lib/ssl/sslsock.c b/lib/ssl/sslsock.c
+--- a/lib/ssl/sslsock.c
++++ b/lib/ssl/sslsock.c
+@@ -163,22 +163,22 @@ static const PRUint16 srtpCiphers[] = {
+         ssl_grp_kem_##first##second, size, ssl_kea_ecdh_hybrid,              \
+             SEC_OID_##first_oid##second_oid, assumeSupported                 \
+     }
+ 
+ const sslNamedGroupDef ssl_named_groups[] = {
+     /* Note that 256 for 25519 and x25519mlkem786 is a lie, but we only use it
+      * for checking bit security and expect 256 bits there (not 255). */
+     HYGROUP(mlkem768, x25519, 256, MLKEM768, X25519, PR_TRUE),
++    HYGROUP(secp256r1, mlkem768, 256, SECP256R1, MLKEM768, PR_TRUE),
++    HYGROUP(secp384r1, mlkem1024, 256, SECP384R1, MLKEM1024, PR_TRUE),
+     { ssl_grp_ec_curve25519, 256, ssl_kea_ecdh, SEC_OID_CURVE25519, PR_TRUE },
+     ECGROUP(secp256r1, 256, SECP256R1, PR_TRUE),
+     ECGROUP(secp384r1, 384, SECP384R1, PR_TRUE),
+     ECGROUP(secp521r1, 521, SECP521R1, PR_TRUE),
+-    HYGROUP(secp256r1, mlkem768, 256, SECP256R1, MLKEM768, PR_TRUE),
+-    HYGROUP(secp384r1, mlkem1024, 256, SECP384R1, MLKEM1024, PR_TRUE),
+     { ssl_grp_kem_xyber768d00, 256, ssl_kea_ecdh_hybrid, SEC_OID_XYBER768D00, PR_FALSE },
+     FFGROUP(2048),
+     FFGROUP(3072),
+     FFGROUP(4096),
+     FFGROUP(6144),
+     FFGROUP(8192),
+     ECGROUP(secp192r1, 192, SECP192R1, PR_FALSE),
+     ECGROUP(secp160r2, 160, SECP160R2, PR_FALSE),
+diff --git a/lib/ssl/tls13con.c b/lib/ssl/tls13con.c
+--- a/lib/ssl/tls13con.c
++++ b/lib/ssl/tls13con.c
+@@ -666,20 +666,29 @@ tls13_SetupClientHello(sslSocket *ss, ss
+     if (rv != SECSuccess) {
+         return SECFailure;
+     }
+ 
+     /* Select the first enabled group.
+      * TODO(ekr@rtfm.com): be smarter about offering the group
+      * that the other side negotiated if we are resuming. */
+     PORT_Assert(PR_CLIST_IS_EMPTY(&ss->ephemeralKeyPairs));
++    PRBool has_hybrid = PR_FALSE;
+     for (i = 0; i < SSL_NAMED_GROUP_COUNT; ++i) {
+         if (!ss->namedGroupPreferences[i]) {
+             continue;
+         }
++        /* only send one hybrid key share no matter how many key
++         * shares we send */
++        if (ss->namedGroupPreferences[i]->keaType == ssl_kea_ecdh_hybrid)  {
++            if (has_hybrid) {
++                continue; /* already have one skip*/
++            }
++            has_hybrid = PR_TRUE;
++        }
+         rv = tls13_AddKeyShare(ss, ss->namedGroupPreferences[i]);
+         if (rv != SECSuccess) {
+             return SECFailure;
+         }
+         if (++numShares > ss->additionalShares) {
+             break;
+         }
+     }

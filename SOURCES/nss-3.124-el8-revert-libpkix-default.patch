@@ -1,11 +1,11 @@
 # HG changeset patch
 # User Robert Relyea <rrelyea@redhat.com>
-# Date 1752603075 25200
-#      Tue Jul 15 11:11:15 2025 -0700
-# Branch RHEL_8
-# Node ID 688a6b5db483a4168d15e09d5b243fca79b5b01d
-# Parent  a87aba54de420d418961245be6e55d354bebd77b
-nss-3.101-revert-libpkix-default.patch
+# Date 1780949364 25200
+#      Mon Jun 08 13:09:24 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID bc6ea7dc13c8873dffae84fbe02939250e448c6d
+# Parent  20048d1ef425e744445edb521dd5871210f65558
+nss-3.124-el8-revert-libpkix-default.patch
 
 diff --git a/lib/certhigh/certvfypkix.c b/lib/certhigh/certvfypkix.c
 --- a/lib/certhigh/certvfypkix.c
@@ -57,7 +57,7 @@ diff --git a/lib/nss/nssinit.c b/lib/nss/nssinit.c
 diff --git a/tests/all.sh b/tests/all.sh
 --- a/tests/all.sh
 +++ b/tests/all.sh
-@@ -138,28 +138,23 @@ run_tests()
+@@ -244,28 +244,23 @@ run_tests()
  
  ########################## run_cycle_standard ##########################
  # run test suites with sql database (no PKIX)
@@ -86,7 +86,7 @@ diff --git a/tests/all.sh b/tests/all.sh
  run_cycle_pkix()
  {
      TEST_MODE=PKIX
-@@ -167,16 +162,19 @@ run_cycle_pkix()
+@@ -273,16 +268,19 @@ run_cycle_pkix()
      TABLE_ARGS="bgcolor=cyan"
      html_head "Testing with PKIX"
      html "</TABLE><BR>"
@@ -99,7 +99,7 @@ diff --git a/tests/all.sh b/tests/all.sh
 +    export NSS_ENABLE_PKIX_VERIFY
 +
      TESTS="${ALL_TESTS}"
-     TESTS_SKIP="cipher dbtests sdr crmf smime merge multinit"
+     TESTS_SKIP="cipher cipher-noaes cipher-noavx cipher-nopclmul cipher-nosha cipher-nosse41 cipher-nossse3 dbtests sdr smime merge multinit"
  
      export -n NSS_SSL_RUN
  
@@ -133,8 +133,7 @@ diff --git a/tests/common/init.sh b/tests/common/init.sh
 diff --git a/tests/ssl/ssl.sh b/tests/ssl/ssl.sh
 --- a/tests/ssl/ssl.sh
 +++ b/tests/ssl/ssl.sh
-@@ -957,18 +957,19 @@ ssl_policy_listsuites()
-   html "</TABLE><BR>"
+@@ -973,17 +973,18 @@ ssl_policy_listsuites()
  }
  
  ssl_policy_pkix_ocsp()
@@ -142,9 +141,8 @@ diff --git a/tests/ssl/ssl.sh b/tests/ssl/ssl.sh
    #verbose="-v"
    html_head "Check that OCSP doesn't break if we disable sha1 $NORM_EXT - server $SERVER_MODE/client $CLIENT_MODE"
  
--  PKIX_SAVE=${NSS_DISABLE_LIBPKIX_VERIFY-"unset"}
+   PKIX_SAVE=${NSS_DISABLE_LIBPKIX_VERIFY-"unset"}
 -  unset NSS_DISABLE_LIBPKIX_VERIFY
-+  PKIX_SAVE=${NSS_ENABLE_PKIX_VERIFY-"unset"}
 +  NSS_ENABLE_PKIX_VERIFY="1"
 +  export NSS_ENABLE_PKIX_VERIFY
  
@@ -155,7 +153,7 @@ diff --git a/tests/ssl/ssl.sh b/tests/ssl/ssl.sh
        return 1;
    fi
  
-@@ -983,20 +984,22 @@ ssl_policy_pkix_ocsp()
+@@ -998,20 +999,22 @@ ssl_policy_pkix_ocsp()
    vfyserv -o wrong.host.badssl.com -d ${P_R_SERVERDIR} 2>&1 | tee ${P_R_SERVERDIR}/vfy.out
    # make sure we have the domain mismatch, not bad signature error
    echo "grep -E '12276|5961' ${P_R_SERVERDIR}/vfy.out"

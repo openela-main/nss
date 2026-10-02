@@ -1,7 +1,7 @@
-%global nspr_build_version 4.36.0-2
-%global nspr_release -2
-%global nspr_version 4.35.0
-%global nss_version 3.112.0
+%global nspr_build_version 4.39.0-1
+%global nspr_release -1
+%global nspr_version 4.39.0
+%global nss_version 3.124.0
 %global unsupported_tools_directory %{_libdir}/nss/unsupported-tools
 %global saved_files_dir %{_libdir}/nss/saved
 %global dracutlibdir %{_prefix}/lib/dracut
@@ -63,7 +63,7 @@ print(string.sub(hash, 0, 16))
 Summary:          Network Security Services
 Name:             nss
 Version:          %{nss_version}
-Release:          8%{?dist}
+Release:          5%{?dist}
 License:          MPLv2.0
 URL:              http://www.mozilla.org/projects/security/pki/nss/
 Requires:         nspr >= %{nspr_version}%{nspr_release}
@@ -112,7 +112,7 @@ Source28:         nss-p11-kit.config
 Source29:         nss_compat_test_pkcs12.tar
 # fips algorithms are tied to the red hat validation, others
 # will have their own validation
-Source30:         fips_algorithms.h
+Source90:         fips_algorithms.h
 
 #Source50:         NameConstraints_Certs.tar
 
@@ -150,7 +150,7 @@ Patch12:          nss-gcm-param-default-pkcs11v2.patch
 Patch13:          rhbz1185708-enable-ecc-3des-ciphers-by-default.patch
 # Local patch: ignore rsa, rsa-pss, ecdsa policies until crypto-policies
 # is updated.
-Patch14:          nss-3.112-disable-signature-policies.patch
+Patch14:          nss-3.124-disable-signature-policies.patch
 # Local patch: disable tests that require external reference so brew completes
 Patch16:          nss-3.112-disable-external-host-test.patch
 # Local patch: restore old pkcs 12 defaults on old version of rhel
@@ -166,39 +166,40 @@ Patch20:          nss-3.101-ec-dbm-test.patch
 # end of RHEL-8 specific patches
 
 # RHEL-specific shared with RHEL-9
-Patch30:          nss-3.101-extend-db-dump-time.patch
+Patch21:          nss-3.101-extend-db-dump-time.patch
 # Local patch: disable MD5 (also MD2 and MD4) completely
 # https://bugzilla.redhat.com/show_bug.cgi?id=1849938
-Patch32:          nss-3.112-disable-md5.patch
-Patch34:          nss-3.71-fix-lto-gtests.patch
-Patch36:          nss-3.112-disable-ech.patch
-Patch37:          nss-3.112-revert-libpkix-default.patch
+Patch22:          nss-3.112-disable-md5.patch
+Patch24:          nss-3.71-fix-lto-gtests.patch
+Patch26:          nss-3.124-disable-ech.patch
+Patch27:          nss-3.124-el8-revert-libpkix-default.patch
+Patch28:          nss-3.124-no-p12-smime-policy.patch
+Patch37:          nss-3.124-allow-hash-override-pss.patch
+Patch38:          nss-3.124-allow-old-nss-to-read-new-db.patch
 
+Patch40:          nss-3.90-dh-test-update.patch
+Patch41:          nss-3.124-ppc_no_init.patch
+# https://bugzilla.mozilla.org/show_bug.cgi?id=676100
+Patch42:          nss-3.101-fix-cms-abi-break.patch
+Patch43:          nss-3.124-tools-test-fix.patch
 
-# patches that expect to be upstreamed
-# https://bugzilla.mozilla.org/show_bug.cgi?id=1767883
-Patch50:          nss-3.112-fips.patch
+#in process upstream
+Patch50:          nss-3.124-fips-key-import-fix.patch
+Patch51:          nss-3.124-el9-fix-ed-key-storage.patch
+Patch52:          nss-3.124-indicators-prf.patch
+Patch53:          nss-3.124-annocheck.fix.patch
+Patch54:          nss-3.124-disable-kyber-test.patch
+Patch55:          nss-3.124-fix-old-compiler-issue.patch
 
-# ems policy. needs to upstream
-Patch74:          nss-3.90-dh-test-update.patch
-Patch75:          nss-3.90-ppc_no_init.patch
-Patch76:          nss-3.112-el8-no-p12-smime-policy.patch
-Patch78:          nss-3.101-fix-cms-abi-break.patch
-Patch79:          nss-3.101-fix-shlibsign-fips.patch
+Patch60:          nss-3.118-ml-dsa-leancrypto.patch
+Patch61:          nss-3.118-ml-dsa-tls.patch
+Patch62:          nss-3.124-prefer-all-hybrid.patch
+Patch65:          nss-3.124-el9-ml-dsa-test-for-sign-verify-pkcs12.patch
+Patch66:          nss-3.124-ml-dsa-tls-test.patch
+Patch67:          nss-3.118-ml-dsa-unittests.patch
+Patch68:          nss-3.123-fix-mldsa-import-regeneration.patch
 
-# Post Quantum specific
-Patch81:          nss-3.112-replace-xyber-with-mlkem-256.patch
-Patch82:          nss-3.112-add-sec384r1-mlkem-1024.patch
-Patch83:          nss-3.112-add-ml-dsa-base-el8.patch
-Patch84:          nss-3.112-add-ml-dsa-gtests-el8.patch
-Patch85:          nss-3.112-add-ml-dsa-ssl-support-el8.patch
-Patch86:          nss-3.112-fips-and-fixes-el8.patch
-Patch87:          nss-3.112-big-endian-compression-fix.patch
-Patch88:          nss-3.112-fix-get-interface.patch
-Patch89:          nss-3.112-update-fixes.patch
-Patch90:          nss-3.112-mlkem-fips-update.patch
-Patch91:          nss-3.112-partial-pub-key-validate.patch
-Patch92:          nss-3.112-pkcs12-ml-dsa-crash-fix.patch
+Patch88:          nss-3.124-turn_off_non_dbm_tests.patch
 
 %description
 Network Security Services (NSS) is a set of libraries designed to
@@ -337,7 +338,7 @@ tar xvf %{SOURCE29}
 # copy the fips_algorithms.h for this release
 # this file is release specific and matches what
 # each vendors claim in their own FIPS certification
-cp %{SOURCE30} nss/lib/softoken/
+cp %{SOURCE90} nss/lib/softoken/
 
 #update expired test certs
 #pushd nss
@@ -371,6 +372,7 @@ export NSS_FIPS_140_3=1
 export NSS_ENABLE_FIPS_INDICATORS=1
 export NSS_DISABLE_KYBER=1
 export NSS_ENABLE_ML_DSA=1
+export NSS_ENABLE_CRMF=1
 
 # Enable compiler optimizations and disable debugging code
 export BUILD_OPT=1
@@ -596,7 +598,7 @@ export NSS_DEFAULT_DB_TYPE=dbm  #in RHEL 8, the default db is sql, but we want
 %define nss_cycles "standard pkix upgradedb sharedb threadunsafe"
 #  the full list from all.sh is:
 #  "cipher lowhash libpkix cert dbtests tools fips sdr crmf smime ssl ocsp merge pkits chains ec gtests ssl_gtests"
-%define nss_tests "libpkix cert dbtests tools fips sdr crmf smime ssl ocsp merge pkits chains ec gtests ssl_gtests"
+%define nss_tests "libpkix cert dbtests tools fips sdr smime ssl ocsp merge pkits chains ec gtests ssl_gtests"
 #  nss_ssl_tests: crl bypass_normal normal_bypass normal_fips fips_normal iopr policy
 #  nss_ssl_run: cov auth stapling stress
 #
@@ -655,7 +657,7 @@ install -p -m 644 %{SOURCE14} $RPM_BUILD_ROOT/%{_sysconfdir}/pki/nssdb/key4.db
 install -p -m 644 %{SOURCE15} $RPM_BUILD_ROOT/%{_sysconfdir}/pki/nssdb/pkcs11.txt
 
 # Copy the development libraries we want
-for file in libcrmf.a libnssb.a libnssckfw.a
+for file in libnssb.a libnssckfw.a
 do
   install -p -m 644 dist/*.OBJ/lib/$file $RPM_BUILD_ROOT/%{_libdir}
 done
@@ -818,7 +820,6 @@ update-crypto-policies --no-reload &> /dev/null || :
 %doc %{_mandir}/man1/vfyserv.1*
 
 %files devel
-%{_libdir}/libcrmf.a
 %{_libdir}/pkgconfig/nss.pc
 %{_bindir}/nss-config
 %doc %{_mandir}/man1/nss-config.1*
@@ -827,13 +828,9 @@ update-crypto-policies --no-reload &> /dev/null || :
 %{_includedir}/nss3/cert.h
 %{_includedir}/nss3/certdb.h
 %{_includedir}/nss3/certt.h
-%{_includedir}/nss3/cmmf.h
-%{_includedir}/nss3/cmmft.h
 %{_includedir}/nss3/cms.h
 %{_includedir}/nss3/cmsreclist.h
 %{_includedir}/nss3/cmst.h
-%{_includedir}/nss3/crmf.h
-%{_includedir}/nss3/crmft.h
 %{_includedir}/nss3/cryptohi.h
 %{_includedir}/nss3/cryptoht.h
 %{_includedir}/nss3/sechash.h
@@ -999,8 +996,13 @@ update-crypto-policies --no-reload &> /dev/null || :
 %{_includedir}/nss3/nsslowhash.h
 %{_includedir}/nss3/shsign.h
 
-
 %changelog
+* Mon Jun 8 2026 Bob Relyea <rrelyea@redhat.com> - 3.124.0-5
+- rebase to upstream NSS 3.124
+- backport ml-dsa support that is not upstream yet.
+- pick up in process patches upstream including eddsa
+- fix pss issues
+
 * Fri Jan 23 2026 Bob Relyea <rrelyea@redhat.com> - 3.112.0-8
 - fix incomplete ml-kem pct patch.
 

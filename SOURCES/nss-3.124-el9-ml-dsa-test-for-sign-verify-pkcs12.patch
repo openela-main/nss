@@ -1,0 +1,654 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1781050448 25200
+#      Tue Jun 09 17:14:08 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID 07371c5f55e422e28311ef00131462bcf2058882
+# Parent  d6768ddf181e1f22b2b07b427eb2af4cf78d1d28
+nss-3.124-el9-ml-dsa-test-for-sign-verify-pkcs12.patch
+
+diff --git a/cmd/certutil/certutil.c b/cmd/certutil/certutil.c
+--- a/cmd/certutil/certutil.c
++++ b/cmd/certutil/certutil.c
+@@ -1155,18 +1155,20 @@ PrintSyntax()
+     FPS "\t%s -F -k key-id [-d certdir] [-P dbprefix]\n",
+         progName);
+     FPS "\t%s -G -n key-name [-h token-name] [-k rsa] [-g key-size] [-y exp]\n"
+         "\t\t [-f pwfile] [-z noisefile] [-d certdir] [-P dbprefix]\n", progName);
+     FPS "\t%s -G [-h token-name] -k dsa [-q pqgfile -g key-size] [-f pwfile]\n"
+         "\t\t [-z noisefile] [-d certdir] [-P dbprefix]\n", progName);
+     FPS "\t%s -G [-h token-name] -k ec -q curve [-f pwfile]\n"
+         "\t\t [-z noisefile] [-d certdir] [-P dbprefix]\n", progName);
+-    FPS "\t%s -K [-n key-name] [-h token-name] [-k dsa|ec|rsa|all]\n",
+-        progName);
++    FPS "\t%s -G [-h token-name] -k mldsa -q paramset [-f pwfile]\n"
++        "\t\t [-z noisefile] [-d certdir] [-P dbprefix]\n", progName);
++    FPS "\t%s -K [-n key-name] [-h token-name] [-k dsa|ec|rsa|mldsa|all]\n",
++         progName);
+     FPS "\t\t [-f pwfile] [-X] [-d certdir] [-P dbprefix]\n");
+     FPS "\t%s --upgrade-merge --source-dir upgradeDir --upgrade-id uniqueID\n",
+         progName);
+     FPS "\t\t [--upgrade-token-name tokenName] [-d targetDBDir]\n");
+     FPS "\t\t [-P targetDBPrefix] [--source-prefix upgradeDBPrefix]\n");
+     FPS "\t\t [-f targetPWfile] [-@ upgradePWFile]\n");
+     FPS "\t%s --merge --source-dir sourceDBDir [-d targetDBdir]\n",
+         progName);
+@@ -1389,16 +1391,19 @@ luG(enum usage_level ul, const char *com
+     FPS "%-20s prime239v1, prime239v2, prime239v3, c2pnb163v1, \n", "");
+     FPS "%-20s c2pnb163v2, c2pnb163v3, c2pnb176v1, c2tnb191v1, \n", "");
+     FPS "%-20s c2tnb191v2, c2tnb191v3,  \n", "");
+     FPS "%-20s c2pnb208w1, c2tnb239v1, c2tnb239v2, c2tnb239v3, \n", "");
+     FPS "%-20s c2pnb272w1, c2pnb304w1, \n", "");
+     FPS "%-20s c2tnb359w1, c2pnb368w1, c2tnb431r1, secp112r1, \n", "");
+     FPS "%-20s secp112r2, secp128r1, secp128r2, sect113r1, sect113r2\n", "");
+     FPS "%-20s sect131r1, sect131r2\n", "");
++    FPS "%-20s ML-DSA parameter set (mldsa only)\n",
++        "   -q paramset");
++    FPS "%-20s valid values are ml-dsa-44,  ml-dsa-65, ml-dsa-87:\n", "");
+     FPS "%-20s Key database directory (default is ~/.netscape)\n",
+         "   -d keydir");
+     FPS "%-20s Cert & Key database prefix\n",
+         "   -P dbprefix");
+     FPS "%-20s\n"
+         "%-20s PKCS #11 key Attributes.\n",
+         "   --keyAttrFlags attrflags", "");
+     FPS "%-20s Comma separated list of key attribute attribute flags,\n", "");
+@@ -1481,16 +1486,17 @@ luK(enum usage_level ul, const char *com
+         "-K");
+     if (ul == usage_selected && !is_my_command)
+         return;
+     FPS "%-20s Name of token to search (\"all\" for all tokens)\n",
+         "   -h token-name ");
+ 
+     FPS "%-20s Key type (\"all\" (default), \"dsa\","
+                                                     " \"ec\","
++                                                    " \"mldsa\","
+                                                     " \"rsa\")\n",
+         "   -k key-type");
+     FPS "%-20s The nickname of the key or associated certificate\n",
+         "   -n name");
+     FPS "%-20s Specify the password file\n",
+         "   -f password-file");
+     FPS "%-20s Key database directory (default is ~/.netscape)\n",
+         "   -d keydir");
+@@ -1641,16 +1647,20 @@ luR(enum usage_level ul, const char *com
+     FPS "%-20s Create a certificate request restricted to RSA-PSS (rsa only)\n",
+         "   --pss");
+     FPS "%-20s Name of file containing PQG parameters (dsa only)\n",
+         "   -q pqgfile");
+     FPS "%-20s Elliptic curve name (ec only)\n",
+         "   -q curve-name");
+     FPS "%-20s See the \"-G\" option for a full list of supported names.\n",
+         "");
++    FPS "%-20s ML-DSA parameter set (mldsa only)\n",
++        "   -q paramset");
++    FPS "%-20s See the \"-G\" option for a full list of supported names.\n",
++        "");
+     FPS "%-20s Specify the password file\n",
+         "   -f pwfile");
+     FPS "%-20s Key database directory (default is ~/.netscape)\n",
+         "   -d keydir");
+     FPS "%-20s Cert & Key database prefix\n",
+         "   -P dbprefix");
+     FPS "%-20s Specify the contact phone number (\"123-456-7890\")\n",
+         "   -p phone");
+@@ -1821,16 +1831,20 @@ luS(enum usage_level ul, const char *com
+     FPS "%-20s Create a certificate restricted to RSA-PSS (rsa only)\n",
+         "   --pss");
+     FPS "%-20s Name of file containing PQG parameters (dsa only)\n",
+         "   -q pqgfile");
+     FPS "%-20s Elliptic curve name (ec only)\n",
+         "   -q curve-name");
+     FPS "%-20s See the \"-G\" option for a full list of supported names.\n",
+         "");
++    FPS "%-20s ML-DSA parameter set (mldsa only)\n",
++        "   -q paramset");
++    FPS "%-20s See the \"-G\" option for a full list of supported names.\n",
++        "");
+     FPS "%-20s Self sign\n",
+         "   -x");
+     FPS "%-20s Sign the certificate with RSA-PSS (the issuer key must be rsa)\n",
+         "   --pss-sign");
+     FPS "%-20s Cert serial number\n",
+         "   -m serial-number");
+     FPS "%-20s Time Warp\n",
+         "   -w warp-months");
+@@ -2773,19 +2787,44 @@ certutil_main(int argc, char **argv, PRB
+         sourceDir = certutil.options[opt_SourceDir].arg;
+ 
+     if (certutil.options[opt_UpgradeID].activated)
+         upgradeID = certutil.options[opt_UpgradeID].arg;
+ 
+     if (certutil.options[opt_UpgradeTokenName].activated)
+         upgradeTokenName = certutil.options[opt_UpgradeTokenName].arg;
+ 
++    /* must be before opt_KeySize! */
++    /*  -k key type  */
++    if (certutil.options[opt_KeyType].activated) {
++        char *arg = certutil.options[opt_KeyType].arg;
++        if (PL_strcmp(arg, "rsa") == 0) {
++            keytype = rsaKey;
++        } else if (PL_strcmp(arg, "dsa") == 0) {
++            keytype = dsaKey;
++        } else if (PL_strcmp(arg, "ec") == 0) {
++            keytype = ecKey;
++        } else if (PL_strcmp(arg, "mldsa") == 0) {
++            keytype = mldsaKey;
++        } else if (PL_strcmp(arg, "all") == 0) {
++            keytype = nullKey;
++        } else {
++            /* use an existing private/public key pair */
++            keysource = arg;
++        }
++    } else if (certutil.commands[cmd_ListKeys].activated) {
++        keytype = nullKey;
++    }
++
+     if (certutil.options[opt_KeySize].activated) {
+         keysize = PORT_Atoi(certutil.options[opt_KeySize].arg);
+-        if ((keysize < MIN_KEY_BITS) || (keysize > MAX_KEY_BITS)) {
++        /* mldsa limits are much different that rsa and dsa, don't
++         * do the check here */
++        if ((keytype != mldsaKey) &&
++            ((keysize < MIN_KEY_BITS) || (keysize > MAX_KEY_BITS))) {
+             PR_fprintf(PR_STDERR,
+                        "%s -g:  Keysize must be between %d and %d.\n",
+                        progName, MIN_KEY_BITS, MAX_KEY_BITS);
+             return 255;
+         }
+         if (keytype == ecKey) {
+             PR_fprintf(PR_STDERR, "%s -g:  Not for ec keys.\n", progName);
+             return 255;
+@@ -2806,35 +2845,16 @@ certutil_main(int argc, char **argv, PRB
+         hashAlgTag = SECU_StringToSignatureAlgTag(arg);
+         if (hashAlgTag == SEC_OID_UNKNOWN) {
+             PR_fprintf(PR_STDERR, "%s -Z:  %s is not a recognized type.\n",
+                        progName, arg);
+             return 255;
+         }
+     }
+ 
+-    /*  -k key type  */
+-    if (certutil.options[opt_KeyType].activated) {
+-        char *arg = certutil.options[opt_KeyType].arg;
+-        if (PL_strcmp(arg, "rsa") == 0) {
+-            keytype = rsaKey;
+-        } else if (PL_strcmp(arg, "dsa") == 0) {
+-            keytype = dsaKey;
+-        } else if (PL_strcmp(arg, "ec") == 0) {
+-            keytype = ecKey;
+-        } else if (PL_strcmp(arg, "all") == 0) {
+-            keytype = nullKey;
+-        } else {
+-            /* use an existing private/public key pair */
+-            keysource = arg;
+-        }
+-    } else if (certutil.commands[cmd_ListKeys].activated) {
+-        keytype = nullKey;
+-    }
+-
+     if (certutil.options[opt_KeyOpFlagsOn].activated) {
+         keyOpFlagsOn = GetOpFlags(certutil.options[opt_KeyOpFlagsOn].arg);
+     }
+     if (certutil.options[opt_KeyOpFlagsOff].activated) {
+         keyOpFlagsOff = GetOpFlags(certutil.options[opt_KeyOpFlagsOff].arg);
+         keyOpFlagsOn &= ~keyOpFlagsOff; /* make off override on */
+     }
+     if (certutil.options[opt_KeyAttrFlags].activated) {
+@@ -2867,19 +2887,22 @@ certutil_main(int argc, char **argv, PRB
+             srcCertPrefix = certutil.options[opt_SourcePrefix].arg;
+         } else {
+             Usage();
+         }
+     }
+ 
+     /*  -q PQG file or curve name */
+     if (certutil.options[opt_PQGFile].activated) {
+-        if ((keytype != dsaKey) && (keytype != ecKey)) {
++        if ((keytype != dsaKey) && (keytype != ecKey) &&
++            (keytype != mldsaKey)) {
+             PR_fprintf(PR_STDERR, "%s -q: specifies a PQG file for DSA keys"
+-                                  " (-k dsa) or a named curve for EC keys (-k ec)\n)",
++                                  " (-k dsa)\n"
++                                  " or a named curve for EC keys (-k ec)\n"
++                                  " or a parameter set for ML-DSA keys (-k mldsa)\n",
+                        progName);
+             return 255;
+         }
+     }
+ 
+     /*  -s subject name  */
+     if (certutil.options[opt_Subject].activated) {
+         subject = CERT_AsciiToName(certutil.options[opt_Subject].arg);
+diff --git a/cmd/certutil/keystuff.c b/cmd/certutil/keystuff.c
+--- a/cmd/certutil/keystuff.c
++++ b/cmd/certutil/keystuff.c
+@@ -512,16 +512,17 @@ CERTUTIL_GeneratePrivateKey(KeyType keyt
+                             int publicExponent, const char *noise,
+                             SECKEYPublicKey **pubkeyp, const char *pqgFile,
+                             PK11AttrFlags attrFlags, CK_FLAGS opFlagsOn,
+                             CK_FLAGS opFlagsOff, secuPWData *pwdata)
+ {
+     CK_MECHANISM_TYPE mechanism;
+     PK11RSAGenParams rsaparams;
+     SECKEYPQGParams *dsaparams = NULL;
++    CK_ULONG paramSet;
+     void *params;
+     SECKEYPrivateKey *privKey = NULL;
+ 
+     if (slot == NULL)
+         return NULL;
+ 
+     if (PK11_Authenticate(slot, PR_TRUE, pwdata) != SECSuccess)
+         return NULL;
+@@ -564,16 +565,60 @@ CERTUTIL_GeneratePrivateKey(KeyType keyt
+             }
+             break;
+         case ecKey:
+             mechanism = CKM_EC_KEY_PAIR_GEN;
+             /* For EC keys, PQGFile determines EC parameters */
+             if ((params = (void *)getECParams(pqgFile)) == NULL)
+                 return NULL;
+             break;
++        case mldsaKey:
++            mechanism = CKM_ML_DSA_KEY_PAIR_GEN;
++            /* set paramset */
++            paramSet = 0;
++            if (pqgFile) {
++                if (PORT_Strcasecmp(pqgFile, "ML-DSA-44") == 0) {
++                    paramSet = CKP_ML_DSA_44;
++                } else if (PORT_Strcasecmp(pqgFile, "ML-DSA-65") == 0) {
++                    paramSet = CKP_ML_DSA_65;
++                } else if (PORT_Strcasecmp(pqgFile, "ML-DSA-87") == 0) {
++                    paramSet = CKP_ML_DSA_87;
++                } else {
++                    /* if we set pqgfile, it had better be right, don't
++                     * fall back to key size */
++                    return NULL;
++                }
++            } else
++                switch (size) {
++                    /* optionally use the size, either the actual size in bytes
++                     * or the short hand ('44', '65', '87') */
++                    case 44:
++                    case 2560:
++                        paramSet = CKP_ML_DSA_44;
++                        break;
++                    case 65:
++                    case 4032:
++                        paramSet = CKP_ML_DSA_65;
++                        break;
++                    case 87:
++                    case 4896:
++                        paramSet = CKP_ML_DSA_87;
++                        break;
++                    default:
++                        /* force a size to be specified somewhere */
++                        return NULL;
++                }
++            /* paranoia, shouldn't be able to happen logically. Code
++             * scanners will scream, but I like belt and suspenders */
++            if (paramSet == 0) {
++                return NULL;
++            }
++            params = &paramSet;
++            break;
++
+         default:
+             return NULL;
+     }
+ 
+     fprintf(stderr, "\n\n");
+     fprintf(stderr, "Generating key.  This may take a few moments...\n\n");
+ 
+     privKey = PK11_GenerateKeyPairWithOpFlags(slot, mechanism, params, pubkeyp,
+diff --git a/cmd/pk11importtest/pk11importtest.c b/cmd/pk11importtest/pk11importtest.c
+--- a/cmd/pk11importtest/pk11importtest.c
++++ b/cmd/pk11importtest/pk11importtest.c
+@@ -214,32 +214,34 @@ enum {
+     opt_ECCurve,
+     opt_PWFile,
+     opt_PWString,
+     opt_NoPub,
+     opt_NoRSA,
+     opt_NoDSA,
+     opt_NoDH,
+     opt_NoEC,
++    opt_NoMLDSA,
+     opt_NoMLKEM,
+     opt_NoED,
+     opt_NoECMont,
+ };
+ 
+ static secuCommandFlag options[] = {
+     { /* opt_CertDir          */ 'd', PR_TRUE, 0, PR_FALSE },
+     { /* opt_KeySize          */ 'k', PR_TRUE, 0, PR_FALSE },
+     { /* opt_ECCurve          */ 'C', PR_TRUE, 0, PR_FALSE },
+     { /* opt_PWFile           */ 'f', PR_TRUE, 0, PR_FALSE },
+     { /* opt_PWString         */ 'p', PR_TRUE, 0, PR_FALSE },
+     { /* opt_NoPub            */ 'n', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoRSA            */ 'r', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoDSA            */ 'D', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoDH             */ 'h', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoEC             */ 'e', PR_FALSE, 0, PR_FALSE },
++    { /* opt_NoMLDSA          */ 'm', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoMLKEM          */ 'K', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoED             */ 'w', PR_FALSE, 0, PR_FALSE },
+     { /* opt_NoECMont         */ 'g', PR_FALSE, 0, PR_FALSE },
+ };
+ 
+ int
+ main(int argc, char **argv)
+ {
+@@ -248,16 +250,18 @@ main(int argc, char **argv)
+     secuCommand args;
+     PK11SlotInfo *slot = NULL;
+     PRBool failed = PR_FALSE;
+     secuPWData pwArgs = { PW_NONE, 0 };
+     PRBool doRSA = PR_TRUE;
+     PRBool doDSA = PR_TRUE;
+     PRBool doDH = PR_FALSE; /* NSS currently can't export wrapped DH keys */
+     PRBool doEC = PR_TRUE;
++    PRBool doMLDSA = PR_FALSE;
++    CK_ML_DSA_PARAMETER_SET_TYPE mldsaParamSet = CKP_ML_DSA_44;
+     PRBool doMLKEM = PR_TRUE;
+     PRBool doED = PR_TRUE;
+     PRBool doECMont = PR_TRUE;
+     PRBool noPub = PR_FALSE;
+     PQGParams *pqgParams = NULL;
+     int keySize;
+ 
+     args.numCommands = 0;
+@@ -308,16 +312,19 @@ main(int argc, char **argv)
+         doDSA = PR_FALSE;
+     }
+     if (args.options[opt_NoDH].activated) {
+         doDH = PR_FALSE;
+     }
+     if (args.options[opt_NoEC].activated) {
+         doEC = PR_FALSE;
+     }
++    if (args.options[opt_NoMLDSA].activated) {
++        doMLDSA = PR_FALSE;
++    }
+     if (args.options[opt_NoMLKEM].activated) {
+         doMLKEM = PR_FALSE;
+     }
+ 
+     slot = PK11_GetInternalKeySlot();
+     if (slot == NULL) {
+         SECU_PrintError(progName, "Couldn't find the internal key slot\n");
+         return 255;
+@@ -403,16 +410,26 @@ main(int argc, char **argv)
+         PORT_Free(ecParams.data);
+     ec_failed:
+         if (rv != SECSuccess) {
+             fprintf(stderr, "ECC Import Failed!\n");
+             failed = PR_TRUE;
+         }
+     }
+ 
++    if (doMLDSA) {
++        rv = handleEncryptedPrivateImportTest(progName, slot, "MLDSA",
++                                              CKM_ML_DSA_KEY_PAIR_GEN,
++                                              noPub, &mldsaParamSet, &pwArgs);
++        if (rv != SECSuccess) {
++            fprintf(stderr, "MLDSA Import Failed!\n");
++            failed = PR_TRUE;
++        }
++    }
++    
+     if (doMLKEM) {
+         CK_ML_KEM_PARAMETER_SET_TYPE paramSet = CKP_ML_KEM_768;
+ 
+         rv = handleEncryptedPrivateImportTest(progName, slot, "MLKEM",
+                                               CKM_ML_KEM_KEY_PAIR_GEN,
+                                               noPub, &paramSet, &pwArgs);
+         if (rv != SECSuccess) {
+             fprintf(stderr, "MLKEM Import Failed!\n");
+diff --git a/tests/cert/cert.sh b/tests/cert/cert.sh
+--- a/tests/cert/cert.sh
++++ b/tests/cert/cert.sh
+@@ -101,16 +101,19 @@ cert_init()
+   fi
+ 
+   cert_add_algorithm "RSA" "" "" "false" 0 
+   if [ -z ${NSS_DISABLE_DSA} ]; then
+       cert_add_algorithm "DSA" "-dsa" "-k dsa" "true" 20000
+   fi
+   # NOTE: curve is added later, so the full command would be '-k ec -q curve'
+   cert_add_algorithm "ECC" "-ec" "-k ec -q" "true" 10000
++  cert_add_algorithm "ML-DSA-44" "-ml-dsa-44" "-k mldsa -q ml-dsa-44" "false" 30000
++  cert_add_algorithm "ML-DSA-65" "-ml-dsa-65" "-k mldsa -q ml-dsa-65" "false" 40000
++  cert_add_algorithm "ML-DSA-87" "-ml-dsa-87" "-k mldsa -q ml-dsa-87" "false" 50000
+   # currently rsa-pss is only enabled for a subset of tests
+   # this will enable a full suite of RSA-PSS certs, and we would
+   # then remove the explicit ones
+   # ulike the other tests, we would need to change ssl tests as this
+   # will rename some of the RSA-PSS certificates.
+   #cert_add_algorithm "RSA-PSS" "-rsa-pss" "-k rsa -pss -Z sha256" "true"
+   #cert_add_algorithm "RSA-PSS-SHA1" "-rsa-pss-sha1" "-k rsa -pss -Z sha1" "true"
+ 
+@@ -519,16 +522,25 @@ cert_CA()
+       cert_dsa_CA "${CUR_CADIR}" "${NICKNAME}" "${SIGNER}" "${TRUSTARG}" "${DOMAIN}" "${CERTSERIAL}"
+       ;;
+   ECC)
+       cert_ec_CA "${CUR_CADIR}" "${NICKNAME}" "${SIGNER}" "${TRUSTARG}" "${DOMAIN}" "${CERTSERIAL}" "${ALG}"
+       ;;
+   RSA-PSS)
+       cert_rsa_pss_CA "${CUR_CADIR}" "${NICKNAME}" "${SIGNER}" "${TRUSTARG}" "${DOMAIN}" "${CERTSERIAL}" "${ALG}"
+       ;;
++  ML-DSA-44)
++      cert_ml_dsa_CA ml-dsa-44 "${CUR_CADIR}" "${NICKNAME}" "${SIGNER}" "${TRUSTARG}" "${DOMAIN}" "${CERTSERIAL}"
++      ;;
++  ML-DSA-65)
++      cert_ml_dsa_CA ml-dsa-65 "${CUR_CADIR}" "${NICKNAME}" "${SIGNER}" "${TRUSTARG}" "${DOMAIN}" "${CERTSERIAL}"
++      ;;
++  ML-DSA-87)
++      cert_ml_dsa_CA ml-dsa-65 "${CUR_CADIR}" "${NICKNAME}" "${SIGNER}" "${TRUSTARG}" "${DOMAIN}" "${CERTSERIAL}"
++      ;;
+   *)
+       Exit 9 "Fatal - unknown key type ${KEY_TYPE}, failed to create CA cert"
+       ;;
+   esac
+ }
+ 
+ 
+ 
+@@ -672,19 +684,78 @@ CERTSCRIPT
+   CU_ACTION="Exporting DSA Root Cert"
+   certu -L -n  $NICKNAME -r -d ${LPROFILE} -o root-dsa.cert
+   if [ "$RET" -ne 0 ]; then
+       Exit 7 "Fatal - failed to export dsa root cert"
+   fi
+   cp root-dsa.cert ${NICKNAME}.ca.cert
+ }
+ 
+++################################ cert_ml_dsa_CA #############################
++# local shell function to build the Temp. Certificate Authority (CA)
++# used for testing purposes, creating  a CA Certificate and a root cert
++# This is the ML-DSA version of cert_CA.
++##########################################################################
++cert_ml_dsa_CA()
++{
++  PARAM_SET=$1
++  CUR_CADIR=$2
++  NICKNAME=$3
++  SIGNER=$4
++  TRUSTARG=$5
++  DOMAIN=$6
++  CERTSERIAL=$7
+ 
++  echo "$SCRIPTNAME: Creating a ML-DSA ($PARAM_SET) CA Certificate $NICKNAME =========================="
++
++  if [ ! -d "${CUR_CADIR}" ]; then
++      mkdir -p "${CUR_CADIR}"
++  fi
++  cd ${CUR_CADIR}
++  pwd
++
++  LPROFILE=.
++  if [ -n "${MULTIACCESS_DBM}" ]; then
++	LPROFILE="multiaccess:${DOMAIN}"
++  fi
+ 
++  ################# Creating a ML-DSA CA Cert ###############################
++  #
++  CU_ACTION="Creating ML-DSA ($PARAM_SET) CA Cert $NICKNAME "
++  CU_SUBJECT=$ALL_CU_SUBJECT
++  certu -S -n $NICKNAME -k mldsa -q $PARAM_SET -t $TRUSTARG -v 600 $SIGNER \
++    -d ${LPROFILE} -1 -2 -5 -f ${R_PWFILE} -z ${R_NOISE_FILE} \
++    -m $CERTSERIAL 2>&1 <<CERTSCRIPT
++5
++6
++9
++n
++y
++-1
++n
++5
++6
++7
++9
++n
++CERTSCRIPT
+ 
++  if [ "$RET" -ne 0 ]; then
++      echo "return value is $RET"
++      Exit 6 "Fatal - failed to create ML-DSA ($PARAM_SET) CA cert"
++  fi
++
++  ################# Exporting ML-DSA Root Cert ###############################
++  #
++  CU_ACTION="Exporting ML-DSA ($PARAM_SET) Root Cert"
++  certu -L -n  $NICKNAME -r -d ${LPROFILE} -o ${NICKNAME}.ca.cert
++  if [ "$RET" -ne 0 ]; then
++      Exit 7 "Fatal - failed to export $PARAM_SET root cert"
++  fi
++}
+ 
+ ################################ cert_rsa_pss_CA #############################
+ # local shell function to build the Temp. Certificate Authority (CA)
+ # used for testing purposes, creating  a CA Certificate and a root cert
+ # This is the RSA-PSS version of cert_CA.
+ ##########################################################################
+ cert_rsa_pss_CA()
+ {
+@@ -1194,17 +1265,17 @@ cert_stresscerts()
+ }
+ 
+ ############################## cert_fips #####################################
+ # local shell function to create certificates for FIPS tests
+ ##############################################################################
+ cert_fips()
+ {
+   CERTFAILED=0
+-  echo "$SCRIPTNAME: Creating FIPS 140 DSA Certificates =============="
++  echo "$SCRIPTNAME: Creating FIPS 140 Certificates =============="
+   cert_init_cert "${FIPSDIR}" "FIPS PUB 140 Test Certificate" 1000 "${D_FIPS}"
+ 
+   CU_ACTION="Initializing ${CERTNAME}'s Cert DB"
+   certu -N -d "${PROFILEDIR}" -f "${R_FIPSPWFILE}" 2>&1
+ 
+   CU_ACTION="Loading root cert module to ${CERTNAME}'s Cert DB (ext.)"
+   modu -add "RootCerts" -libfile "${ROOTCERTSFILE}" -dbdir "${PROFILEDIR}" 2>&1
+ 
+diff --git a/tests/tools/tools.sh b/tests/tools/tools.sh
+--- a/tests/tools/tools.sh
++++ b/tests/tools/tools.sh
+@@ -124,24 +124,32 @@ tools_init()
+   cp ${QADIR}/tools/pbmac1-valid-sha256.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-valid-sha256-sha512.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-valid-sha512.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-invalid-bad-iter.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-invalid-bad-salt.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/pbmac1-invalid-no-length.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/corrupted_cert_bag.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ed25519.p12 ${TOOLSDIR}/data
++  cp ${QADIR}/tools/ietf-ml-dsa-44-both.p12 ${TOOLSDIR}/data
++  cp ${QADIR}/tools/ietf-ml-dsa-44-key.p12 ${TOOLSDIR}/data
++  cp ${QADIR}/tools/ietf-ml-dsa-65-both.p12 ${TOOLSDIR}/data
++  cp ${QADIR}/tools/ietf-ml-dsa-65-key.p12 ${TOOLSDIR}/data
++  cp ${QADIR}/tools/ietf-ml-dsa-87-both.p12 ${TOOLSDIR}/data
++  cp ${QADIR}/tools/ietf-ml-dsa-87-key.p12 ${TOOLSDIR}/data
++  cp ${QADIR}/tools/openssl-ml-dsa-44.p12 ${TOOLSDIR}/data
++  cp ${QADIR}/tools/openssl-ml-dsa-65.p12 ${TOOLSDIR}/data
++  cp ${QADIR}/tools/openssl-ml-dsa-87.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-768-seed.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-768-priv.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-768-both.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-1024-seed.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-1024-priv.p12 ${TOOLSDIR}/data
+   cp ${QADIR}/tools/openssl-ml-kem-1024-both.p12 ${TOOLSDIR}/data
+ 
+-
+   cd ${TOOLSDIR}
+ }
+ 
+ ########################## list_p12_file ###############################
+ # List the key and cert in the specified p12 file
+ ########################################################################
+ list_p12_file()
+ {
+@@ -543,16 +551,43 @@ tools_p12_import_ed25519_private_key()
+   ${BINDIR}/pk12util -i ${TOOLSDIR}/data/openssl-ed25519.p12 -d ${P_R_COPYDIR} -k ${R_PWFILE} -W 'test' 2>&1
+   ret=$?
+   html_msg $ret 0 "Importing ED25519 private key from PKCS#12 file"
+   check_tmpfile
+ 
+   return $ret
+ }
+ 
++tools_p12_ml_dsa_import()
++{
++  echo "$SCRIPTNAME: Testing ml-dsa compatibility with pkcs12 --------------"
++  for i in 44 65 87
++  do
++    echo "${BINDIR}/pk12util -i ${TOOLSDIR}/data/openssl-ml-dsa-$i.p12 -d ${P_R_COPYDIR} -k ${R_PWFILE} -W 'test' 2>&1"
++    ${BINDIR}/pk12util -i ${TOOLSDIR}/data/openssl-ml-dsa-$i.p12 -d ${P_R_COPYDIR} -k ${R_PWFILE} -W 'test' 2>&1
++    ret=$?
++    html_msg $ret 0 "Importing openssl encoded ml-dsa-$i private key from PKCS#12 file"
++    check_tmpfile
++    for j in 'key' 'both'
++    do
++       echo "${BINDIR}/pk12util -i ${TOOLSDIR}/data/ietf-ml-dsa-$i-$j.p12 -d ${P_R_COPYDIR} -k ${R_PWFILE} -W 'test' 2>&1"
++       ${BINDIR}/pk12util -i ${TOOLSDIR}/data/ietf-ml-dsa-$i-$j.p12 -d ${P_R_COPYDIR} -k ${R_PWFILE} -W 'test' 2>&1
++       ret=$?
++       html_msg $ret 0 "Importing openssl encoded ml-dsa-$i private key from PKCS#12 file"
++       check_tmpfile
++       html_msg $ret 0 "Importing ietf sample ml-dsa-$i-$j private key from PKCS#12 file"
++
++       # each cert has the same issuer/sn, so we can't hold more than one in
++       # the data base
++       echo "${BINDIR}/certutil -F -n \"ietf ml-dsa-$i-$j sample\" -d ${P_R_COPYDIR} -f ${R_PWFILE}"
++       ${BINDIR}/certutil -F -n "ietf ml-dsa-$i-$j sample" -d ${P_R_COPYDIR} -f ${R_PWFILE}
++    done
++  done
++}
++
+ tools_p12_ml_kem_import()
+ {
+   echo "$SCRIPTNAME: Testing ml-kem compatibility with pkcs12 --------------"
+   for i in 768 1024
+   do
+     for j in 'seed' 'priv' 'both'
+     do
+        echo "${BINDIR}/pk12util -i ${TOOLSDIR}/data/openssl-ml-kem-$i-$j.p12 -d ${P_R_COPYDIR} -k ${R_PWFILE} -W 'test' 2>&1"
+@@ -624,16 +659,17 @@ tools_p12()
+   else
+       tools_p12_export_list_import_most_ciphers
+   fi
+   tools_p12_export_with_none_ciphers
+   tools_p12_export_with_invalid_ciphers
+   tools_p12_import_old_files
+   tools_p12_import_pbmac1_samples
+   tools_p12_import_ed25519_private_key
++  tools_p12_ml_dsa_import
+   tools_p12_ml_kem_import
+   if using_sql; then
+     tools_p12_import_rsa_pss_private_key
+ #tools_p12_policy
+   fi
+ }
+ 
+ ############################## tools_sign ##############################

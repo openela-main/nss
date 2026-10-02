@@ -1,0 +1,489 @@
+# HG changeset patch
+# User Robert Relyea <rrelyea@redhat.com>
+# Date 1781635239 25200
+#      Tue Jun 16 11:40:39 2026 -0700
+# Branch NSS_3_124_BRANCH
+# Node ID c85110e0f7ba48ef44c9b535a9c3bccf78f8416d
+# Parent  4b0e3f33a2e76a77e36b435eb3cc1eb06f14249d
+nss-3.124-allow-hash-override-pss.patch
+
+diff --git a/cmd/certutil/certutil.c b/cmd/certutil/certutil.c
+--- a/cmd/certutil/certutil.c
++++ b/cmd/certutil/certutil.c
+@@ -228,16 +228,20 @@ CertReq(SECKEYPrivateKey *privk, SECKEYP
+         return SECFailure;
+     }
+ 
+     /* Change cert type to RSA-PSS, if desired. */
+     if (pssCertificate) {
+         /* force a PSS signature. We can do a PSS signature with an
+          * RSA key, this will force us to generate a PSS signature */
+         signAlgTag = SEC_OID_PKCS1_RSA_PSS_SIGNATURE;
++        /* we are reusing an algorithm id, prevent the assert when we try
++         * to set the parameters of that algorithm id */
++        spki->algorithm.parameters.data = NULL;
++        spki->algorithm.parameters.len = 0;
+         /* override the SPKI algorithm id. */
+         rv = SEC_CreateSignatureAlgorithmID(arena, &spki->algorithm,
+                                             signAlgTag, hashAlgTag,
+                                             NULL, NULL, pubk);
+         if (rv != SECSuccess) {
+             PORT_FreeArena(arena, PR_FALSE);
+             SECKEY_DestroySubjectPublicKeyInfo(spki);
+             SECU_PrintError(progName, "unable to set algorithm ID");
+diff --git a/gtests/cryptohi_gtest/cryptohi_unittest.cc b/gtests/cryptohi_gtest/cryptohi_unittest.cc
+--- a/gtests/cryptohi_gtest/cryptohi_unittest.cc
++++ b/gtests/cryptohi_gtest/cryptohi_unittest.cc
+@@ -105,17 +105,17 @@ class SignParamsTestF : public ::testing
+     SECItem *saltLengthItem =
+         SEC_ASN1EncodeInteger(arena_.get(), &params->saltLength, saltLength);
+     ASSERT_EQ(&params->saltLength, saltLengthItem);
+   }
+ 
+   void CheckHashAlg(SECKEYRSAPSSParams *params, SECOidTag hashAlgTag) {
+     // If hash algorithm is SHA-1, it must be omitted in the parameters
+     if (hashAlgTag == SEC_OID_SHA1) {
+-      EXPECT_EQ(nullptr, params->hashAlg);
++      EXPECT_EQ(nullptr, params->hashAlg) << "oid==" << SECOID_FindOIDTagDescription(SECOID_GetAlgorithmTag(params->hashAlg));
+     } else {
+       EXPECT_NE(nullptr, params->hashAlg);
+       EXPECT_EQ(hashAlgTag, SECOID_GetAlgorithmTag(params->hashAlg));
+     }
+   }
+ 
+   void CheckMaskAlg(SECKEYRSAPSSParams *params, SECOidTag hashAlgTag) {
+     SECStatus rv;
+@@ -225,22 +225,16 @@ TEST_P(SignParamsTest, CreateRsaPss) {
+   } else {
+     srcParams = NULL;
+   }
+ 
+   SECItem *params = SEC_CreateSignatureAlgorithmParameters(
+       arena_.get(), nullptr, SEC_OID_PKCS1_RSA_PSS_SIGNATURE, hashAlg,
+       srcParams, privk_.get());
+ 
+-  if (hashAlg != SEC_OID_UNKNOWN && srcHashAlg != SEC_OID_UNKNOWN &&
+-      hashAlg != srcHashAlg) {
+-    EXPECT_EQ(nullptr, params);
+-    return;
+-  }
+-
+   EXPECT_NE(nullptr, params);
+ 
+   SECKEYRSAPSSParams pssParams;
+   PORT_Memset(&pssParams, 0, sizeof(pssParams));
+   SECStatus rv =
+       SEC_QuickDERDecodeItem(arena_.get(), &pssParams,
+                              SEC_ASN1_GET(SECKEY_RSAPSSParamsTemplate), params);
+   ASSERT_EQ(SECSuccess, rv);
+@@ -294,83 +288,100 @@ TEST_P(SignParamsTest, CreateRsaPssWithE
+ 
+ TEST_P(SignParamsTest, CreateRsaPssWithInvalidHashAlg) {
+   SECOidTag srcHashAlg = std::get<1>(GetParam());
+ 
+   SECItem *srcParams;
+   if (srcHashAlg != SEC_OID_UNKNOWN) {
+     SECKEYRSAPSSParams pssParams;
+     ASSERT_NO_FATAL_FAILURE(
+-        CreatePssParams(&pssParams, srcHashAlg, srcHashAlg));
++        CreatePssParams(&pssParams, SEC_OID_MD5, SEC_OID_MD5));
+     srcParams = SEC_ASN1EncodeItem(arena_.get(), nullptr, &pssParams,
+                                    SEC_ASN1_GET(SECKEY_RSAPSSParamsTemplate));
+     ASSERT_NE(nullptr, srcParams);
+   } else {
+     srcParams = NULL;
+   }
+ 
+   SECItem *params = SEC_CreateSignatureAlgorithmParameters(
+-      arena_.get(), nullptr, SEC_OID_PKCS1_RSA_PSS_SIGNATURE, SEC_OID_MD5,
++      arena_.get(), nullptr, SEC_OID_PKCS1_RSA_PSS_SIGNATURE, srcHashAlg,
+       srcParams, privk_.get());
+ 
+-  EXPECT_EQ(nullptr, params);
++  /* override invalid hash with valid hash */
++  EXPECT_NE(nullptr, params);
++  /* assert params ->hashAlg != SEC_OID_MD5 */
+ }
+ 
+ TEST_P(SignParamsSourceTest, CreateRsaPssWithInvalidHashAlg) {
+   SECOidTag hashAlg = GetParam();
+ 
+   SECItem *srcParams;
+   SECKEYRSAPSSParams pssParams;
+   ASSERT_NO_FATAL_FAILURE(
+-      CreatePssParams(&pssParams, SEC_OID_MD5, SEC_OID_MD5));
++      CreatePssParams(&pssParams, hashAlg, hashAlg));
+   srcParams = SEC_ASN1EncodeItem(arena_.get(), nullptr, &pssParams,
+                                  SEC_ASN1_GET(SECKEY_RSAPSSParamsTemplate));
+   ASSERT_NE(nullptr, srcParams);
+ 
+   SECItem *params = SEC_CreateSignatureAlgorithmParameters(
+-      arena_.get(), nullptr, SEC_OID_PKCS1_RSA_PSS_SIGNATURE, hashAlg,
++      arena_.get(), nullptr, SEC_OID_PKCS1_RSA_PSS_SIGNATURE, SEC_OID_MD4,
+       srcParams, privk_.get());
+ 
+   EXPECT_EQ(nullptr, params);
+ }
+ 
+ TEST_P(SignParamsSourceTest, CreateRsaPssWithInvalidSaltLength) {
+   SECOidTag hashAlg = GetParam();
+ 
+   SECItem *srcParams;
+   SECKEYRSAPSSParams pssParams;
+   ASSERT_NO_FATAL_FAILURE(
+-      CreatePssParams(&pssParams, SEC_OID_SHA512, SEC_OID_SHA512, 100));
++      CreatePssParams(&pssParams, SEC_OID_SHA512, SEC_OID_SHA512, 110));
+   srcParams = SEC_ASN1EncodeItem(arena_.get(), nullptr, &pssParams,
+                                  SEC_ASN1_GET(SECKEY_RSAPSSParamsTemplate));
+   ASSERT_NE(nullptr, srcParams);
+ 
+   SECItem *params = SEC_CreateSignatureAlgorithmParameters(
+       arena_.get(), nullptr, SEC_OID_PKCS1_RSA_PSS_SIGNATURE, hashAlg,
+       srcParams, privk_.get());
+ 
+   EXPECT_EQ(nullptr, params);
+ }
+ 
+ TEST_P(SignParamsSourceTest, CreateRsaPssWithHashMismatch) {
+   SECOidTag hashAlg = GetParam();
+ 
+   SECItem *srcParams;
+   SECKEYRSAPSSParams pssParams;
++  if ((hashAlg ==  SEC_OID_UNKNOWN) || (hashAlg == SEC_OID_SHA512)) {
++    hashAlg = SEC_OID_SHA1;
++  }
+   ASSERT_NO_FATAL_FAILURE(
+-      CreatePssParams(&pssParams, SEC_OID_SHA256, SEC_OID_SHA512));
++      CreatePssParams(&pssParams, hashAlg, SEC_OID_SHA512));
+   srcParams = SEC_ASN1EncodeItem(arena_.get(), nullptr, &pssParams,
+                                  SEC_ASN1_GET(SECKEY_RSAPSSParamsTemplate));
+   ASSERT_NE(nullptr, srcParams);
+ 
+   SECItem *params = SEC_CreateSignatureAlgorithmParameters(
+-      arena_.get(), nullptr, SEC_OID_PKCS1_RSA_PSS_SIGNATURE, hashAlg,
++      arena_.get(), nullptr, SEC_OID_PKCS1_RSA_PSS_SIGNATURE, SEC_OID_UNKNOWN,
+       srcParams, privk_.get());
+ 
+-  EXPECT_EQ(nullptr, params);
++  EXPECT_NE(nullptr, params);
++
++  PORT_Memset(&pssParams, 0, sizeof(pssParams));
++  SECStatus rv =
++      SEC_QuickDERDecodeItem(arena_.get(), &pssParams,
++                             SEC_ASN1_GET(SECKEY_RSAPSSParamsTemplate), params);
++  ASSERT_EQ(SECSuccess, rv);
++  ASSERT_NO_FATAL_FAILURE(CheckHashAlg(&pssParams, hashAlg));
++  ASSERT_NO_FATAL_FAILURE(CheckMaskAlg(&pssParams, hashAlg));
++  ASSERT_NO_FATAL_FAILURE(CheckSaltLength(&pssParams, hashAlg));
++
++  // The default trailer field (1) must be omitted
++  EXPECT_EQ(nullptr, pssParams.trailerField.data);
+ }
+ 
+ INSTANTIATE_TEST_SUITE_P(
+     SignParamsTestCases, SignParamsTest,
+     ::testing::Combine(::testing::Values(SEC_OID_UNKNOWN, SEC_OID_SHA1,
+                                          SEC_OID_SHA224, SEC_OID_SHA256,
+                                          SEC_OID_SHA384, SEC_OID_SHA512),
+                        ::testing::Values(SEC_OID_UNKNOWN, SEC_OID_SHA1,
+diff --git a/lib/cryptohi/seckey.c b/lib/cryptohi/seckey.c
+--- a/lib/cryptohi/seckey.c
++++ b/lib/cryptohi/seckey.c
+@@ -2876,21 +2876,23 @@ sec_DecodeRSAPSSParams(PLArenaPool *aren
+     SECKEYRSAPSSParams pssParams;
+     SECOidTag hashAlg;
+     SECOidTag maskHashAlg;
+     unsigned long saltLength;
+     unsigned long trailerField;
+     SECStatus rv;
+ 
+     PORT_Memset(&pssParams, 0, sizeof(pssParams));
+-    rv = SEC_QuickDERDecodeItem(arena, &pssParams,
+-                                SECKEY_RSAPSSParamsTemplate,
+-                                params);
+-    if (rv != SECSuccess) {
+-        return rv;
++    if (params && (params->len != 0)) {
++        rv = SEC_QuickDERDecodeItem(arena, &pssParams,
++                                    SECKEY_RSAPSSParamsTemplate,
++                                    params);
++        if (rv != SECSuccess) {
++            return rv;
++        }
+     }
+ 
+     if (pssParams.hashAlg) {
+         hashAlg = SECOID_GetAlgorithmTag(pssParams.hashAlg);
+     } else {
+         hashAlg = SEC_OID_SHA1; /* default, SHA-1 */
+     }
+ 
+diff --git a/lib/cryptohi/secsign.c b/lib/cryptohi/secsign.c
+--- a/lib/cryptohi/secsign.c
++++ b/lib/cryptohi/secsign.c
+@@ -814,16 +814,18 @@ sec_CreateRSAPSSParameters(PLArenaPool *
+                            SECOidTag hashAlgTag,
+                            const SECItem *params,
+                            int modBytes)
+ {
+     SECKEYRSAPSSParams pssParams;
+     int hashLength;
+     unsigned long saltLength;
+     PRBool defaultSHA1 = PR_FALSE;
++    PRBool overWriteHash = PR_TRUE;
++    PRBool overWriteMask = PR_TRUE;
+     SECStatus rv;
+ 
+     PORT_Memset(&pssParams, 0, sizeof(pssParams));
+ 
+     if (params && params->data) {
+         /* The parameters field should either be empty or contain
+          * valid RSA-PSS parameters */
+         PORT_Assert(!(params->len == 2 &&
+@@ -831,16 +833,18 @@ sec_CreateRSAPSSParameters(PLArenaPool *
+                       params->data[1] == 0));
+         rv = SEC_QuickDERDecodeItem(arena, &pssParams,
+                                     SECKEY_RSAPSSParamsTemplate,
+                                     params);
+         if (rv != SECSuccess) {
+             return NULL;
+         }
+         defaultSHA1 = PR_TRUE;
++        overWriteHash = PR_FALSE;
++        overWriteMask = PR_FALSE;
+     }
+ 
+     if (pssParams.trailerField.data) {
+         unsigned long trailerField;
+ 
+         rv = SEC_ASN1DecodeInteger((SECItem *)&pssParams.trailerField,
+                                    &trailerField);
+         if (rv != SECSuccess) {
+@@ -851,19 +855,21 @@ sec_CreateRSAPSSParameters(PLArenaPool *
+             return NULL;
+         }
+     }
+ 
+     /* Determine the hash algorithm to use, based on hashAlgTag and
+      * pssParams.hashAlg; there are 6  cases.
+      *  case:
+      *  1) We have params and params.hashAlg and we have a specified hashAlgTag,
+-     *  make sure that hashAlgTag specified by the appication matches.
++     *  make sure that hashAlgTag specified by the appication matches, othersize we
++     *  overwrite params.hashAlg with hashAlgTag.
+      *  2) We have params, but no params.hashAlg and we have a specified
+-     *  hashAlg, make sure the hashAlgTag matches SEC_OID_SHA1.
++     *  hashAlg, make sure the hashAlgTag matches SEC_OID_SHA1, otherwise we
++     *  overwrite params.hashAlg with hashAlgTag..
+      *  3) we did not specify any parameters but we did specified
+      *  a hashAlgTag. Use the specified hash algtag.
+      *  4) We have params and params.hashAlg and we did not specify a
+      *  hashAlgTag, use the hashAlg from the parameter.
+      *  5) We have params, but no params.hashAlg and we did not specify a
+      *  hashAlgTag, use the SEC_OID_SHA1
+      *  6) We did not specify any parameters, nor did we specify a
+      *  hashAlgTag, use the key size to select an appropriate hashAlg.
+@@ -873,36 +879,42 @@ sec_CreateRSAPSSParameters(PLArenaPool *
+ 
+         if (pssParams.hashAlg) {
+             tag = SECOID_GetAlgorithmTag(pssParams.hashAlg);
+         } else if (defaultSHA1) {
+             tag = SEC_OID_SHA1;
+         }
+ 
+         if (tag != SEC_OID_UNKNOWN && tag != hashAlgTag) {
+-            PORT_SetError(SEC_ERROR_INVALID_ARGS);
+-            return NULL;
++            overWriteHash = PR_TRUE;
+         }
+     } else if (hashAlgTag == SEC_OID_UNKNOWN) {
+         if (pssParams.hashAlg) {
+             hashAlgTag = SECOID_GetAlgorithmTag(pssParams.hashAlg);
+         } else if (defaultSHA1) {
+             hashAlgTag = SEC_OID_SHA1;
+         } else {
+             /* Find a suitable hash algorithm based on the NIST recommendation */
+             if (modBytes <= 384) { /* 128, in NIST 800-57, Part 1 */
+                 hashAlgTag = SEC_OID_SHA256;
+             } else if (modBytes <= 960) { /* 192, NIST 800-57, Part 1 */
+                 hashAlgTag = SEC_OID_SHA384;
+             } else {
+                 hashAlgTag = SEC_OID_SHA512;
+             }
++            overWriteHash = PR_TRUE;
+         }
+     }
+ 
++    /* handle the case where the params invalidly encoded SEC_OID_SHA1. This
++     * will force the correct encoding */
++    if ((hashAlgTag == SEC_OID_SHA1) && pssParams.hashAlg) {
++        overWriteHash = PR_TRUE;
++    }
++
+     /* explicitly restrict hashAlg to SHA2 variants */
+     if (hashAlgTag != SEC_OID_SHA1 && hashAlgTag != SEC_OID_SHA224 &&
+         hashAlgTag != SEC_OID_SHA256 && hashAlgTag != SEC_OID_SHA384 &&
+         hashAlgTag != SEC_OID_SHA512) {
+         PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
+         return NULL;
+     }
+ 
+@@ -927,23 +939,24 @@ sec_CreateRSAPSSParameters(PLArenaPool *
+                                     &pssParams.maskAlg->parameters);
+         if (rv != SECSuccess) {
+             return NULL;
+         }
+ 
+         /* Following the recommendation in RFC 4055, assume the hash
+          * algorithm identical to pssParam.hashAlg */
+         if (SECOID_GetAlgorithmTag(&maskHashAlg) != hashAlgTag) {
+-            PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
+-            return NULL;
++            overWriteMask = PR_TRUE;
++        }
++        if (hashAlgTag == SEC_OID_SHA1) {
++            overWriteMask = PR_TRUE;
+         }
+     } else if (defaultSHA1) {
+         if (hashAlgTag != SEC_OID_SHA1) {
+-            PORT_SetError(SEC_ERROR_INVALID_ALGORITHM);
+-            return NULL;
++            overWriteMask = PR_TRUE;
+         }
+     }
+ 
+     hashLength = HASH_ResultLenByOidTag(hashAlgTag);
+ 
+     if (modBytes < hashLength + 2) {
+         PORT_SetError(SEC_ERROR_INVALID_ARGS);
+         return NULL;
+@@ -961,42 +974,38 @@ sec_CreateRSAPSSParameters(PLArenaPool *
+             PORT_SetError(SEC_ERROR_INVALID_ARGS);
+             return NULL;
+         }
+     } else if (defaultSHA1) {
+         saltLength = 20;
+     }
+ 
+     /* Fill in the parameters */
+-    if (pssParams.hashAlg) {
++    if (overWriteHash) {
+         if (hashAlgTag == SEC_OID_SHA1) {
+             /* Omit hashAlg if the the algorithm is SHA-1 (default) */
+             pssParams.hashAlg = NULL;
+-        }
+-    } else {
+-        if (hashAlgTag != SEC_OID_SHA1) {
++        } else {
+             pssParams.hashAlg = PORT_ArenaZAlloc(arena, sizeof(SECAlgorithmID));
+             if (!pssParams.hashAlg) {
+                 return NULL;
+             }
+             rv = SECOID_SetAlgorithmID(arena, pssParams.hashAlg, hashAlgTag,
+                                        NULL);
+             if (rv != SECSuccess) {
+                 return NULL;
+             }
+         }
+     }
+ 
+-    if (pssParams.maskAlg) {
++    if (overWriteMask) {
+         if (hashAlgTag == SEC_OID_SHA1) {
+             /* Omit maskAlg if the the algorithm is SHA-1 (default) */
+             pssParams.maskAlg = NULL;
+-        }
+-    } else {
+-        if (hashAlgTag != SEC_OID_SHA1) {
++        } else {
+             SECItem *hashAlgItem;
+ 
+             PORT_Assert(pssParams.hashAlg != NULL);
+ 
+             hashAlgItem = SEC_ASN1EncodeItem(arena, NULL, pssParams.hashAlg,
+                                              SEC_ASN1_GET(SECOID_AlgorithmIDTemplate));
+             if (!hashAlgItem) {
+                 return NULL;
+@@ -1086,17 +1095,16 @@ SEC_CreateSignatureAlgorithmParameters(P
+                                        const SECItem *params,
+                                        const SECKEYPrivateKey *key)
+ {
+     PORT_SetError(0);
+     switch (signAlgTag) {
+         case SEC_OID_PKCS1_RSA_PSS_SIGNATURE:
+             return SEC_CreateRSAPSSParameters(arena, result,
+                                               hashAlgTag, params, key, NULL);
+-
+         default:
+             if (params == NULL)
+                 return NULL;
+             if (result == NULL)
+                 result = SECITEM_AllocItem(arena, NULL, 0);
+             if (result == NULL) {
+                 return NULL;
+             }
+@@ -1112,16 +1120,19 @@ SEC_CreateVerifyAlgorithmParameters(PLAr
+                                     SECOidTag signAlgTag,
+                                     SECOidTag hashAlgTag,
+                                     const SECItem *params,
+                                     const SECKEYPublicKey *key)
+ {
+     PORT_SetError(0);
+     switch (signAlgTag) {
+         case SEC_OID_PKCS1_RSA_PSS_SIGNATURE:
++            if ((hashAlgTag == SEC_OID_UNKNOWN) && ((params == NULL) || (params->len == 0))){
++                return NULL;
++            }
+             return SEC_CreateRSAPSSParameters(arena, result,
+                                               hashAlgTag, params, NULL, key);
+ 
+         default:
+             if (params == NULL)
+                 return NULL;
+             if (result == NULL)
+                 result = SECITEM_AllocItem(arena, NULL, 0);
+diff --git a/tests/cert/cert.sh b/tests/cert/cert.sh
+--- a/tests/cert/cert.sh
++++ b/tests/cert/cert.sh
+@@ -2234,20 +2234,18 @@ EOF
+   # Signature: RSA-PSS (with conflicting hash algorithm)
+   CERTNAME="TestUser-rsa-pss7"
+ 
+   CU_ACTION="Generate Cert Request for $CERTNAME"
+   CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+   certu -R -d "${PROFILEDIR}" -f "${R_PWFILE}" -z "${R_NOISE_FILE}" --pss -o req  2>&1
+ 
+   CU_ACTION="Sign ${CERTNAME}'s Request"
+-  RETEXPECTED=255
+   certu -C -c "TestCA-rsa-pss" --pss-sign -Z SHA512 -m "${CERTSERIAL}" -v 60 -d "${P_R_CADIR}" \
+         -i req -o "${CERTNAME}.cert" -f "${R_PWFILE}" "$1" 2>&1
+-  RETEXPECTED=0
+ 
+   CERTSERIAL=`expr $CERTSERIAL + 1`
+ 
+   # Subject certificate: RSA-PSS
+   # Issuer certificate: RSA-PSS
+   # Signature: RSA-PSS (with compatible hash algorithm)
+   CERTNAME="TestUser-rsa-pss8"
+ 
+@@ -2345,20 +2343,18 @@ EOF
+   # Signature: RSA-PSS (with conflicting hash algorithm, default parameters)
+   CERTNAME="TestUser-rsa-pss11"
+ 
+   CU_ACTION="Generate Cert Request for $CERTNAME"
+   CU_SUBJECT="CN=$CERTNAME, E=${CERTNAME}@example.com, O=BOGUS NSS, L=Mountain View, ST=California, C=US"
+   certu -R -d "${PROFILEDIR}" -f "${R_PWFILE}" -z "${R_NOISE_FILE}" --pss -o req  2>&1
+ 
+   CU_ACTION="Sign ${CERTNAME}'s Request"
+-  RETEXPECTED=255
+   certu -C -c "TestCA-rsa-pss-sha1" --pss-sign -Z SHA256 -m "${CERTSERIAL}" -v 60 -d "${P_R_CADIR}" \
+         -i req -o "${CERTNAME}.cert" -f "${R_PWFILE}" "$1" 2>&1
+-  RETEXPECTED=0
+ }
+ 
+ cert_test_orphan_key_delete()
+ {
+   CU_ACTION="Create orphan key in serverdir"
+   certu -G -k ec -q nistp256 -f "${R_PWFILE}" -z ${R_NOISE_FILE} -d ${PROFILEDIR}
+   # Let's get the key ID of the first orphan key.
+   # The output of certutil -K (list keys) isn't well formatted.
